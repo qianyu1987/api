@@ -808,12 +808,15 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const identity = await auth.authenticateApiKey(raw)
       const balance = await billing.balance(identity.user.id)
       const total = balance.planMicros + balance.walletMicros
+      const remainingDisplay = formatMicros(total)
+      const remainingNumber = Number(remainingDisplay)
+      // CC Switch's usage contract requires remaining to be a JSON number.
+      // Keep the decimal string and micro-yuan integer alongside it for
+      // clients that need exact monetary arithmetic.
+      const remaining = Number.isFinite(remainingNumber) ? remainingNumber : 0
       const data = {
         planName: balance.planExpiresAt ? '30 天月套餐' : 'Relay 钱包',
-        // Keep the canonical CNY value as a decimal string: clients such as
-        // CC Switch can display it directly without losing precision on a
-        // high balance through a JavaScript Number conversion.
-        remaining: formatMicros(total), remainingDisplay: formatMicros(total), remainingMicros: total.toString(),
+        remaining, remainingDisplay, remainingMicros: total.toString(),
         balance: formatMicros(total), availableBalance: formatMicros(total),
         walletRemaining: formatMicros(balance.walletMicros), walletRemainingMicros: balance.walletMicros.toString(),
         planRemaining: formatMicros(balance.planMicros), planRemainingMicros: balance.planMicros.toString(),

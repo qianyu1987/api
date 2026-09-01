@@ -1,6 +1,6 @@
 # Production Deployment
 
-Release `v1.0.9` serves `https://api.hhtc.top` from `101.35.223.148` without publishing PostgreSQL, Redis, or an API container port. The only host-facing listener is the loopback gateway at `127.0.0.1:18082`.
+Release `v1.0.10` serves `https://api.hhtc.top` from `101.35.223.148` without publishing PostgreSQL, Redis, or an API container port. The only host-facing listener is the loopback gateway at `127.0.0.1:18082`.
 
 ## First Release
 

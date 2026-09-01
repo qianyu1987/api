@@ -12,7 +12,7 @@ const USAGE_SCRIPT_SOURCE = String.raw`({
     var remaining = data.remaining;
     if (typeof remaining === "string") {
       remaining = remaining.trim();
-      // CC Switch validates `remaining` as a JSON number. The relay also
+      // CC Switch validates remaining as a JSON number. The relay also
       // exposes remainingMicros for clients that need exact integer math; the
       // display value here is safely converted only when it is finite.
       if (/^\d+(?:\.\d+)?$/.test(remaining)) {
