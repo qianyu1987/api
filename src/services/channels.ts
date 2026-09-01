@@ -42,6 +42,12 @@ function jsonMap(value: unknown): Record<string, string> {
   }, {})
 }
 
+/** A channel must opt in to each billed model it can serve. */
+export function supportsRequestedModel(channel: Pick<Channel, 'modelMap'>, requestedModel: string): boolean {
+  if (!requestedModel) return true
+  return Object.hasOwn(channel.modelMap, requestedModel) || Object.hasOwn(channel.modelMap, '*')
+}
+
 /**
  * Only transient upstream failures are retried.  A normal client error is
  * returned to the caller so that an invalid request is not sent to every
@@ -137,8 +143,8 @@ export class ChannelService {
   }
 
   async relay(path: string, method: string, headers: Record<string, string>, body: Buffer | undefined, requestedModel: string): Promise<RelayResult> {
-    const channels = await this.list()
-    if (!channels.length) throw new Error('暂无可用上游渠道，请联系管理员')
+    const channels = (await this.list()).filter((channel) => supportsRequestedModel(channel, requestedModel))
+    if (!channels.length) throw new Error(requestedModel ? '当前模型没有已启用上游渠道，请联系管理员配置模型映射' : '暂无可用上游渠道，请联系管理员')
     const attempts: RelayAttempt[] = []
     for (let index = 0; index < channels.length; index += 1) {
       const channel = channels[index]

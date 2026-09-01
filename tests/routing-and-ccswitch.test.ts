@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { buildCcswitchImportLink, ccswitchModel } from '../src/lib/ccswitch.js'
-import { safeRelayError, shouldFailover } from '../src/services/channels.js'
+import { safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -20,6 +20,12 @@ describe('channel failover policy', () => {
     expect(safeRelayError('timeout')).toEqual({
       errorType: 'timeout', errorCode: 'upstream_timeout', errorMessage: '上游请求超时',
     })
+  })
+
+  test('requires explicit model mapping before a channel can receive a billed request', () => {
+    expect(supportsRequestedModel({ modelMap: { 'gpt-5.6-sol': 'gpt-5.6-sol' } }, 'gpt-5.6-sol')).toBe(true)
+    expect(supportsRequestedModel({ modelMap: { 'gpt-5.6-sol': 'gpt-5.6-sol' } }, 'gpt-5.6-terra')).toBe(false)
+    expect(supportsRequestedModel({ modelMap: { '*': 'provider-default' } }, 'gpt-5.6-terra')).toBe(true)
   })
 })
 
