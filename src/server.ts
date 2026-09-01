@@ -824,8 +824,28 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       return { success: true, ...data, data }
     } catch (error) { reply.code(401).send({ error: { message: (error as Error).message, type: 'authentication_error' } }) }
   }
+  const modelCatalog = async (request: any, reply: any) => {
+    reply.header('Cache-Control', 'public, max-age=300')
+    const raw = bearer((request.headers as any).authorization)
+    if (!raw) { reply.code(401).header('WWW-Authenticate', 'Bearer').send({ error: { message: '需要 Bearer API Key', type: 'authentication_error' } }); return }
+    try {
+      await auth.authenticateApiKey(raw)
+      const rows = await db.query<any>(`SELECT DISTINCT key AS model
+        FROM channels c
+        CROSS JOIN LATERAL jsonb_object_keys(c.model_map) AS key
+        JOIN model_prices p ON p.model_pattern = key AND p.active = true
+        WHERE c.enabled = true AND key <> '*'
+        ORDER BY key`)
+      const models = rows.map((row) => ({
+        id: String(row.model), object: 'model', created: 0, owned_by: 'relay-station',
+      }))
+      return { object: 'list', data: models }
+    } catch (error) { reply.code(401).send({ error: { message: (error as Error).message, type: 'authentication_error' } }) }
+  }
   app.get('/v1/account/balance', accountBalance)
   app.get('/account/balance', accountBalance)
+  app.get('/v1/models', modelCatalog)
+  app.get('/models', modelCatalog)
 
   const relayRequest = async (request: any, reply: any, prefix = '/v1') => {
     const rawPath = String((request.raw.url || '').split('?')[0]) || '/'
@@ -1008,7 +1028,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   // root as their endpoint instead of `/v1`. Keep common OpenAI paths working
   // at the root so those providers can be repaired without deleting keys.
   const rootApiRoutes = [
-    '/models', '/models/*', '/chat/completions', '/responses', '/embeddings',
+    '/models/*', '/chat/completions', '/responses', '/embeddings',
     '/moderations', '/images/generations', '/images/edits', '/audio/speech',
     '/audio/transcriptions', '/audio/translations', '/video/generations',
   ]
