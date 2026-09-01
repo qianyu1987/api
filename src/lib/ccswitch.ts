@@ -12,9 +12,13 @@ const USAGE_SCRIPT_SOURCE = String.raw`({
     var remaining = data.remaining;
     if (typeof remaining === "string") {
       remaining = remaining.trim();
-      // Preserve decimal strings from the balance endpoint rather than
-      // converting a potentially large CNY balance through Number.
-      if (!/^\d+(?:\.\d+)?$/.test(remaining)) remaining = null;
+      // CC Switch validates `remaining` as a JSON number. The relay also
+      // exposes remainingMicros for clients that need exact integer math; the
+      // display value here is safely converted only when it is finite.
+      if (/^\d+(?:\.\d+)?$/.test(remaining)) {
+        var numeric = Number(remaining);
+        remaining = isFinite(numeric) ? numeric : null;
+      } else remaining = null;
     } else if (typeof remaining !== "number" || !isFinite(remaining)) {
       remaining = null;
     }

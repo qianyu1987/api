@@ -57,6 +57,7 @@ describe('CC Switch import link', () => {
     expect(parsed.searchParams.get('model')).toBe('gpt-5.5')
     expect(parsed.searchParams.get('usageBaseUrl')).toBe('https://api.hhtc.top/v1')
     expect(usageScript).toContain('{{baseUrl}}/account/balance')
+    expect(usageScript).toContain('remaining = isFinite(numeric) ? numeric : null')
     expect(usageScript).not.toContain(secret)
     expect(spies.every((spy) => spy.mock.calls.length === 0)).toBe(true)
   })

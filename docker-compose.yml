@@ -9,7 +9,7 @@ x-app-environment: &app-environment
   REDIS_URL: redis://redis:6379
 
 x-app-service: &app-service
-  image: relay-station:${RELAY_IMAGE_TAG:-v1.0.8}
+  image: relay-station:${RELAY_IMAGE_TAG:-v1.0.9}
   build:
     context: .
     target: runtime
