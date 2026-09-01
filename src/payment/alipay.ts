@@ -53,9 +53,9 @@ function isHttpOk(response: Response): boolean {
   return typeof response.ok === 'boolean' ? response.ok : status >= 200 && status < 300
 }
 
-function canonicalParams(params: Record<string, unknown>, omitSignType = false): string {
+function canonicalParams(params: Record<string, unknown>): string {
   return Object.keys(params)
-    .filter((key) => key !== 'sign' && (!omitSignType || key !== 'sign_type') && params[key] !== undefined && params[key] !== null && String(params[key]) !== '')
+    .filter((key) => key !== 'sign' && key !== 'sign_type' && params[key] !== undefined && params[key] !== null && String(params[key]) !== '')
     .sort()
     .map((key) => `${key}=${String(params[key])}`)
     .join('&')
@@ -63,12 +63,10 @@ function canonicalParams(params: Record<string, unknown>, omitSignType = false):
 
 /** Canonical source used by Alipay RSA2 signatures (exported for tests/audits). */
 export function buildAlipaySignContent(params: Record<string, unknown>): string {
-  return canonicalParams(params, true)
+  return canonicalParams(params)
 }
 
 function signParams(params: Record<string, unknown>, privateKey: string): string {
-  // Unlike asynchronous notifications, API requests include sign_type in the
-  // RSA2 source string. Omitting it yields Alipay's "验签出错" response.
   return createSign('RSA-SHA256').update(canonicalParams(params)).sign(privateKey, 'base64')
 }
 

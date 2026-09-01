@@ -126,7 +126,7 @@ describe('Alipay callback verification', () => {
 })
 
 describe('Alipay native order signing', () => {
-  test('includes sign_type in the outbound RSA2 signature', async () => {
+  test('excludes sign_type from the outbound RSA2 signature', async () => {
     let submitted: Record<string, string> | undefined
     const gateway = new AlipayPaymentGateway(paymentConfig(), {
       alipayPrivateKey: privateKey,
@@ -144,11 +144,17 @@ describe('Alipay native order signing', () => {
     const params = submitted!
     expect(params.sign_type).toBe('RSA2')
     const source = Object.keys(params)
-      .filter((key) => key !== 'sign' && params[key] !== undefined && params[key] !== '')
+      .filter((key) => key !== 'sign' && key !== 'sign_type' && params[key] !== undefined && params[key] !== '')
       .sort()
       .map((key) => `${key}=${params[key]}`)
       .join('&')
     expect(createVerify('RSA-SHA256').update(source).verify(publicKey, params.sign, 'base64')).toBe(true)
+    const invalidSource = [...Object.keys(params)
+      .filter((key) => key !== 'sign' && params[key] !== undefined && params[key] !== '')
+      .sort()
+      .map((key) => `${key}=${params[key]}`)]
+      .join('&')
+    expect(createVerify('RSA-SHA256').update(invalidSource).verify(publicKey, params.sign, 'base64')).toBe(false)
   })
 })
 
