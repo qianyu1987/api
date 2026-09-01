@@ -89,6 +89,10 @@ CREATE TABLE IF NOT EXISTS users (
   CHECK (role IN ('user', 'admin')),
   CHECK (status IN ('active', 'suspended', 'disabled'))
 );
+-- Existing v1.0.3 installations have an already-created users table. Add the
+-- v1.0.5 fields before any index references them.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_ci_unique ON users (lower(username));
 CREATE UNIQUE INDEX IF NOT EXISTS users_invite_code_unique ON users (invite_code);
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_ci_unique ON users (lower(email)) WHERE email IS NOT NULL;
@@ -789,9 +793,6 @@ ON CONFLICT (key) DO NOTHING;
 -- guards makes a partially initialized database recoverable without dropping
 -- any immutable accounting history.
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS encrypted_key TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
-CREATE UNIQUE INDEX IF NOT EXISTS users_email_ci_unique ON users (lower(email)) WHERE email IS NOT NULL;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_name_snapshot TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_quota_micros BIGINT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_duration_days SMALLINT;
