@@ -19,6 +19,16 @@ export type PaymentConfig = {
   }
 }
 
+export type SmtpConfig = {
+  host: string
+  port: number
+  secure: boolean
+  username: string
+  password: string
+  from: string
+  fromName: string
+}
+
 export type AppConfig = {
   env: 'development' | 'test' | 'production'
   host: string
@@ -37,6 +47,7 @@ export type AppConfig = {
   defaultAffiliateRateBps: number
   chatgptDownloadUrl: string
   ccswitchDownloadUrl: string
+  smtp: SmtpConfig
   payments: PaymentConfig
 }
 
@@ -116,6 +127,15 @@ export function loadConfig(): AppConfig {
     defaultAffiliateRateBps: nonNegativeInt('DEFAULT_AFFILIATE_RATE_BPS', 1000),
     chatgptDownloadUrl: text('CHATGPT_DOWNLOAD_URL', 'https://chatgpt.com/download/'),
     ccswitchDownloadUrl: text('CCSWITCH_DOWNLOAD_URL', 'https://github.com/farion1231/cc-switch/releases/latest'),
+    smtp: {
+      host: text('SMTP_HOST'),
+      port: positiveInt('SMTP_PORT', 465),
+      secure: text('SMTP_SECURE', 'true').toLowerCase() !== 'false',
+      username: text('SMTP_USERNAME'),
+      password: text('SMTP_PASSWORD'),
+      from: text('SMTP_FROM'),
+      fromName: text('SMTP_FROM_NAME', 'GPT TOKEN'),
+    },
     payments: {
       wechat: {
         appId: text('WECHAT_APP_ID'),

@@ -11,6 +11,9 @@ export type PriceSnapshot = TokenRates & {
   sourceId?: string | null
   routePattern?: string | null
   httpMethod?: string | null
+  priceSource?: string | null
+  priceEffectiveAt?: string | null
+  fxRateCnyMicros?: bigint | null
 }
 
 export type PriceContext = {
@@ -28,6 +31,9 @@ export type StoredPriceSnapshot = {
   modelPattern: string
   routePattern: string | null
   httpMethod: string | null
+  priceSource: string | null
+  priceEffectiveAt: string | null
+  fxRateCnyMicros: string | null
   rates: {
     inputSellMicrosPerMillion: string
     outputSellMicrosPerMillion: string
@@ -171,6 +177,36 @@ function cleanText(value: unknown, maxLength: number): string | null {
   return text ? text.slice(0, maxLength) : null
 }
 
+function payloadValue(payload: Record<string, unknown>, path: string): unknown {
+  return path.split('.').filter(Boolean).reduce<unknown>((current, part) => (
+    current && typeof current === 'object' && !Array.isArray(current) ? (current as Record<string, unknown>)[part] : undefined
+  ), payload)
+}
+
+function selectorMatches(selectors: unknown, payload: Record<string, unknown>): boolean {
+  if (!selectors || typeof selectors !== 'object' || Array.isArray(selectors)) return true
+  return Object.entries(selectors as Record<string, unknown>).every(([path, expected]) => {
+    const actual = payloadValue(payload, path)
+    return Array.isArray(expected)
+      ? expected.some((entry) => String(entry) === String(actual))
+      : String(expected) === String(actual)
+  })
+}
+
+function fixedUnits(row: any, payload: Record<string, unknown>): bigint {
+  const mode = String(row.unit_mode || 'request')
+  if (mode === 'request') return 1n
+  const path = String(row.unit_path || '').trim()
+  const value = Number(payloadValue(payload, path))
+  if (!path || !Number.isFinite(value) || value <= 0) {
+    throw Object.assign(new Error('固定接口缺少可计费规格，请补充请求参数或联系管理员配置价格'), { statusCode: 422 })
+  }
+  if (mode === 'count' && !Number.isInteger(value)) {
+    throw Object.assign(new Error('固定接口计费数量必须为正整数'), { statusCode: 422 })
+  }
+  return BigInt(Math.max(1, Math.min(100_000, Math.ceil(value))))
+}
+
 function usageFromStored(value: any): UsageTokens {
   return {
     input: bigintValue(value?.input),
@@ -198,6 +234,9 @@ export function serializePriceSnapshot(price: PriceSnapshot, estimatedUsage: Usa
     modelPattern: price.modelPattern,
     routePattern: price.routePattern || null,
     httpMethod: price.httpMethod || null,
+    priceSource: price.priceSource || null,
+    priceEffectiveAt: price.priceEffectiveAt || null,
+    fxRateCnyMicros: price.fxRateCnyMicros?.toString() || null,
     rates: {
       inputSellMicrosPerMillion: price.inputSellMicrosPerMillion.toString(),
       outputSellMicrosPerMillion: price.outputSellMicrosPerMillion.toString(),
@@ -233,6 +272,11 @@ export function deserializePriceSnapshot(value: unknown, fallback?: PriceSnapsho
     modelPattern: cleanText(snapshot.modelPattern, 256) || fallback?.modelPattern || '*',
     routePattern: cleanText(snapshot.routePattern, 2048) || fallback?.routePattern || null,
     httpMethod: cleanText(snapshot.httpMethod, 16) || fallback?.httpMethod || null,
+    priceSource: cleanText(snapshot.priceSource, 512) || fallback?.priceSource || null,
+    priceEffectiveAt: cleanText(snapshot.priceEffectiveAt, 64) || fallback?.priceEffectiveAt || null,
+    fxRateCnyMicros: snapshot.fxRateCnyMicros === null || snapshot.fxRateCnyMicros === undefined
+      ? fallback?.fxRateCnyMicros || null
+      : bigintValue(snapshot.fxRateCnyMicros),
     inputSellMicrosPerMillion: bigintValue(rates.inputSellMicrosPerMillion ?? fallback?.inputSellMicrosPerMillion),
     outputSellMicrosPerMillion: bigintValue(rates.outputSellMicrosPerMillion ?? fallback?.outputSellMicrosPerMillion),
     cacheSellMicrosPerMillion: bigintValue(rates.cacheSellMicrosPerMillion ?? fallback?.cacheSellMicrosPerMillion),
@@ -305,10 +349,13 @@ export class BillingService {
       outputCostMicrosPerMillion: bigintValue(row.output_cost_micros_per_million ?? row.output_cost_micros),
       cacheCostMicrosPerMillion: bigintValue(row.cache_cost_micros_per_million ?? row.cache_cost_micros),
       fixedSellMicros: bigintValue(row.fixed_sell_micros), fixedCostMicros: bigintValue(row.fixed_cost_micros),
+      priceSource: row.price_source || null,
+      priceEffectiveAt: row.price_effective_at ? new Date(row.price_effective_at).toISOString() : null,
+      fxRateCnyMicros: row.fx_rate_cny_micros == null ? null : bigintValue(row.fx_rate_cny_micros),
     }
   }
 
-  async fixedPriceFor(method: string, path: string, model = ''): Promise<PriceSnapshot | null> {
+  async fixedPriceFor(method: string, path: string, model = '', payload: Record<string, unknown> = {}): Promise<PriceSnapshot | null> {
     const normalizedMethod = requestMethod(method)
     const normalizedPath = requestPath(path)
     const rows = await this.db.query<any>(
@@ -320,23 +367,28 @@ export class BillingService {
                 length(COALESCE(requested_model, '')) DESC, id`,
       [normalizedMethod, model],
     )
-    const row = rows.find((candidate) => {
+    const routeCandidates = rows.filter((candidate) => {
       const routeOk = routeMatches(String(candidate.path_pattern), normalizedPath)
       const configuredModel = candidate.requested_model == null ? null : String(candidate.requested_model)
       return routeOk && (!configuredModel || modelMatches(configuredModel, model))
     })
+    const row = routeCandidates.find((candidate) => selectorMatches(candidate.selectors, payload))
+    if (!row && routeCandidates.length) {
+      throw Object.assign(new Error('该接口规格尚未配置价格，已拒绝转发以避免免费或亏损调用'), { statusCode: 422 })
+    }
     if (!row) return null
+    const units = fixedUnits(row, payload)
     return {
       billingMode: 'fixed', sourceId: String(row.id), modelPattern: row.requested_model || model || '*',
       routePattern: row.path_pattern, httpMethod: row.http_method,
       inputSellMicrosPerMillion: 0n, outputSellMicrosPerMillion: 0n, cacheSellMicrosPerMillion: 0n,
       inputCostMicrosPerMillion: 0n, outputCostMicrosPerMillion: 0n, cacheCostMicrosPerMillion: 0n,
-      fixedSellMicros: bigintValue(row.sell_micros), fixedCostMicros: bigintValue(row.cost_micros),
+      fixedSellMicros: bigintValue(row.sell_micros) * units, fixedCostMicros: bigintValue(row.cost_micros) * units,
     }
   }
 
-  async priceForRequest(method: string, path: string, model: string): Promise<PriceSnapshot | null> {
-    const fixed = await this.fixedPriceFor(method, path, model)
+  async priceForRequest(method: string, path: string, model: string, payload: Record<string, unknown> = {}): Promise<PriceSnapshot | null> {
+    const fixed = await this.fixedPriceFor(method, path, model, payload)
     if (fixed) return fixed
     return model ? this.priceFor(model) : null
   }

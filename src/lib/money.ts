@@ -46,6 +46,25 @@ export function formatMicros(micros: bigint): string {
   return `${sign}${yuan.toString()}${decimals ? `.${decimals}` : ''}`
 }
 
+/** Converts a non-negative yuan string to micro-yuan without float rounding. */
+export function yuanToMicros(value: string | number | bigint): bigint {
+  const text = String(value).trim()
+  if (!/^\d+(?:\.\d{1,6})?$/.test(text)) throw new Error('金额必须是最多 6 位小数的人民币金额')
+  const [whole, fraction = ''] = text.split('.')
+  return BigInt(whole) * MICROS_PER_YUAN + BigInt(fraction.padEnd(6, '0'))
+}
+
+/**
+ * Calculates the selling price for a target gross margin. For example, a
+ * 80% gross margin means sell = cost / 0.20. The result always rounds up so
+ * the configured price cannot slip below the requested margin.
+ */
+export function sellForGrossMargin(costMicros: bigint, marginBps: bigint): bigint {
+  if (costMicros <= 0n || marginBps < 0n || marginBps >= 10_000n) throw new Error('成本或毛利率无效')
+  const denominator = 10_000n - marginBps
+  return ceilDiv(costMicros * 10_000n, denominator)
+}
+
 export function tokenCharge(tokens: bigint, microsPerMillion: bigint): bigint {
   return ceilDiv(tokens * microsPerMillion, TOKENS_PER_MILLION)
 }

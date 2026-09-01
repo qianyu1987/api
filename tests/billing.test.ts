@@ -47,4 +47,26 @@ describe('billing invariants', () => {
       overageMicros: 0n,
     })
   })
+
+  test('uses a matched fixed-route specification and rejects an unpriced specification', async () => {
+    const db = {
+      query: async () => [{
+        id: 'fixed-price-1', http_method: 'POST', path_pattern: '/v1/images/generations', requested_model: 'gpt-image-1',
+        selectors: { size: '1024x1024', quality: ['standard', 'hd'] }, unit_mode: 'count', unit_path: 'n',
+        sell_micros: '5000000', cost_micros: '1000000',
+      }],
+    }
+    const { BillingService } = await import('../src/services/billing.js')
+    const billing = new BillingService(db as any)
+
+    await expect(billing.fixedPriceFor('POST', '/v1/images/generations', 'gpt-image-1', {
+      size: '1024x1024', quality: 'hd', n: 2,
+    })).resolves.toMatchObject({
+      billingMode: 'fixed', fixedSellMicros: 10_000_000n, fixedCostMicros: 2_000_000n,
+    })
+
+    await expect(billing.fixedPriceFor('POST', '/v1/images/generations', 'gpt-image-1', {
+      size: '1024x1024', quality: 'medium', n: 1,
+    })).rejects.toThrow('规格尚未配置价格')
+  })
 })

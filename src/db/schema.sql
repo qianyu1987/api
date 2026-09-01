@@ -69,6 +69,8 @@ $$;
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   username TEXT NOT NULL,
+  email TEXT,
+  email_verified_at TIMESTAMPTZ,
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
   status TEXT NOT NULL DEFAULT 'active',
@@ -80,6 +82,7 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   disabled_at TIMESTAMPTZ,
   CHECK (char_length(trim(username)) BETWEEN 3 AND 128),
+  CHECK (email IS NULL OR email = lower(email)),
   CHECK (char_length(password_hash) >= 32),
   CHECK (char_length(invite_code) BETWEEN 6 AND 64),
   CHECK (invite_code = upper(invite_code)),
@@ -88,7 +91,65 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_ci_unique ON users (lower(username));
 CREATE UNIQUE INDEX IF NOT EXISTS users_invite_code_unique ON users (invite_code);
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_ci_unique ON users (lower(email)) WHERE email IS NOT NULL;
 CREATE INDEX IF NOT EXISTS users_role_status_cursor_idx ON users (role, status, created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS email_verification_challenges (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  attempts SMALLINT NOT NULL DEFAULT 0,
+  max_attempts SMALLINT NOT NULL DEFAULT 6,
+  expires_at TIMESTAMPTZ NOT NULL,
+  consumed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (purpose IN ('registration')),
+  CHECK (email = lower(email)),
+  CHECK (char_length(code_hash) = 64),
+  CHECK (attempts >= 0 AND attempts <= max_attempts),
+  CHECK (max_attempts BETWEEN 1 AND 12)
+);
+CREATE INDEX IF NOT EXISTS email_verification_active_idx
+  ON email_verification_challenges(email, purpose, created_at DESC)
+  WHERE consumed_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS email_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  payload_encrypted TEXT NOT NULL,
+  dedupe_key TEXT,
+  status TEXT NOT NULL DEFAULT 'queued',
+  attempts SMALLINT NOT NULL DEFAULT 0,
+  available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  sent_at TIMESTAMPTZ,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (kind IN ('low_balance')),
+  CHECK (status IN ('queued', 'processing', 'sent', 'failed')),
+  CHECK (recipient = lower(recipient)),
+  CHECK (attempts >= 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS email_jobs_dedupe_unique
+  ON email_jobs(dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS email_jobs_delivery_idx
+  ON email_jobs(status, available_at, created_at);
+
+CREATE TABLE IF NOT EXISTS user_consents (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  document_key TEXT NOT NULL,
+  document_version TEXT NOT NULL,
+  accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (document_key IN ('login_terms', 'service_terms', 'privacy_policy')),
+  CHECK (char_length(document_version) BETWEEN 1 AND 64)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS user_consents_once_per_version
+  ON user_consents(user_id, document_key, document_version);
+CREATE INDEX IF NOT EXISTS user_consents_user_cursor_idx
+  ON user_consents(user_id, accepted_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS invitation_bindings (
   invitee_user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE RESTRICT,
@@ -126,6 +187,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS api_keys_hash_unique ON api_keys (key_hash);
 CREATE INDEX IF NOT EXISTS api_keys_user_cursor_idx ON api_keys (user_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS api_keys_user_status_idx ON api_keys (user_id, status, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS api_keys_prefix_idx ON api_keys (key_prefix);
+
+CREATE TABLE IF NOT EXISTS api_key_reveal_audits (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  key_id UUID NOT NULL REFERENCES api_keys(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (user_id IS NOT NULL AND key_id IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS api_key_reveal_audits_user_cursor_idx
+  ON api_key_reveal_audits(user_id, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS wallets (
   user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE RESTRICT,
@@ -259,6 +330,9 @@ CREATE TABLE IF NOT EXISTS model_prices (
   input_sell_micros_per_million BIGINT,
   output_sell_micros_per_million BIGINT,
   cache_sell_micros_per_million BIGINT,
+  price_source TEXT,
+  price_effective_at TIMESTAMPTZ,
+  fx_rate_cny_micros BIGINT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (char_length(trim(model_pattern)) BETWEEN 1 AND 256),
@@ -271,6 +345,7 @@ CREATE TABLE IF NOT EXISTS model_prices (
   CHECK (input_sell_micros_per_million IS NULL OR input_sell_micros_per_million >= 0),
   CHECK (output_sell_micros_per_million IS NULL OR output_sell_micros_per_million >= 0),
   CHECK (cache_sell_micros_per_million IS NULL OR cache_sell_micros_per_million >= 0)
+  ,CHECK (fx_rate_cny_micros IS NULL OR fx_rate_cny_micros > 0)
 );
 CREATE INDEX IF NOT EXISTS model_prices_active_lookup_idx ON model_prices (active, model_pattern);
 CREATE UNIQUE INDEX IF NOT EXISTS model_prices_pattern_unique ON model_prices (model_pattern);
@@ -284,6 +359,9 @@ CREATE TABLE IF NOT EXISTS fixed_route_prices (
   sell_micros BIGINT NOT NULL DEFAULT 0,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
   match_priority INTEGER NOT NULL DEFAULT 100,
+  selectors JSONB NOT NULL DEFAULT '{}'::jsonb,
+  unit_path TEXT,
+  unit_mode TEXT NOT NULL DEFAULT 'request',
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (http_method IN ('ANY', 'GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS')),
@@ -291,6 +369,7 @@ CREATE TABLE IF NOT EXISTS fixed_route_prices (
   CHECK (requested_model IS NULL OR char_length(trim(requested_model)) BETWEEN 1 AND 256),
   CHECK (cost_micros >= 0 AND sell_micros >= 0),
   CHECK (match_priority >= 0)
+  ,CHECK (unit_mode IN ('request', 'count', 'seconds'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS fixed_route_prices_match_unique
   ON fixed_route_prices (http_method, path_pattern, (COALESCE(requested_model, '')));
@@ -700,13 +779,19 @@ $$;
 INSERT INTO app_settings (key, setting_key, value, value_json)
 VALUES
   ('affiliate_enabled', 'affiliate.enabled', 'true', 'true'::jsonb),
-  ('affiliate_rate_bps', 'affiliate.rate_bps', '1000', '1000'::jsonb)
+  ('affiliate_rate_bps', 'affiliate.rate_bps', '1000', '1000'::jsonb),
+  ('site_name', 'site.name', 'GPT TOKEN', to_jsonb('GPT TOKEN'::text)),
+  ('site_title', 'site.title', 'GPT TOKEN | OpenAI 兼容 API 控制台', to_jsonb('GPT TOKEN | OpenAI 兼容 API 控制台'::text)),
+  ('site_logo_url', 'site.logo_url', '/assets/gpt-token-mark-192.png', to_jsonb('/assets/gpt-token-mark-192.png'::text))
 ON CONFLICT (key) DO NOTHING;
 
 -- The service is shipped as a fresh surface, but keeping these additive
 -- guards makes a partially initialized database recoverable without dropping
 -- any immutable accounting history.
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS encrypted_key TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS users_email_ci_unique ON users (lower(email)) WHERE email IS NOT NULL;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_name_snapshot TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_quota_micros BIGINT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_duration_days SMALLINT;
@@ -748,6 +833,12 @@ ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS api_key_id UUID REFERE
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS estimated_charge_micros BIGINT;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS actual_micros BIGINT;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS plan_settled_micros BIGINT;
+ALTER TABLE fixed_route_prices ADD COLUMN IF NOT EXISTS selectors JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE fixed_route_prices ADD COLUMN IF NOT EXISTS unit_path TEXT;
+ALTER TABLE fixed_route_prices ADD COLUMN IF NOT EXISTS unit_mode TEXT NOT NULL DEFAULT 'request';
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS price_source TEXT;
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS price_effective_at TIMESTAMPTZ;
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS fx_rate_cny_micros BIGINT;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS wallet_settled_micros BIGINT;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS pricing_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ NOT NULL DEFAULT now();

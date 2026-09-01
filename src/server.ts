@@ -19,8 +19,9 @@ import { BillingService, type PriceSnapshot } from './services/billing.js'
 import { AffiliateService } from './services/affiliate.js'
 import { ChannelService } from './services/channels.js'
 import { OrderService } from './services/orders.js'
+import { MailService } from './services/mail.js'
 import { buildCcswitchImportLink } from './lib/ccswitch.js'
-import { calculateUsageMoney, estimatedRequestTokens, formatMicros } from './lib/money.js'
+import { calculateUsageMoney, estimatedRequestTokens, formatMicros, sellForGrossMargin, yuanToMicros } from './lib/money.js'
 import { parseSseUsage, usageFromPayload } from './lib/usage.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -35,6 +36,27 @@ export type RelayApp = {
   affiliate: AffiliateService
   channels: ChannelService
   orders: OrderService
+  mail: MailService
+}
+
+const OPENAI_PRICING_SOURCE = 'https://developers.openai.com/api/docs/pricing'
+const OPENAI_FX_MICROS = 7_200_000n
+const OPENAI_TOKEN_PRICES: Record<string, readonly [number, number, number]> = {
+  // OpenAI official standard prices per 1M tokens, captured 2026-09-01.
+  // Values are input, output, and cached-input USD respectively.
+  'gpt-5.6-sol': [4, 20, 0.4],
+  'gpt-5.6-terra': [2, 12, 0.2],
+  'gpt-5.6-luna': [0.2, 1.2, 0.02],
+  'gpt-5.3-codex': [1.75, 14, 0.175],
+  'chat-latest': [5, 30, 0.5],
+  'gpt-5': [1.25, 10, 0.125],
+  'gpt-5-mini': [0.25, 2, 0.025],
+  'gpt-5-nano': [0.05, 0.4, 0.005],
+  'gpt-4.1': [2, 8, 0.5],
+  'gpt-4.1-mini': [0.4, 1.6, 0.1],
+  'gpt-4.1-nano': [0.1, 0.4, 0.025],
+  'gpt-4o': [2.5, 10, 1.25],
+  'gpt-4o-mini': [0.15, 0.6, 0.075],
 }
 
 function jsonBody(body: unknown): Buffer | undefined {
@@ -109,6 +131,22 @@ function moneyInput(value: unknown, name: string, allowZero = true): string {
   return amount.toString()
 }
 
+function yuanInput(value: unknown, name: string, allowZero = true): string {
+  let micros: bigint
+  try { micros = yuanToMicros(String(value ?? '')) } catch { throw new Error(`${name}必须是最多 6 位小数的人民币金额`) }
+  if (micros < 0n || (!allowZero && micros === 0n)) throw new Error(`${name}无效`)
+  return micros.toString()
+}
+
+function grossMarginSell(costMicros: bigint, marginBps: bigint): bigint {
+  return sellForGrossMargin(costMicros, marginBps)
+}
+
+function officialCostMicros(usdPerMillion: number): bigint {
+  const scaledUsd = BigInt(Math.round(usdPerMillion * 1_000_000))
+  return (scaledUsd * OPENAI_FX_MICROS + 999_999n) / 1_000_000n
+}
+
 function cleanText(value: unknown, name: string, max = 256): string {
   const text = String(value ?? '').trim()
   if (!text || text.length > max) throw new Error(`${name}无效`)
@@ -181,6 +219,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   const affiliate = new AffiliateService(db)
   const channels = new ChannelService(db, config)
   const orders = new OrderService(db, affiliate, config)
+  const mail = new MailService(db, config)
 
   await app.register(sensible)
   await app.register(cookie, { secret: config.cookieSecret })
@@ -221,10 +260,10 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     try {
       await request.jwtVerify()
       const payload = request.user as any
-      const user = await db.one<any>(`SELECT id, username, role, invite_code, created_at, disabled_at, status
+      const user = await db.one<any>(`SELECT id, username, email, email_verified_at, role, invite_code, created_at, disabled_at, status
         FROM users WHERE id = $1`, [payload.sub])
       if (!user || user.disabled_at || user.status !== 'active') throw new Error('登录已失效')
-      return { id: String(user.id), username: user.username, role: user.role === 'admin' ? 'admin' : 'user', inviteCode: user.invite_code, createdAt: new Date(user.created_at).toISOString() }
+      return { id: String(user.id), username: user.username, email: user.email || null, emailVerified: Boolean(user.email_verified_at), role: user.role === 'admin' ? 'admin' : 'user', inviteCode: user.invite_code, createdAt: new Date(user.created_at).toISOString() }
     } catch {
       reply.code(401).send({ error: { message: '请先登录', type: 'authentication_error' } })
       return null
@@ -239,11 +278,39 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.get('/healthz', async () => ({ ok: true, service: 'relay-station' }))
   app.get('/', async (_request, reply) => reply.sendFile('index.html'))
   app.get('/register', async (_request, reply) => reply.sendFile('index.html'))
+  app.get('/terms', async (_request, reply) => reply.sendFile('terms.html'))
+  app.get('/privacy', async (_request, reply) => reply.sendFile('privacy.html'))
+  app.get('/api/public/site', async () => {
+    const settings = await db.query<any>(`SELECT key,value FROM app_settings WHERE key IN ('site_name','site_title','site_logo_url')`)
+    const values = Object.fromEntries(settings.map((item) => [item.key, item.value]))
+    return {
+      name: values.site_name || 'GPT TOKEN',
+      title: values.site_title || 'GPT TOKEN | OpenAI 兼容 API 控制台',
+      logoUrl: values.site_logo_url || '/assets/gpt-token-mark-192.png',
+    }
+  })
+
+  app.post('/api/auth/email-verification', { config: { rateLimit: { max: 3, timeWindow: '10 minutes' } } }, async (request, reply) => {
+    try {
+      if (!mail.configured) throw Object.assign(new Error('邮件服务尚未配置，请稍后再试'), { statusCode: 503 })
+      const issued = await auth.issueRegistrationCode(String((request.body as any)?.email || ''))
+      try {
+        await mail.sendRegistrationCode(issued.email, issued.code)
+      } catch (error) {
+        await db.query(`UPDATE email_verification_challenges SET consumed_at=now() WHERE email=$1 AND purpose='registration' AND consumed_at IS NULL`, [issued.email])
+        throw error
+      }
+      return { ok: true, expiresAt: issued.expiresAt }
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
 
   app.post('/api/auth/register', { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } }, async (request, reply) => {
     try {
       const body = (request.body || {}) as any
-      const user = await auth.register(String(body.username || ''), String(body.password || ''), body.inviteCode || body.invite)
+      const user = await auth.register(String(body.username || ''), String(body.password || ''), {
+        email: String(body.email || ''), verificationCode: String(body.verificationCode || ''),
+        inviteCode: body.inviteCode || body.invite, termsAccepted: body.termsAccepted === true,
+      })
       const token = app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: '7d' })
       reply.setCookie('relay_session', token, { httpOnly: true, sameSite: 'lax', secure: config.env === 'production', path: '/', maxAge: 7 * 86400 })
       return { user }
@@ -265,7 +332,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.get('/api/me/overview', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
     const balance = await billing.balance(user.id)
-    return { user, balance: BillingService.formatBalance(balance), apiBaseUrl: `${config.publicBaseUrl}/v1`, downloads: { chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl } }
+    return { user, balance: BillingService.formatBalance(balance), apiBaseUrl: `${config.publicBaseUrl}/v1`, downloads: { chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl }, mailConfigured: mail.configured }
   })
   app.get('/api/me/balance', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
@@ -276,12 +343,24 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const user = await requireSession(request, reply); if (!user) return
     try { return { key: await auth.createApiKey(user.id, String((request.body as any)?.name || '')) } } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
+  app.post('/api/me/keys/:id/reveal', { config: { rateLimit: { max: 5, timeWindow: '10 minutes' } } }, async (request, reply) => {
+    const user = await requireSession(request, reply); if (!user) return
+    reply.header('Cache-Control', 'no-store').header('Referrer-Policy', 'no-referrer').header('X-Content-Type-Options', 'nosniff')
+    try {
+      const key = await auth.revealApiKey(user.id, String((request.params as any).id), String((request.body as any)?.password || ''))
+      await db.query('INSERT INTO api_key_reveal_audits(user_id,key_id) VALUES($1,$2)', [user.id, key.id])
+      return { id: key.id, name: key.name, key: key.rawKey }
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
   app.delete('/api/me/keys/:id', async (request, reply) => { const user = await requireSession(request, reply); if (!user) return; await auth.revokeApiKey(user.id, String((request.params as any).id)); return { ok: true } })
   app.post('/api/me/keys/:id/ccswitch', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
     reply.header('Cache-Control', 'no-store').header('Referrer-Policy', 'no-referrer').header('X-Content-Type-Options', 'nosniff').header('Content-Type', 'application/json')
     try {
       const key = await auth.getApiKeyForImport(user.id, String((request.params as any).id))
+      // Keep an audit trail for every explicit decryption path without ever
+      // storing the API key or generated deep link in PostgreSQL or logs.
+      await db.query('INSERT INTO api_key_reveal_audits(user_id,key_id) VALUES($1,$2)', [user.id, key.id])
       return {
         link: buildCcswitchImportLink({
           apiKey: key.rawKey,
@@ -394,7 +473,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       created = await orders.create(user.id, { kind, amountMicros, planId, paymentMethod: method })
       const gateway = await optionalPaymentGateway(config)
       if (!gateway) throw Object.assign(new Error('支付渠道尚未配置'), { statusCode: 503 })
-      const native = await gateway.createNativeOrder({ orderId: created.orderNo, description: kind === 'subscription' ? 'Relay 月套餐' : 'Relay 钱包充值', amountMicros: created.amountMicros.toString(), paymentMethod: method, expiresAt: created.expiresAt })
+      const native = await gateway.createNativeOrder({ orderId: created.orderNo, description: kind === 'subscription' ? 'GPT TOKEN 月套餐' : 'GPT TOKEN 钱包充值', amountMicros: created.amountMicros.toString(), paymentMethod: method, expiresAt: created.expiresAt })
       await orders.attachNativePayment(created.id, { providerOrderId: native.providerOrderId, codeUrl: native.codeUrl })
       let qrImage: string | undefined
       try {
@@ -461,22 +540,27 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     try {
       const b = (request.body || {}) as any
       const pattern = cleanText(b.modelPattern || '*', '模型匹配', 256)
+      const value = (yuanName: string, microsName: string, label: string) => (
+        b[yuanName] !== undefined ? yuanInput(b[yuanName], label) : moneyInput(b[microsName] ?? 0, label)
+      )
       const values = [
         pattern,
-        moneyInput(b.inputCostMicrosPerMillion ?? b.inputCostMicros ?? 0, '输入成本'),
-        moneyInput(b.outputCostMicrosPerMillion ?? b.outputCostMicros ?? 0, '输出成本'),
-        moneyInput(b.cacheCostMicrosPerMillion ?? b.cacheCostMicros ?? 0, '缓存成本'),
-        moneyInput(b.inputSellMicrosPerMillion ?? b.inputSellMicros ?? 0, '输入售价'),
-        moneyInput(b.outputSellMicrosPerMillion ?? b.outputSellMicros ?? 0, '输出售价'),
-        moneyInput(b.cacheSellMicrosPerMillion ?? b.cacheSellMicros ?? 0, '缓存售价'),
+        value('inputCostYuanPerMillion', 'inputCostMicrosPerMillion', '输入成本'),
+        value('outputCostYuanPerMillion', 'outputCostMicrosPerMillion', '输出成本'),
+        value('cacheCostYuanPerMillion', 'cacheCostMicrosPerMillion', '缓存成本'),
+        value('inputSellYuanPerMillion', 'inputSellMicrosPerMillion', '输入售价'),
+        value('outputSellYuanPerMillion', 'outputSellMicrosPerMillion', '输出售价'),
+        value('cacheSellYuanPerMillion', 'cacheSellMicrosPerMillion', '缓存售价'),
         moneyInput(b.fixedCostMicros ?? 0, '固定成本'), moneyInput(b.fixedSellMicros ?? 0, '固定售价'), b.active !== false,
+        String(b.priceSource || 'manual').slice(0, 512), b.priceEffectiveAt ? new Date(String(b.priceEffectiveAt)) : new Date(), b.fxRateMicros ? moneyInput(b.fxRateMicros, '汇率') : null,
       ]
       return await db.one<any>(`INSERT INTO model_prices(
         model_pattern,input_cost_micros,output_cost_micros,cache_cost_micros,
         input_sell_micros,output_sell_micros,cache_sell_micros,fixed_cost_micros,fixed_sell_micros,active,
         input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,
-        input_sell_micros_per_million,output_sell_micros_per_million,cache_sell_micros_per_million)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$2,$3,$4,$5,$6,$7)
+        input_sell_micros_per_million,output_sell_micros_per_million,cache_sell_micros_per_million,
+        price_source,price_effective_at,fx_rate_cny_micros)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$2,$3,$4,$5,$6,$7,$11,$12,$13)
         ON CONFLICT(model_pattern) DO UPDATE SET
           input_cost_micros=excluded.input_cost_micros, output_cost_micros=excluded.output_cost_micros,
           cache_cost_micros=excluded.cache_cost_micros, input_sell_micros=excluded.input_sell_micros,
@@ -488,6 +572,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           input_sell_micros_per_million=excluded.input_sell_micros_per_million,
           output_sell_micros_per_million=excluded.output_sell_micros_per_million,
           cache_sell_micros_per_million=excluded.cache_sell_micros_per_million,
+          price_source=excluded.price_source, price_effective_at=excluded.price_effective_at,
+          fx_rate_cny_micros=excluded.fx_rate_cny_micros,
           active=excluded.active, updated_at=now() RETURNING *`, values)
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
@@ -510,12 +596,23 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const pathPattern = cleanText(b.pathPattern, '接口路径', 512)
       if (!pathPattern.startsWith('/v1/')) throw new Error('接口路径必须以 /v1/ 开头')
       const model = String(b.requestedModel || '').trim() || null
-      if (b.id) {
-        return await db.one<any>(`UPDATE fixed_route_prices SET http_method=$1,path_pattern=$2,requested_model=$3,cost_micros=$4,sell_micros=$5,enabled=$6,match_priority=$7,updated_at=now() WHERE id=$8 RETURNING *`,
-          [method, pathPattern, model, moneyInput(b.costMicros ?? 0, '固定成本'), moneyInput(b.sellMicros ?? 0, '固定售价'), b.enabled !== false, Math.max(0, Number(b.matchPriority ?? 100) || 0), String(b.id)])
+      let selectors: Record<string, unknown> = {}
+      if (b.selectors) {
+        try { selectors = typeof b.selectors === 'string' ? JSON.parse(b.selectors) : b.selectors } catch { throw new Error('规格筛选必须是合法 JSON') }
+        if (!selectors || typeof selectors !== 'object' || Array.isArray(selectors)) throw new Error('规格筛选必须是 JSON 对象')
       }
-      return await db.one<any>(`INSERT INTO fixed_route_prices(http_method,path_pattern,requested_model,cost_micros,sell_micros,enabled,match_priority) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-        [method, pathPattern, model, moneyInput(b.costMicros ?? 0, '固定成本'), moneyInput(b.sellMicros ?? 0, '固定售价'), b.enabled !== false, Math.max(0, Number(b.matchPriority ?? 100) || 0)])
+      const unitMode = ['request', 'count', 'seconds'].includes(String(b.unitMode || 'request')) ? String(b.unitMode || 'request') : 'request'
+      const unitPath = unitMode === 'request' ? null : cleanText(b.unitPath, '计费参数', 128)
+      const cost = b.costYuan !== undefined ? BigInt(yuanInput(b.costYuan, '固定成本')) : BigInt(moneyInput(b.costMicros ?? 0, '固定成本'))
+      const marginBps = Number(b.marginBps ?? 8000)
+      if (!Number.isInteger(marginBps) || marginBps < 0 || marginBps >= 10_000) throw new Error('毛利率应为 0-9999 基点')
+      const sell = b.sellYuan !== undefined ? yuanInput(b.sellYuan, '固定售价') : b.sellMicros !== undefined ? moneyInput(b.sellMicros, '固定售价') : grossMarginSell(cost, BigInt(marginBps)).toString()
+      if (b.id) {
+        return await db.one<any>(`UPDATE fixed_route_prices SET http_method=$1,path_pattern=$2,requested_model=$3,cost_micros=$4,sell_micros=$5,enabled=$6,match_priority=$7,selectors=$8,unit_path=$9,unit_mode=$10,updated_at=now() WHERE id=$11 RETURNING *`,
+          [method, pathPattern, model, cost.toString(), sell, b.enabled !== false, Math.max(0, Number(b.matchPriority ?? 100) || 0), JSON.stringify(selectors), unitPath, unitMode, String(b.id)])
+      }
+      return await db.one<any>(`INSERT INTO fixed_route_prices(http_method,path_pattern,requested_model,cost_micros,sell_micros,enabled,match_priority,selectors,unit_path,unit_mode) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+        [method, pathPattern, model, cost.toString(), sell, b.enabled !== false, Math.max(0, Number(b.matchPriority ?? 100) || 0), JSON.stringify(selectors), unitPath, unitMode])
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
   app.delete('/api/admin/fixed-prices/:id', async (request, reply) => {
@@ -534,8 +631,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const b = (request.body || {}) as any
       const code = cleanText(b.code, '套餐代码', 64)
       const name = cleanText(b.name, '套餐名称', 128)
-      const price = moneyInput(b.priceMicros, '套餐价格', false)
-      const quota = moneyInput(b.quotaMicros, '套餐额度', false)
+      const price = b.priceYuan !== undefined ? yuanInput(b.priceYuan, '套餐价格', false) : moneyInput(b.priceMicros, '套餐价格', false)
+      const quota = b.quotaYuan !== undefined ? yuanInput(b.quotaYuan, '套餐额度', false) : moneyInput(b.quotaMicros, '套餐额度', false)
       const order = Math.max(0, Number(b.displayOrder ?? 100) || 0)
       if (b.id) return await db.one<any>(`UPDATE plans SET code=$1,name=$2,price_micros=$3,quota_micros=$4,duration_days=30,active=$5,enabled=$5,display_order=$6,updated_at=now() WHERE id=$7 RETURNING *`, [code, name, price, quota, b.active !== false, order, String(b.id)])
       return await db.one<any>(`INSERT INTO plans(code,name,price_micros,quota_micros,duration_days,active,enabled,display_order) VALUES($1,$2,$3,$4,30,$5,$5,$6) RETURNING *`, [code, name, price, quota, b.active !== false, order])
@@ -545,6 +642,53 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if (!await requireAdmin(request, reply)) return
     await db.query('UPDATE plans SET active=false, enabled=false, updated_at=now() WHERE id=$1', [String((request.params as any).id)])
     return { ok: true }
+  })
+  app.post('/api/admin/bootstrap/openai-prices', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    try {
+      const mapped = await db.query<any>(`SELECT DISTINCT requested_model FROM channel_model_mappings WHERE enabled = true
+        UNION SELECT DISTINCT jsonb_object_keys(model_map) FROM channels WHERE enabled = true AND jsonb_typeof(model_map) = 'object'`)
+      const models = [...new Set(mapped.map((row) => String(row.requested_model || row.jsonb_object_keys || '').trim()).filter((model) => Object.hasOwn(OPENAI_TOKEN_PRICES, model)))]
+      if (!models.length) throw new Error('没有发现已启用渠道映射的 OpenAI 模型，未初始化价格')
+      const effectiveAt = new Date()
+      const inserted: string[] = []
+      await db.tx(async (client) => {
+        for (const model of models) {
+          const [inputUsd, outputUsd, cacheUsd] = OPENAI_TOKEN_PRICES[model]
+          const input = officialCostMicros(inputUsd)
+          const output = officialCostMicros(outputUsd)
+          const cache = officialCostMicros(cacheUsd)
+          const values = [model, input, output, cache, grossMarginSell(input, 8000n), grossMarginSell(output, 8000n), grossMarginSell(cache, 8000n)]
+          await client.query(`INSERT INTO model_prices(
+            model_pattern,input_cost_micros,output_cost_micros,cache_cost_micros,input_sell_micros,output_sell_micros,cache_sell_micros,
+            input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,input_sell_micros_per_million,output_sell_micros_per_million,cache_sell_micros_per_million,
+            active,price_source,price_effective_at,fx_rate_cny_micros)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$2,$3,$4,$5,$6,$7,true,$8,$9,$10)
+            ON CONFLICT(model_pattern) DO UPDATE SET
+              input_cost_micros=excluded.input_cost_micros,output_cost_micros=excluded.output_cost_micros,cache_cost_micros=excluded.cache_cost_micros,
+              input_sell_micros=excluded.input_sell_micros,output_sell_micros=excluded.output_sell_micros,cache_sell_micros=excluded.cache_sell_micros,
+              input_cost_micros_per_million=excluded.input_cost_micros_per_million,output_cost_micros_per_million=excluded.output_cost_micros_per_million,cache_cost_micros_per_million=excluded.cache_cost_micros_per_million,
+              input_sell_micros_per_million=excluded.input_sell_micros_per_million,output_sell_micros_per_million=excluded.output_sell_micros_per_million,cache_sell_micros_per_million=excluded.cache_sell_micros_per_million,
+              active=true,price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,fx_rate_cny_micros=excluded.fx_rate_cny_micros,updated_at=now()`,
+            [...values.map((value) => typeof value === 'bigint' ? value.toString() : value), OPENAI_PRICING_SOURCE, effectiveAt, OPENAI_FX_MICROS.toString()],
+          )
+          inserted.push(model)
+        }
+      })
+      return { items: inserted, fxRate: '7.20', margin: '80%', source: OPENAI_PRICING_SOURCE, effectiveAt: effectiveAt.toISOString() }
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
+  app.post('/api/admin/bootstrap/monthly-plan', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const row = await db.one<any>(`WITH updated AS (
+        UPDATE plans SET name='月套餐',price_micros=149000000,quota_micros=59600000,duration_days=30,active=true,enabled=true,display_order=10,updated_at=now()
+        WHERE lower(code)=lower('monthly-149') RETURNING *
+      ), inserted AS (
+        INSERT INTO plans(code,name,price_micros,quota_micros,duration_days,active,enabled,display_order)
+        SELECT 'monthly-149','月套餐',149000000,59600000,30,true,true,10 WHERE NOT EXISTS (SELECT 1 FROM updated)
+        RETURNING *
+      ) SELECT * FROM updated UNION ALL SELECT * FROM inserted LIMIT 1`)
+    return { item: row, priceYuan: '149.00', quotaYuan: '59.60', grossMargin: '60%' }
   })
 
   app.get('/api/admin/users', async (request, reply) => {
@@ -620,7 +764,31 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     })
     return { enabled, rateBps }
   })
-  app.get('/api/admin/settings', async (request, reply) => { if (!await requireAdmin(request, reply)) return; return { items: await db.query<any>('SELECT key, value, updated_at FROM app_settings ORDER BY key') } })
+  app.get('/api/admin/settings', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    return { items: await db.query<any>('SELECT key, value, updated_at FROM app_settings ORDER BY key'), mail: mail.status }
+  })
+  app.put('/api/admin/settings/site', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    try {
+      const body = (request.body || {}) as any
+      const name = cleanText(body.name, '站点名称', 80)
+      const title = cleanText(body.title, '浏览器标题', 160)
+      const logoUrl = cleanText(body.logoUrl, 'Logo 地址', 512)
+      if (!logoUrl.startsWith('/') && !/^https:\/\//.test(logoUrl)) throw new Error('Logo 地址必须为本站路径或 HTTPS 地址')
+      await db.tx(async (client) => {
+        for (const [key, settingKey, value] of [
+          ['site_name', 'site.name', name],
+          ['site_title', 'site.title', title],
+          ['site_logo_url', 'site.logo_url', logoUrl],
+        ]) {
+          await client.query(`INSERT INTO app_settings(key,setting_key,value,value_json) VALUES($1,$2,$3,to_jsonb($3::text))
+            ON CONFLICT(key) DO UPDATE SET setting_key=excluded.setting_key,value=excluded.value,value_json=excluded.value_json,updated_at=now()`, [key, settingKey, value])
+        }
+      })
+      return { ok: true }
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
   app.post('/api/admin/settings', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
     try {
@@ -632,7 +800,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
 
-  app.get('/v1/account/balance', async (request, reply) => {
+  const accountBalance = async (request: any, reply: any) => {
     reply.header('Cache-Control', 'no-store').header('Vary', 'Authorization')
     const raw = bearer((request.headers as any).authorization)
     if (!raw) { reply.code(401).header('WWW-Authenticate', 'Bearer').send({ error: { message: '需要 Bearer API Key', type: 'authentication_error' } }); return }
@@ -640,15 +808,24 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const identity = await auth.authenticateApiKey(raw)
       const balance = await billing.balance(identity.user.id)
       const total = balance.planMicros + balance.walletMicros
-      return { success: true, data: {
+      const data = {
         planName: balance.planExpiresAt ? '30 天月套餐' : 'Relay 钱包',
-        remaining: formatMicros(total), remainingMicros: total.toString(),
+        // Keep the canonical CNY value as a decimal string: clients such as
+        // CC Switch can display it directly without losing precision on a
+        // high balance through a JavaScript Number conversion.
+        remaining: formatMicros(total), remainingDisplay: formatMicros(total), remainingMicros: total.toString(),
+        balance: formatMicros(total), availableBalance: formatMicros(total),
         walletRemaining: formatMicros(balance.walletMicros), walletRemainingMicros: balance.walletMicros.toString(),
         planRemaining: formatMicros(balance.planMicros), planRemainingMicros: balance.planMicros.toString(),
         planExpiresAt: balance.planExpiresAt, unit: 'CNY', isValid: balance.isValid, updatedAt: new Date().toISOString(),
-      } }
+      }
+      // Current CC Switch accepts response.data while older import scripts read
+      // the root object. Keep both projections numerically compatible.
+      return { success: true, ...data, data }
     } catch (error) { reply.code(401).send({ error: { message: (error as Error).message, type: 'authentication_error' } }) }
-  })
+  }
+  app.get('/v1/account/balance', accountBalance)
+  app.get('/account/balance', accountBalance)
 
   app.all('/v1/*', async (request, reply) => {
     const path = String((request.raw.url || '').split('?')[0]).replace(/^\/v1/, '') || '/'
@@ -665,7 +842,11 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const requestPath = `/v1${path}`
     let price: PriceSnapshot | null = null
     if (!isMetadata) {
-      price = await billing.priceForRequest(request.method, requestPath, model)
+      try {
+        price = await billing.priceForRequest(request.method, requestPath, model, parsed)
+      } catch (error) {
+        reply.code(errorStatus(error)).send({ error: { message: (error as Error).message, type: 'pricing_not_configured' } }); return
+      }
       if (!price) { reply.code(503).send({ error: { message: '管理员尚未配置该模型价格，暂不可调用', type: 'pricing_not_configured' } }); return }
     }
     const requestId = randomUUID()
@@ -678,6 +859,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           keyId: identity.key.id, keyName: identity.key.name,
         })
       } catch (error) {
+        if (/余额不足/.test(String((error as Error).message || ''))) void mail.queueLowBalance(identity.user.id).catch(() => undefined)
         reply.code(errorStatus(error)).send({ error: { message: (error as Error).message, type: 'billing_error', request_id: requestId } }); return
       }
     }
@@ -823,7 +1005,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
 
   app.setErrorHandler((error: any, _request, reply) => { if (!reply.sent) reply.code(errorStatus(error)).send({ error: { message: error?.message || '服务器错误' } }) })
   app.addHook('onClose', async () => { await redis.close() })
-  return { app, db, redis, config, auth, billing, affiliate, channels, orders }
+  return { app, db, redis, config, auth, billing, affiliate, channels, orders, mail }
 }
 
 async function recordAttempts(db: Database, requestId: string, attempts: any[], failedAttemptCostMicros = 0n): Promise<void> {

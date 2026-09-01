@@ -50,3 +50,171 @@
   color: var(--ink);
   font-weight: 650;
 }
+
+.brand-mark img {
+  display: block;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+}
+
+.brand-mark.compact img {
+  width: 32px;
+  height: 32px;
+}
+
+.verification-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.verification-row .button {
+  white-space: nowrap;
+}
+
+.checkbox-label a {
+  color: var(--accent);
+  text-underline-offset: 3px;
+}
+
+.admin-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.admin-toolbar p,
+.admin-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.settings-status {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.settings-status > div {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border-right: 1px solid var(--line);
+  min-width: 0;
+}
+
+.settings-status > div:last-child {
+  border-right: 0;
+}
+
+.settings-status strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.secure-dialog {
+  width: min(480px, calc(100vw - 32px));
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgba(16, 33, 43, .24);
+}
+
+.secure-dialog::backdrop {
+  background: rgba(11, 28, 31, .42);
+}
+
+.secure-dialog form {
+  padding: 22px;
+}
+
+.dialog-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dialog-heading h3 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.secure-dialog .copy-line code {
+  min-width: 0;
+}
+
+.secure-dialog .form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.legal-page {
+  width: min(760px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 44px 0 72px;
+}
+
+.legal-page .brand-mark {
+  display: inline-flex;
+  margin-bottom: 42px;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.legal-page h1 {
+  margin: 0 0 8px;
+  font-size: 30px;
+}
+
+.legal-page section {
+  margin-top: 30px;
+}
+
+.legal-page h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.legal-page p {
+  max-width: 72ch;
+  margin: 0;
+  color: #31515a;
+  line-height: 1.8;
+}
+
+@media (max-width: 800px) {
+  .verification-row,
+  .settings-status {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-status > div {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-status > div:last-child {
+    border-bottom: 0;
+  }
+
+  .admin-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
