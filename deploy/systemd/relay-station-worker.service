@@ -6,5 +6,5 @@ After=docker.service network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/relay-station
-ExecStart=/usr/bin/docker compose --profile maintenance run --rm worker
+ExecStart=/usr/local/bin/docker compose --profile maintenance run --rm worker
 TimeoutStartSec=10min

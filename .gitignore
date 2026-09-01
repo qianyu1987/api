@@ -3,4 +3,10 @@ dist/
 .env
 .env.*
 !.env.example
+secrets/
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
 coverage/
