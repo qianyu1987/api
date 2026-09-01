@@ -1,4 +1,4 @@
-import { createCipheriv, createSign, generateKeyPairSync } from 'node:crypto'
+import { createCipheriv, createSign, createVerify, generateKeyPairSync } from 'node:crypto'
 import { describe, expect, test } from 'vitest'
 import type { PaymentConfig } from '../src/config.js'
 import { AlipayPaymentGateway, buildAlipaySignContent } from '../src/payment/alipay.js'
@@ -122,6 +122,33 @@ describe('Alipay callback verification', () => {
   test('requires a provider transaction id for a paid callback', async () => {
     await expect(gateway.verifyCallback({}, signedAlipayBody({ trade_no: '' })))
       .rejects.toBeInstanceOf(PaymentDecryptionError)
+  })
+})
+
+describe('Alipay native order signing', () => {
+  test('includes sign_type in the outbound RSA2 signature', async () => {
+    let submitted: Record<string, string> | undefined
+    const gateway = new AlipayPaymentGateway(paymentConfig(), {
+      alipayPrivateKey: privateKey,
+      now: () => Date.parse('2026-09-01T02:20:30.000Z'),
+      fetch: async (_url, init) => {
+        submitted = Object.fromEntries(new URLSearchParams(String(init?.body || '')))
+        return new Response(JSON.stringify({
+          alipay_trade_precreate_response: { code: '10000', qr_code: 'https://qr.example/payment' },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      },
+    })
+
+    await gateway.createNativeOrder({ orderId: 'RS202609010003', description: 'Relay wallet', amountYuan: '20.00' })
+    expect(submitted).toBeDefined()
+    const params = submitted!
+    expect(params.sign_type).toBe('RSA2')
+    const source = Object.keys(params)
+      .filter((key) => key !== 'sign' && params[key] !== undefined && params[key] !== '')
+      .sort()
+      .map((key) => `${key}=${params[key]}`)
+      .join('&')
+    expect(createVerify('RSA-SHA256').update(source).verify(publicKey, params.sign, 'base64')).toBe(true)
   })
 })
 
