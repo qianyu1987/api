@@ -1,4 +1,4 @@
-const DEFAULT_MODEL = 'gpt-5.5'
+const DEFAULT_MODEL = 'gpt-5.6-sol'
 const DEFAULT_USAGE_INTERVAL_MINUTES = 30
 
 const USAGE_SCRIPT_SOURCE = String.raw`({

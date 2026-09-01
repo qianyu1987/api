@@ -827,8 +827,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.get('/v1/account/balance', accountBalance)
   app.get('/account/balance', accountBalance)
 
-  app.all('/v1/*', async (request, reply) => {
-    const path = String((request.raw.url || '').split('?')[0]).replace(/^\/v1/, '') || '/'
+  const relayRequest = async (request: any, reply: any, prefix = '/v1') => {
+    const rawPath = String((request.raw.url || '').split('?')[0]) || '/'
+    const path = prefix === '/v1' ? rawPath.replace(/^\/v1/, '') || '/' : rawPath
     if (path === '/account/balance') return
     const raw = bearer((request.headers as any).authorization)
     if (!raw) { reply.code(401).header('WWW-Authenticate', 'Bearer').send({ error: { message: '需要 Bearer API Key', type: 'authentication_error' } }); return }
@@ -1001,7 +1002,18 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     reply.code(response.statusCode)
     for (const [key, value] of Object.entries(responseHeaders)) if (!['content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.header(key, value as any)
     reply.send(data)
-  })
+  }
+
+  // CC Switch installations created before v1.0.6 sometimes retain the host
+  // root as their endpoint instead of `/v1`. Keep common OpenAI paths working
+  // at the root so those providers can be repaired without deleting keys.
+  const rootApiRoutes = [
+    '/models', '/models/*', '/chat/completions', '/responses', '/embeddings',
+    '/moderations', '/images/generations', '/images/edits', '/audio/speech',
+    '/audio/transcriptions', '/audio/translations', '/video/generations',
+  ]
+  app.all('/v1/*', (request, reply) => relayRequest(request, reply, '/v1'))
+  for (const route of rootApiRoutes) app.all(route, (request, reply) => relayRequest(request, reply, ''))
 
   app.setErrorHandler((error: any, _request, reply) => { if (!reply.sent) reply.code(errorStatus(error)).send({ error: { message: error?.message || '服务器错误' } }) })
   app.addHook('onClose', async () => { await redis.close() })

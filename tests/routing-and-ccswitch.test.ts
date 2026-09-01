@@ -63,7 +63,7 @@ describe('CC Switch import link', () => {
 
   test('chooses the first concrete model and validates required fields', () => {
     expect(ccswitchModel('*, gpt-4.1, gpt-5.5')).toBe('gpt-4.1')
-    expect(ccswitchModel(['*'])).toBe('gpt-5.5')
+    expect(ccswitchModel(['*'])).toBe('gpt-5.6-sol')
     expect(() => buildCcswitchImportLink({ apiKey: '', name: 'x', endpoint: 'https://api.hhtc.top/v1', homepage: 'https://api.hhtc.top' }))
       .toThrow('CC Switch')
   })
