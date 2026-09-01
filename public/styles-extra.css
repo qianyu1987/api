@@ -1,0 +1,52 @@
+.state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.state.good {
+  background: #e7f5ee;
+  color: var(--ok);
+}
+
+.state.bad {
+  background: #fbeceb;
+  color: #9c3f3c;
+}
+
+.subline {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.danger-button {
+  color: var(--danger);
+}
+
+.affiliate-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.affiliate-totals b {
+  color: var(--ink);
+  font-weight: 650;
+}

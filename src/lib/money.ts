@@ -1,0 +1,92 @@
+export const MICROS_PER_YUAN = 1_000_000n
+export const MICROS_PER_CENT = 10_000n
+export const TOKENS_PER_MILLION = 1_000_000n
+
+export type TokenRates = {
+  inputSellMicrosPerMillion: bigint
+  outputSellMicrosPerMillion: bigint
+  cacheSellMicrosPerMillion: bigint
+  inputCostMicrosPerMillion: bigint
+  outputCostMicrosPerMillion: bigint
+  cacheCostMicrosPerMillion: bigint
+}
+
+export type UsageTokens = {
+  input: bigint
+  output: bigint
+  cache: bigint
+  reportedTotal: bigint
+}
+
+export function asBigInt(value: unknown, fallback = 0n): bigint {
+  if (typeof value === 'bigint') return value
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return BigInt(value)
+  if (typeof value === 'string' && /^-?\d+$/.test(value)) return BigInt(value)
+  return fallback
+}
+
+export function ceilDiv(numerator: bigint, denominator: bigint): bigint {
+  if (denominator <= 0n) throw new Error('division denominator must be positive')
+  return numerator <= 0n ? 0n : (numerator + denominator - 1n) / denominator
+}
+
+export function microsFromCents(cents: number | bigint): bigint {
+  return asBigInt(cents) * MICROS_PER_CENT
+}
+
+export function centsFromMicros(micros: bigint): bigint {
+  return ceilDiv(micros, MICROS_PER_CENT)
+}
+
+export function formatMicros(micros: bigint): string {
+  const sign = micros < 0n ? '-' : ''
+  const absolute = micros < 0n ? -micros : micros
+  const yuan = absolute / MICROS_PER_YUAN
+  const decimals = (absolute % MICROS_PER_YUAN).toString().padStart(6, '0').replace(/0+$/, '')
+  return `${sign}${yuan.toString()}${decimals ? `.${decimals}` : ''}`
+}
+
+export function tokenCharge(tokens: bigint, microsPerMillion: bigint): bigint {
+  return ceilDiv(tokens * microsPerMillion, TOKENS_PER_MILLION)
+}
+
+export function calculateUsageMoney(tokens: UsageTokens, rates: TokenRates): { chargeMicros: bigint; costMicros: bigint } {
+  const chargeMicros = tokenCharge(tokens.input, rates.inputSellMicrosPerMillion)
+    + tokenCharge(tokens.output, rates.outputSellMicrosPerMillion)
+    + tokenCharge(tokens.cache, rates.cacheSellMicrosPerMillion)
+  const costMicros = tokenCharge(tokens.input, rates.inputCostMicrosPerMillion)
+    + tokenCharge(tokens.output, rates.outputCostMicrosPerMillion)
+    + tokenCharge(tokens.cache, rates.cacheCostMicrosPerMillion)
+  return { chargeMicros, costMicros }
+}
+
+function declaredOutputLimit(payload: Record<string, unknown>): bigint | null {
+  for (const value of [payload.max_output_tokens, payload.max_completion_tokens, payload.max_tokens]) {
+    if (value === undefined || value === null) continue
+    try {
+      const parsed = typeof value === 'bigint'
+        ? value
+        : typeof value === 'number' && Number.isSafeInteger(value)
+          ? BigInt(value)
+          : typeof value === 'string' && /^\d+$/.test(value.trim())
+            ? BigInt(value.trim())
+            : null
+      if (parsed !== null && parsed >= 0n) return parsed
+    } catch { /* fall through to the next compatible field */ }
+  }
+  return null
+}
+
+export function estimatedRequestTokens(payload: Record<string, unknown>): UsageTokens {
+  // A byte is a conservative upper bound for a token in a UTF-8 JSON request.
+  // Reserving from the exact serialized request size prevents the common
+  // Chinese/code prompt cases from exceeding the old chars/4 heuristic before
+  // the upstream returns real usage.
+  let encoded = ''
+  try { encoded = JSON.stringify(payload) || '' } catch { /* malformed local payloads remain billable */ }
+  const input = BigInt(Math.max(1, Buffer.byteLength(encoded, 'utf8')))
+  // Newer OpenAI-compatible APIs use max_completion_tokens. Honor all common
+  // aliases so the reservation bounds the actual provider output limit.
+  const output = declaredOutputLimit(payload) ?? 4096n
+  return { input, output, cache: 0n, reportedTotal: input + output }
+}

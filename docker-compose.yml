@@ -1,0 +1,160 @@
+name: relay-station
+
+x-app-environment: &app-environment
+  NODE_ENV: production
+  HOST: 0.0.0.0
+  PORT: 3000
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://api.hhtc.top}
+  DATABASE_URL: postgres://relay:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@postgres:5432/relay_station
+  REDIS_URL: redis://redis:6379
+
+x-app-service: &app-service
+  image: relay-station:${RELAY_IMAGE_TAG:-v1.0.0}
+  build:
+    context: .
+    target: runtime
+  env_file:
+    - .env
+  environment:
+    <<: *app-environment
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  volumes:
+    - type: bind
+      source: ./secrets
+      target: /run/secrets/relay
+      read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
+  init: true
+  networks:
+    - edge
+    - backend
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: relay_station
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - backend
+
+  redis:
+    image: redis:7.4-bookworm
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - backend
+
+  migration:
+    <<: *app-service
+    command: ["node", "dist/migrate.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - backend
+
+  api:
+    <<: *app-service
+    command: ["node", "dist/server.js"]
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then((response)=>{if(!response.ok)throw new Error(String(response.status))}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  gateway:
+    image: nginx:1.27-alpine
+    user: "101:101"
+    ports:
+      - "127.0.0.1:18082:8080"
+    volumes:
+      - type: bind
+        source: ./deploy/gateway/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - edge
+
+  worker:
+    <<: *app-service
+    profiles:
+      - maintenance
+    command: ["node", "dist/worker.js"]
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - backend
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  edge:
+    name: relay-station-edge
+  backend:
+    name: relay-station-backend
+    internal: true

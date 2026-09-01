@@ -1,0 +1,10 @@
+[Unit]
+Description=Relay Station maintenance worker
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/relay-station
+ExecStart=/usr/bin/docker compose --profile maintenance run --rm worker
+TimeoutStartSec=10min

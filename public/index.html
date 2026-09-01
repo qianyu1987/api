@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10212b">
+  <title>Relay Station</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles-extra.css">
+</head>
+<body>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="auth-view" class="auth-shell">
+    <main class="auth-panel">
+      <div class="brand-mark"><span>R</span><div><strong>Relay Station</strong><small>AI API 控制台</small></div></div>
+      <h1>把模型调用交给稳定的线路。</h1>
+      <p class="muted">统一 Key、透明计费、自动故障切换。注册后即可开始使用。</p>
+      <form id="auth-form" class="form-stack">
+        <label>账号<input name="username" autocomplete="username" required minlength="3" maxlength="32"></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" required minlength="8"></label>
+        <label id="invite-field" class="hidden">邀请码<input name="inviteCode" autocomplete="off" maxlength="32"></label>
+        <button class="button primary" type="submit" id="auth-submit">登录</button>
+      </form>
+      <button class="text-button" id="auth-toggle" type="button">没有账号？注册</button>
+      <p id="auth-error" class="form-error" role="alert"></p>
+    </main>
+  </div>
+
+  <div id="app-view" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand-mark compact"><span>R</span><div><strong>Relay</strong><small>Station</small></div></div>
+      <nav id="main-nav" aria-label="主导航">
+        <button data-view="overview" class="nav-item active">总览</button>
+        <button data-view="recharge" class="nav-item">充值</button>
+        <button data-view="keys" class="nav-item">API Keys</button>
+        <button data-view="usage" class="nav-item">用量明细</button>
+        <button data-view="affiliate" class="nav-item">邀请返利</button>
+        <button data-view="downloads" class="nav-item">下载入口</button>
+        <button data-view="admin" class="nav-item admin-only hidden">管理后台</button>
+      </nav>
+      <div class="sidebar-foot"><span id="user-label"></span><button id="logout" class="text-button">退出</button></div>
+    </aside>
+    <main class="content">
+      <header class="topbar"><button id="mobile-menu" class="icon-button" aria-label="打开导航">菜单</button><div><span id="view-kicker" class="sr-only">工作台</span><h2 id="view-title">总览</h2></div><span class="status-dot"><i></i>服务正常</span></header>
+      <section id="view-overview" class="view active-view">
+        <div class="overview-grid">
+          <div class="balance-block"><p class="label">可用额度</p><div class="balance-value" id="balance-total">--</div><p class="muted" id="balance-detail">钱包 -- · 套餐 --</p><div class="balance-actions"><button class="button primary" data-go="recharge">立即充值</button><button class="button secondary" data-go="keys">创建 API Key</button></div></div>
+          <div class="info-block"><div><span class="label">套餐到期</span><strong id="plan-expiry">未开通</strong></div><div><span class="label">API Base URL</span><div class="copy-line"><code id="api-base">--</code><button class="small-button" data-copy="api-base">复制</button></div></div><div><span class="label">账户状态</span><strong class="ok" id="account-state">有效</strong></div></div>
+        </div>
+        <div class="section-heading"><h3>调用概览</h3><button class="text-button" data-go="usage">查看全部</button></div>
+        <div class="table-wrap"><table><thead><tr><th>时间</th><th>模型</th><th>Token</th><th>收费</th><th>状态</th></tr></thead><tbody id="recent-usage"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody></table></div>
+      </section>
+
+      <section id="view-recharge" class="view"><div class="section-heading"><h3>充值与套餐</h3></div><div class="recharge-layout"><form id="topup-form" class="panel form-stack"><h4>钱包充值</h4><label>充值金额（元）<input name="amount" type="number" min="1" step="0.01" value="20" required></label><label>支付方式<select name="paymentMethod"><option value="wechat">微信支付</option><option value="alipay">支付宝</option></select></label><button class="button primary" type="submit">生成支付二维码</button><p class="muted form-hint">支付成功后自动入账，钱包充值参与邀请返利。</p></form><div class="panel"><div class="panel-heading"><h4>30 天套餐</h4><label class="inline-select">支付方式<select id="plan-payment-method"><option value="wechat">微信支付</option><option value="alipay">支付宝</option></select></label></div><div id="plans" class="plan-list"><p class="empty">暂无可购买套餐</p></div></div></div><div id="payment-result" class="payment-result hidden" role="status" aria-live="polite"></div></section>
+
+      <section id="view-keys" class="view"><div class="section-heading"><h3>API Keys</h3><button id="new-key" class="button primary">新建 Key</button></div><div class="notice">完整 Key 只在创建时显示一次。创建后可在下方直接导入 CC Switch。</div><div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>创建时间</th><th>最近使用</th><th>状态</th><th>操作</th></tr></thead><tbody id="keys-table"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody></table></div></section>
+
+      <section id="view-usage" class="view"><div class="section-heading"><h3>用量明细</h3></div><form id="usage-filters" class="filters"><label>从<input name="from" type="date"></label><label>到<input name="to" type="date"></label><label>模型<input name="model" placeholder="全部模型"></label><label>API Key<select name="keyId" id="usage-key-filter"><option value="">全部 Key</option></select></label><label>状态<select name="status"><option value="">全部</option><option value="success">成功</option><option value="failed">失败</option></select></label><button class="button secondary" type="submit">筛选</button></form><div class="summary-strip" id="usage-summary"></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>请求 ID</th><th>模型 / 渠道</th><th>Token</th><th>收费</th><th>状态</th></tr></thead><tbody id="usage-table"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody></table></div><button id="usage-more" class="button secondary hidden">加载更多</button></section>
+
+      <section id="view-affiliate" class="view"><div class="section-heading"><h3>邀请返利</h3></div><div class="affiliate-top"><div class="affiliate-balance"><span class="label">可兑换金额</span><strong id="affiliate-balance">--</strong><div class="affiliate-totals"><span>累计返利 <b id="affiliate-lifetime">--</b></span><span>已兑换 <b id="affiliate-converted">--</b></span></div><button id="affiliate-convert" class="button primary">兑换到 API 钱包</button></div><div class="invite-box"><span class="label">你的邀请码</span><div class="copy-line"><code id="invite-code">--</code><button class="small-button" data-copy="invite-code">复制</button></div><div class="copy-line"><code id="invite-link">--</code><button class="small-button" data-copy="invite-link">复制</button></div><p class="muted">成功注册：<b id="invite-count">0</b> 人 · 钱包充值按平台返利比例结算</p></div></div><div class="section-heading compact-heading"><h4>返利来源</h4></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>来源用户</th><th>充值金额</th><th>比例</th><th>返利</th></tr></thead><tbody id="affiliate-table"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody></table></div><div class="section-heading compact-heading"><h4>资金记录</h4></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>类型</th><th>金额</th><th>返利余额</th></tr></thead><tbody id="affiliate-ledger"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody></table></div></section>
+
+      <section id="view-downloads" class="view"><div class="section-heading"><h3>下载入口</h3></div><div class="download-list"><a id="chatgpt-link" class="download-row" target="_blank" rel="noreferrer"><span><strong>ChatGPT</strong><small>官方桌面与移动端下载</small></span><b>打开</b></a><a id="ccswitch-link" class="download-row" target="_blank" rel="noreferrer"><span><strong>CC Switch</strong><small>官方 Release 页面</small></span><b>打开</b></a></div><div class="panel setup-panel"><h4>快速接入</h4><p>在客户端中填写 API Base URL，并使用 API Key 作为 Bearer Token。你也可以在 API Keys 页面创建一键导入链接。</p><code class="code-block" id="quick-config">Base URL: --\nAuthorization: Bearer sk-relay-…</code></div></section>
+
+      <section id="view-admin" class="view"><div class="section-heading"><h3>管理后台</h3></div><div class="admin-tabs"><button class="tab active" data-admin-tab="channels">渠道</button><button class="tab" data-admin-tab="prices">模型价格</button><button class="tab" data-admin-tab="fixed-prices">固定接口价格</button><button class="tab" data-admin-tab="plans">套餐</button><button class="tab" data-admin-tab="users">用户</button><button class="tab" data-admin-tab="orders">订单</button><button class="tab" data-admin-tab="admin-usage">用量</button><button class="tab" data-admin-tab="affiliate-admin">返利</button><button class="tab" data-admin-tab="settings">设置</button></div><div id="admin-content" class="admin-content"><p class="empty">加载中…</p></div></section>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
