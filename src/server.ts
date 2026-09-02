@@ -342,6 +342,13 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const user = await requireSession(request, reply); if (!user) return
     return { data: BillingService.formatBalance(await billing.balance(user.id)) }
   })
+  app.post('/api/admin/users/:userId/subscription/reset', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    try {
+      const result = await billing.resetSubscription(String((request.params as any).userId || ''), actor.id)
+      return { ...result, beforeRemaining: formatMicros(result.beforeRemainingMicros), afterRemaining: formatMicros(result.afterRemainingMicros), quotaCap: formatMicros(result.quotaCapMicros) }
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
   app.get('/api/me/keys', async (request, reply) => { const user = await requireSession(request, reply); return user ? { items: await auth.listApiKeys(user.id) } : undefined })
   app.post('/api/me/keys', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
@@ -685,14 +692,14 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.post('/api/admin/bootstrap/monthly-plan', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
     const row = await db.one<any>(`WITH updated AS (
-        UPDATE plans SET name='月套餐',price_micros=149000000,quota_micros=59600000,duration_days=30,active=true,enabled=true,display_order=10,updated_at=now()
+        UPDATE plans SET name='月套餐',price_micros=149000000,quota_micros=149000000,duration_days=30,active=true,enabled=true,display_order=10,updated_at=now()
         WHERE lower(code)=lower('monthly-149') RETURNING *
       ), inserted AS (
         INSERT INTO plans(code,name,price_micros,quota_micros,duration_days,active,enabled,display_order)
-        SELECT 'monthly-149','月套餐',149000000,59600000,30,true,true,10 WHERE NOT EXISTS (SELECT 1 FROM updated)
+        SELECT 'monthly-149','月套餐',149000000,149000000,30,true,true,10 WHERE NOT EXISTS (SELECT 1 FROM updated)
         RETURNING *
       ) SELECT * FROM updated UNION ALL SELECT * FROM inserted LIMIT 1`)
-    return { item: row, priceYuan: '149.00', quotaYuan: '59.60', grossMargin: '60%' }
+    return { item: row, priceYuan: '149.00', quotaYuan: '149.00', grossMargin: '0%' }
   })
 
   app.get('/api/admin/users', async (request, reply) => {
@@ -702,7 +709,21 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const where: string[] = []
     if (q.status) { values.push(String(q.status)); where.push(`u.status=$${values.length}`) }
     if (q.search) { values.push(`%${String(q.search).slice(0, 128)}%`); where.push(`u.username ILIKE $${values.length}`) }
-    return { items: await db.query<any>(`SELECT u.id,u.username,u.role,u.status,u.invite_code,u.last_login_at,u.created_at,u.disabled_at,w.balance_micros,aw.balance_micros AS affiliate_balance_micros FROM users u LEFT JOIN wallets w ON w.user_id=u.id LEFT JOIN affiliate_wallets aw ON aw.user_id=u.id ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY u.created_at DESC LIMIT 200`, values) }
+    return { items: await db.query<any>(`SELECT u.id,u.username,u.email,u.role,u.status,u.invite_code,u.last_login_at,u.created_at,u.disabled_at,
+      w.balance_micros,aw.balance_micros AS affiliate_balance_micros,
+      s.remaining_micros AS plan_remaining_micros,s.reset_quota_micros AS plan_quota_micros,
+      s.expires_at AS plan_expires_at,s.next_reset_at AS plan_next_reset_at,s.last_reset_at AS plan_last_reset_at,s.status AS plan_status
+      FROM users u LEFT JOIN wallets w ON w.user_id=u.id LEFT JOIN affiliate_wallets aw ON aw.user_id=u.id
+      LEFT JOIN subscriptions s ON s.user_id=u.id ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+      ORDER BY u.created_at DESC LIMIT 200`, values) }
+  })
+  app.get('/api/admin/subscription-resets', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const q = (request.query || {}) as any
+    const values: unknown[] = []
+    const where: string[] = []
+    if (q.userId) { values.push(String(q.userId)); where.push(`e.user_id=$${values.length}`) }
+    return { items: await db.query<any>(`SELECT e.*,u.username,a.username AS actor_username FROM subscription_reset_events e JOIN users u ON u.id=e.user_id LEFT JOIN users a ON a.id=e.actor_user_id ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY e.created_at DESC LIMIT ${boundedLimit(q.limit, 100, 500)}`, values) }
   })
   app.patch('/api/admin/users/:id/status', async (request, reply) => {
     const actor = await requireAdmin(request, reply); if (!actor) return
@@ -824,7 +845,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         balance: formatMicros(total), availableBalance: formatMicros(total),
         walletRemaining: formatMicros(balance.walletMicros), walletRemainingMicros: balance.walletMicros.toString(),
         planRemaining: formatMicros(balance.planMicros), planRemainingMicros: balance.planMicros.toString(),
-        planExpiresAt: balance.planExpiresAt, unit: 'CNY', isValid: balance.isValid, updatedAt: new Date().toISOString(),
+        planQuota: formatMicros(balance.planQuotaMicros), planQuotaMicros: balance.planQuotaMicros.toString(),
+        planExpiresAt: balance.planExpiresAt, planNextResetAt: balance.planNextResetAt, planLastResetAt: balance.planLastResetAt,
+        planStatus: balance.planStatus, unit: 'CNY', isValid: balance.isValid, updatedAt: new Date().toISOString(),
       }
       // Current CC Switch accepts response.data while older import scripts read
       // the root object. Keep both projections numerically compatible.

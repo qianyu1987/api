@@ -3,6 +3,7 @@ import {
   allocateSettlementCharge,
   deserializePriceSnapshot,
   serializePriceSnapshot,
+  nextShanghaiReset,
   type PriceSnapshot,
 } from '../src/services/billing.js'
 
@@ -20,6 +21,10 @@ const price: PriceSnapshot = {
 }
 
 describe('billing invariants', () => {
+  test('computes the next Monday 09:00 in Shanghai time', () => {
+    expect(nextShanghaiReset(new Date('2026-08-31T00:30:00.000Z')).toISOString()).toBe('2026-08-31T01:00:00.000Z')
+    expect(nextShanghaiReset(new Date('2026-08-31T01:00:00.000Z')).toISOString()).toBe('2026-09-07T01:00:00.000Z')
+  })
   test('price snapshots are immutable string values that can be restored exactly', () => {
     const snapshot = serializePriceSnapshot(price, {
       input: 13n, output: 7n, cache: 3n, reportedTotal: 23n,

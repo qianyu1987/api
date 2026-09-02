@@ -262,18 +262,26 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   started_at TIMESTAMPTZ,
   expires_at TIMESTAMPTZ,
   last_purchase_at TIMESTAMPTZ,
+  reset_quota_micros BIGINT NOT NULL DEFAULT 0,
+  reset_timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+  next_reset_at TIMESTAMPTZ,
+  last_reset_at TIMESTAMPTZ,
+  reset_version BIGINT NOT NULL DEFAULT 0,
   version BIGINT NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (id),
   CHECK (remaining_micros >= 0),
   CHECK (reserved_micros >= 0),
+  CHECK (reset_quota_micros >= 0),
+  CHECK (reset_version >= 0),
   CONSTRAINT subscriptions_reserved_within_remaining CHECK (reserved_micros <= remaining_micros),
   CHECK (status IN ('active', 'expired', 'canceled')),
   CHECK (version >= 0),
   CHECK (expires_at IS NULL OR started_at IS NULL OR expires_at >= started_at)
 );
 CREATE INDEX IF NOT EXISTS subscriptions_status_expiry_idx ON subscriptions (status, expires_at, user_id);
+CREATE INDEX IF NOT EXISTS subscriptions_reset_due_idx ON subscriptions (status, next_reset_at, expires_at);
 
 CREATE TABLE IF NOT EXISTS channels (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -637,12 +645,31 @@ CREATE TABLE IF NOT EXISTS subscription_ledger (
   request_id UUID,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CHECK (kind IN ('purchase_credit', 'plan_reserve', 'usage_reserve', 'usage_settle', 'usage_release', 'expiry_forfeit', 'admin_adjustment')),
+  CHECK (kind IN ('purchase_credit', 'quota_reset', 'usage_reserve', 'usage_settle', 'usage_release', 'expiry_forfeit', 'admin_adjustment')),
   CHECK (remaining_delta_micros <> 0 OR reserved_delta_micros <> 0)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS subscription_ledger_purchase_order_unique ON subscription_ledger (order_id) WHERE kind = 'purchase_credit';
 CREATE INDEX IF NOT EXISTS subscription_ledger_subscription_cursor_idx ON subscription_ledger (subscription_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS subscription_ledger_request_idx ON subscription_ledger (request_id, id) WHERE request_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS subscription_reset_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  subscription_id UUID NOT NULL REFERENCES subscriptions(id) ON DELETE RESTRICT,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  reset_key TEXT NOT NULL,
+  reset_kind TEXT NOT NULL,
+  actor_user_id UUID REFERENCES users(id) ON DELETE RESTRICT,
+  before_remaining_micros BIGINT NOT NULL,
+  after_remaining_micros BIGINT NOT NULL,
+  quota_cap_micros BIGINT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (reset_kind IN ('automatic', 'manual', 'migration')),
+  CHECK (before_remaining_micros >= 0 AND after_remaining_micros >= 0 AND quota_cap_micros > 0)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS subscription_reset_events_key_unique
+  ON subscription_reset_events(subscription_id, reset_key);
+CREATE INDEX IF NOT EXISTS subscription_reset_events_user_idx
+  ON subscription_reset_events(user_id, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS affiliate_commissions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -772,7 +799,7 @@ DO $$
 DECLARE
   table_name TEXT;
 BEGIN
-  FOREACH table_name IN ARRAY ARRAY['invitation_bindings', 'payment_events', 'subscription_purchases', 'wallet_ledger', 'subscription_ledger', 'affiliate_commissions', 'affiliate_conversions', 'affiliate_ledger', 'admin_audit_events'] LOOP
+  FOREACH table_name IN ARRAY ARRAY['invitation_bindings', 'payment_events', 'subscription_purchases', 'wallet_ledger', 'subscription_ledger', 'subscription_reset_events', 'affiliate_commissions', 'affiliate_conversions', 'affiliate_ledger', 'admin_audit_events'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = table_name || '_immutable' AND tgrelid = table_name::regclass) THEN
       EXECUTE format('CREATE TRIGGER %I_immutable BEFORE UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION relay_prevent_immutable_mutation()', table_name, table_name);
     END IF;
@@ -830,6 +857,17 @@ WHERE o.plan_id = p.id
 
 ALTER TABLE wallets ADD COLUMN IF NOT EXISTS reserved_micros BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reserved_micros BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reset_quota_micros BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reset_timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai';
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS next_reset_at TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_reset_at TIMESTAMPTZ;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reset_version BIGINT NOT NULL DEFAULT 0;
+-- The v1.0.13 monthly plan uses a ¥149 weekly-reset quota. Existing plans
+-- keep their identity while their mutable configuration is upgraded in place.
+UPDATE plans
+SET price_micros = 149000000, quota_micros = 149000000, duration_days = 30,
+    active = TRUE, enabled = TRUE, updated_at = now()
+WHERE lower(code) = lower('monthly-149');
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS api_key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS estimated_charge_micros BIGINT;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS actual_micros BIGINT;

@@ -19,6 +19,8 @@ export async function runWorker(): Promise<void> {
     // otherwise expired audit record merely by settling late.
     await db.query(`DELETE FROM usage_logs WHERE started_at < now() - ($1 || ' days')::interval`, [config.usageRetentionDays])
     await db.query(`DELETE FROM relay_attempts a WHERE NOT EXISTS (SELECT 1 FROM usage_logs u WHERE u.request_id = a.request_id)`)
+    await billing.migrateLegacySubscriptions()
+    await billing.resetDueSubscriptions()
     await billing.releaseExpiredReservations()
     await mail.deliverQueued(20)
   } finally {

@@ -3,6 +3,7 @@ import type { AppConfig } from '../config.js'
 import { Database, one } from '../db/index.js'
 import { MICROS_PER_CENT } from '../lib/money.js'
 import { AffiliateService } from './affiliate.js'
+import { nextShanghaiReset } from './billing.js'
 
 export type PaymentMethod = 'wechat' | 'alipay'
 
@@ -448,24 +449,27 @@ export class OrderService {
     const existingRemaining = active ? bigintValue(existing.remaining_micros) : 0n
     const remaining = (active ? existingRemaining : existingReserved) + quota
     let subscriptionId: string
-    if (existing) {
-      subscriptionId = String(existing.id)
-      await client.query(
-        `UPDATE subscriptions
+      if (existing) {
+        subscriptionId = String(existing.id)
+        await client.query(
+          `UPDATE subscriptions
          SET plan_id = $1, current_plan_id = $1, remaining_micros = $2,
+             reset_quota_micros = $6, reset_timezone = 'Asia/Shanghai',
+             next_reset_at = $7, last_reset_at = NULL,
              status = 'active', started_at = $3, expires_at = $4,
              last_purchase_at = $3, version = version + 1, updated_at = now()
          WHERE user_id = $5`,
-        [plan.id, remaining.toString(), startsAt, expiresAt, order.user_id],
+        [plan.id, remaining.toString(), startsAt, expiresAt, order.user_id, quota.toString(), nextShanghaiReset(startsAt)],
       )
     } else {
       const sub = await one<any>(client,
         `INSERT INTO subscriptions(
-           user_id, plan_id, current_plan_id, remaining_micros, status,
-           started_at, expires_at, last_purchase_at
-         ) VALUES ($1, $2, $2, $3, 'active', $4, $5, $4)
+         user_id, plan_id, current_plan_id, remaining_micros, status,
+           started_at, expires_at, last_purchase_at, reset_quota_micros,
+           reset_timezone, next_reset_at
+         ) VALUES ($1, $2, $2, $3, 'active', $4, $5, $4, $6, 'Asia/Shanghai', $7)
          RETURNING id`,
-        [order.user_id, plan.id, quota.toString(), startsAt, expiresAt],
+        [order.user_id, plan.id, quota.toString(), startsAt, expiresAt, quota.toString(), nextShanghaiReset(startsAt)],
       )
       if (!sub?.id) throw new Error('创建套餐余额失败')
       subscriptionId = String(sub.id)

@@ -114,6 +114,8 @@
       $('#balance-total').textContent = money({ micros: toMicros(data.balance.wallet) + toMicros(data.balance.planRemaining) })
       $('#balance-detail').textContent = '钱包 ' + money(data.balance.wallet) + ' · 套餐 ' + money(data.balance.planRemaining)
       $('#plan-expiry').textContent = data.balance.planExpiresAt ? new Date(data.balance.planExpiresAt).toLocaleDateString('zh-CN') : '未开通'
+      const resetNode = $('#plan-reset')
+      if (resetNode) resetNode.textContent = data.balance.planNextResetAt ? new Date(data.balance.planNextResetAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
       $('#api-base').textContent = data.apiBaseUrl; $('#account-state').textContent = data.balance.isValid ? '有效' : '需充值'
       $('#chatgpt-link').href = data.downloads.chatgpt; $('#ccswitch-link').href = data.downloads.ccswitch
       $('#quick-config').textContent = 'Base URL: ' + data.apiBaseUrl + '\nAuthorization: Bearer sk-relay-…'
@@ -219,8 +221,8 @@
       return editor + table(['方法', '路径 / 规格', '模型', '单位', '售价', '状态', '操作'], rows, '尚未配置固定接口价格')
     }
     if (tab === 'plans') {
-      const editor = form('plan', [field('code', '套餐代码', 'monthly-149', 'text', 'required'), field('name', '套餐名称', '月套餐', 'text', 'required'), field('priceYuan', '售价（元）', '149.00', 'text', 'required'), field('quotaYuan', '可消费额度（元）', '59.60', 'text', 'required'), field('displayOrder', '排序', '10', 'number', 'min="0"'), check('active', '可购买'), '<p class="admin-note wide">套餐固定有效期 30 天，优先消费套餐额度；¥149 对应 ¥59.60 额度，毛利率 60%。</p>'], '保存套餐')
-      const rows = items.map((item) => '<tr><td><strong>' + esc(item.name) + '</strong><small class="subline">' + esc(item.code) + '</small></td><td>' + money({ micros: item.price_micros }) + '</td><td>' + money({ micros: item.quota_micros }) + '</td><td>' + margin(item.quota_micros, item.price_micros) + '</td><td>30 天</td><td><span class="state ' + (item.active && item.enabled ? 'good' : 'bad') + '">' + (item.active && item.enabled ? '启用' : '停用') + '</span></td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="plan" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button danger-button admin-delete" type="button" data-kind="plan" data-id="' + esc(item.id) + '">停用</button></td></tr>')
+      const editor = form('plan', [field('code', '套餐代码', 'monthly-149', 'text', 'required'), field('name', '套餐名称', '月套餐', 'text', 'required'), field('priceYuan', '售价（元）', '149.00', 'text', 'required'), field('quotaYuan', '周期额度（元）', '149.00', 'text', 'required'), field('displayOrder', '排序', '10', 'number', 'min="0"'), check('active', '可购买'), '<p class="admin-note wide">套餐有效期 30 天；每周一 09:00（北京时间）恢复周期额度至上限，未用额度不结转。</p>'], '保存套餐')
+      const rows = items.map((item) => '<tr><td><strong>' + esc(item.name) + '</strong><small class="subline">' + esc(item.code) + '</small></td><td>' + money({ micros: item.price_micros }) + '</td><td>' + money({ micros: item.quota_micros }) + '</td><td>周期重置</td><td>30 天</td><td><span class="state ' + (item.active && item.enabled ? 'good' : 'bad') + '">' + (item.active && item.enabled ? '启用' : '停用') + '</span></td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="plan" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button danger-button admin-delete" type="button" data-kind="plan" data-id="' + esc(item.id) + '">停用</button></td></tr>')
       return '<div class="admin-toolbar"><p>独立购买、支付入账和套餐优先扣费均已启用。</p><button class="button secondary" type="button" data-bootstrap="monthly-plan">初始化 ¥149 月套餐</button></div>' + editor + table(['套餐', '售价', '可消费额度', '毛利率', '有效期', '状态', '操作'], rows, '尚未配置套餐')
     }
     if (tab === 'affiliate-admin') {
@@ -230,11 +232,15 @@
       const conversion = (data.conversions || []).map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>已完成</td></tr>')
       return editor + '<div><p class="admin-section-title">佣金流水</p>' + table(['时间', '邀请人', '被邀请人', '充值', '比例', '返利'], commission, '暂无佣金流水') + '</div><div><p class="admin-section-title">兑换流水</p>' + table(['时间', '用户', '兑换金额', '状态'], conversion, '暂无兑换流水') + '</div>'
     }
-    if (tab === 'users') return table(['用户', '角色', '钱包', '返利钱包', '最后登录', '状态'], items.map((item) => '<tr><td><strong>' + esc(item.username) + '</strong><small class="subline">' + esc(item.email || '未验证邮箱') + '</small></td><td>' + esc(item.role) + '</td><td>' + money({ micros: item.balance_micros }) + '</td><td>' + money({ micros: item.affiliate_balance_micros }) + '</td><td>' + date(item.last_login_at) + '</td><td><span class="state ' + (item.status === 'active' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td></tr>'))
+    if (tab === 'users') return table(['用户', '角色', '钱包', '套餐额度', '套餐到期 / 下次重置', '状态', '操作'], items.map((item) => '<tr><td><strong>' + esc(item.username) + '</strong><small class="subline">' + esc(item.email || '未验证邮箱') + '</small></td><td>' + esc(item.role) + '</td><td>' + money({ micros: item.balance_micros }) + '</td><td>' + (item.plan_status === 'active' ? money({ micros: item.plan_remaining_micros }) + ' / ' + money({ micros: item.plan_quota_micros }) : '—') + '</td><td>' + (item.plan_status === 'active' ? date(item.plan_expires_at) + '<small class="subline">下次 ' + date(item.plan_next_reset_at) + '</small>' : '—') + '</td><td><span class="state ' + (item.status === 'active' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td>' + (item.plan_status === 'active' ? '<button class="small-button admin-reset-plan" type="button" data-id="' + esc(item.id) + '">重置额度</button>' : '—') + '</td></tr>'))
     if (tab === 'orders') return table(['时间', '用户', '类型', '金额', '方式', '状态', '订单号'], items.map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + esc(item.kind) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>' + esc(item.payment_method) + '</td><td><span class="state ' + (item.status === 'paid' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td><code>' + esc(item.order_no) + '</code></td></tr>'))
     if (tab === 'admin-usage') {
       const rows = items.map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td><code>' + esc(item.request_id) + '</code></td><td>' + esc(item.requested_model) + '</td><td>' + esc(item.final_channel_name_snapshot || '—') + '</td><td>' + money({ micros: item.charge_micros }) + '</td><td>' + money({ micros: item.cost_micros }) + ' / ' + money({ micros: item.profit_micros }) + '</td><td><button class="small-button admin-attempts" type="button" data-id="' + esc(item.request_id) + '">链路</button></td></tr>')
       return table(['时间', '用户', '请求 ID', '模型', '最终渠道', '收费', '成本 / 利润', '操作'], rows) + '<div id="attempt-detail"></div>'
+    }
+    if (tab === 'resets') {
+      const rows = items.map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + esc(item.reset_kind) + '</td><td>' + esc(item.actor_username || '系统') + '</td><td>' + money({ micros: item.before_remaining_micros }) + '</td><td>' + money({ micros: item.after_remaining_micros }) + '</td><td><code>' + esc(item.reset_key) + '</code></td></tr>')
+      return table(['时间', '用户', '类型', '执行者', '重置前', '重置后', '周期标识'], rows, '暂无套餐重置记录')
     }
     if (tab === 'settings') {
       const settings = Object.fromEntries(items.map((item) => [item.key, item.value])); const smtp = data.mail || {}
@@ -246,7 +252,7 @@
   async function loadAdmin(tab) {
     state.adminTab = tab
     $$('.admin-tabs .tab').forEach((node) => node.classList.toggle('active', node.dataset.adminTab === tab))
-    const endpoints = { channels: '/api/admin/channels', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', 'affiliate-admin': '/api/admin/affiliate', settings: '/api/admin/settings' }
+    const endpoints = { channels: '/api/admin/channels', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', settings: '/api/admin/settings' }
     try { $('#admin-content').innerHTML = renderAdmin(tab, await api(endpoints[tab])) } catch (error) { toast(error.message, true) }
   }
   function setFormValue(editor, name, value) {
@@ -374,7 +380,12 @@
     try { await submitAdmin(editor) } catch (error) { toast(error.message, true) }
   })
   $('#admin-content').addEventListener('click', async (event) => {
-    const target = event.target; const bootstrap = target.closest('[data-bootstrap]'); const edit = target.closest('.admin-edit'); const remove = target.closest('.admin-delete'); const attempts = target.closest('.admin-attempts')
+    const target = event.target; const bootstrap = target.closest('[data-bootstrap]'); const edit = target.closest('.admin-edit'); const remove = target.closest('.admin-delete'); const attempts = target.closest('.admin-attempts'); const resetPlan = target.closest('.admin-reset-plan')
+    if (resetPlan) {
+      pending(resetPlan, true, '重置中…')
+      try { await api('/api/admin/users/' + encodeURIComponent(resetPlan.dataset.id) + '/subscription/reset', { method: 'POST', body: '{}' }); toast('套餐额度已重置'); await loadAdmin('users') } catch (error) { toast(error.message, true); pending(resetPlan, false) }
+      return
+    }
     if (bootstrap) {
       pending(bootstrap, true, '初始化中…')
       try { const data = await api(bootstrap.dataset.bootstrap === 'openai-prices' ? '/api/admin/bootstrap/openai-prices' : '/api/admin/bootstrap/monthly-plan', { method: 'POST', body: '{}' }); toast(data.items ? '已初始化 ' + data.items.length + ' 个模型价格' : '月套餐已初始化'); await loadAdmin(state.adminTab) } catch (error) { toast(error.message, true) } finally { pending(bootstrap, false) }
