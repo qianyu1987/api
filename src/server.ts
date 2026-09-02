@@ -837,12 +837,23 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if (!raw) { reply.code(401).header('WWW-Authenticate', 'Bearer').send({ error: { message: '需要 Bearer API Key', type: 'authentication_error' } }); return }
     try {
       await auth.authenticateApiKey(raw)
-      const rows = await db.query<any>(`SELECT DISTINCT key AS model
-        FROM channels c
-        CROSS JOIN LATERAL jsonb_object_keys(c.model_map) AS key
-        JOIN model_prices p ON p.model_pattern = key AND p.active = true
-        WHERE c.enabled = true AND key <> '*'
-        ORDER BY key`)
+      // Token-priced models come from model_prices. Image/video endpoints use
+      // fixed_route_prices instead, so include those explicit model names in
+      // the catalog when an enabled channel maps them.
+      const rows = await db.query<any>(`SELECT DISTINCT model FROM (
+          SELECT key AS model
+          FROM channels c
+          CROSS JOIN LATERAL jsonb_object_keys(c.model_map) AS key
+          JOIN model_prices p ON p.model_pattern = key AND p.active = true
+          WHERE c.enabled = true AND key <> '*'
+          UNION
+          SELECT f.requested_model AS model
+          FROM fixed_route_prices f
+          JOIN channels c ON c.enabled = true AND c.model_map ? f.requested_model
+          WHERE f.enabled = true AND f.requested_model IS NOT NULL
+        ) catalog
+        WHERE trim(model) <> ''
+        ORDER BY model`)
       const models = rows.map((row) => ({
         id: String(row.model), object: 'model', created: 0, owned_by: 'relay-station',
       }))
