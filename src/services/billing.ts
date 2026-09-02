@@ -387,7 +387,11 @@ export class BillingService {
       const cap = bigintValue(row.reset_quota_micros)
       if (cap <= 0n) throw Object.assign(new Error('套餐未配置周期额度'), { statusCode: 409 })
       const scheduled = row.next_reset_at ? new Date(row.next_reset_at) : null
-      const resetKey = `manual:${scheduled && scheduled.getTime() <= now.getTime() ? scheduled.toISOString() : shanghaiDate(now)}`
+      // Manual and automatic actions share the scheduled cycle key. This makes
+      // an admin click before the worker runs idempotent with that worker run.
+      const resetKey = scheduled && Number.isFinite(scheduled.getTime())
+        ? `cycle:${scheduled.toISOString()}`
+        : `cycle:${shanghaiDate(now)}`
       return this.applyReset(client, row, cap, resetKey, 'manual', actorUserId, now, false)
     })
   }
@@ -452,7 +456,28 @@ export class BillingService {
   private async applyReset(client: DbClient, row: any, cap: bigint, resetKey: string, resetKind: 'automatic' | 'manual' | 'migration', actorUserId: string | null, resetAt: Date, automatic: boolean): Promise<SubscriptionResetResult> {
     const existingEvent = await one<any>(client, 'SELECT before_remaining_micros, after_remaining_micros, quota_cap_micros, created_at FROM subscription_reset_events WHERE subscription_id = $1 AND reset_key = $2', [row.id, resetKey])
     const next = automatic ? nextShanghaiReset(new Date()) : (row.next_reset_at ? new Date(row.next_reset_at) : null)
-    if (existingEvent) return { applied: false, userId: String(row.user_id), resetKind, resetKey, beforeRemainingMicros: bigintValue(existingEvent.before_remaining_micros), afterRemainingMicros: bigintValue(existingEvent.after_remaining_micros), quotaCapMicros: bigintValue(existingEvent.quota_cap_micros), resetAt: existingEvent.created_at ? new Date(existingEvent.created_at).toISOString() : null, nextResetAt: next?.toISOString() || null }
+    if (existingEvent) {
+      if (automatic && next) {
+        await client.query(
+          `UPDATE subscriptions
+           SET last_reset_at = COALESCE(last_reset_at, $2), next_reset_at = $3,
+               version = version + 1, updated_at = now()
+           WHERE id = $1`,
+          [row.id, existingEvent.created_at || resetAt, next],
+        )
+      }
+      return {
+        applied: false,
+        userId: String(row.user_id),
+        resetKind,
+        resetKey,
+        beforeRemainingMicros: bigintValue(existingEvent.before_remaining_micros),
+        afterRemainingMicros: bigintValue(existingEvent.after_remaining_micros),
+        quotaCapMicros: bigintValue(existingEvent.quota_cap_micros),
+        resetAt: existingEvent.created_at ? new Date(existingEvent.created_at).toISOString() : null,
+        nextResetAt: next?.toISOString() || null,
+      }
+    }
     const before = bigintValue(row.remaining_micros)
     const reserved = bigintValue(row.reserved_micros)
     const after = cap > reserved ? cap : reserved
