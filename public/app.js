@@ -115,6 +115,8 @@
       const planMicros = yuanToMicros(data.balance.planRemaining || '0')
       $('#balance-total').textContent = money({ micros: walletMicros + planMicros })
       $('#balance-detail').textContent = '钱包 ' + money(data.balance.wallet) + ' · 套餐 ' + money(data.balance.planRemaining)
+      const discountPercent = Number(data.tokenDiscountPercent || 0)
+      $('#token-discount').textContent = discountPercent > 0 ? discountPercent + '% off（实际支付 ' + (100 - discountPercent) + '%）' : '无折扣（原价）'
       $('#plan-expiry').textContent = data.balance.planExpiresAt ? new Date(data.balance.planExpiresAt).toLocaleDateString('zh-CN') : '未开通'
       const resetNode = $('#plan-reset')
       if (resetNode) resetNode.textContent = data.balance.planNextResetAt ? new Date(data.balance.planNextResetAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'

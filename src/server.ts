@@ -336,7 +336,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.get('/api/me/overview', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
     const balance = await billing.balance(user.id)
-    return { user, balance: BillingService.formatBalance(balance), apiBaseUrl: `${config.publicBaseUrl}/v1`, downloads: { chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl }, mailConfigured: mail.configured }
+    const discount = await db.one<any>('SELECT token_discount_bps FROM users WHERE id = $1', [user.id])
+    const discountBps = Math.max(0, Math.min(9900, Number(discount?.token_discount_bps || 0)))
+    return { user, balance: BillingService.formatBalance(balance), tokenDiscountBps: discountBps, tokenDiscountPercent: discountBps / 100, apiBaseUrl: `${config.publicBaseUrl}/v1`, downloads: { chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl }, mailConfigured: mail.configured }
   })
   app.get('/api/me/balance', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
