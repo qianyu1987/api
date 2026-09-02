@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
   status TEXT NOT NULL DEFAULT 'active',
+  -- Per-user token price discount in basis points (100 = 1%).
+  token_discount_bps INTEGER NOT NULL DEFAULT 0,
   invite_code TEXT NOT NULL,
   -- Compatibility projection; invitation_bindings is the referral source of truth.
   invited_by UUID REFERENCES users(id) ON DELETE SET NULL,
@@ -87,12 +89,16 @@ CREATE TABLE IF NOT EXISTS users (
   CHECK (char_length(invite_code) BETWEEN 6 AND 64),
   CHECK (invite_code = upper(invite_code)),
   CHECK (role IN ('user', 'admin')),
-  CHECK (status IN ('active', 'suspended', 'disabled'))
+  CHECK (status IN ('active', 'suspended', 'disabled')),
+  CHECK (token_discount_bps BETWEEN 0 AND 9900)
 );
 -- Existing v1.0.3 installations have an already-created users table. Add the
 -- v1.0.5 fields before any index references them.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_discount_bps INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_token_discount_bps_check;
+ALTER TABLE users ADD CONSTRAINT users_token_discount_bps_check CHECK (token_discount_bps BETWEEN 0 AND 9900);
 CREATE UNIQUE INDEX IF NOT EXISTS users_username_ci_unique ON users (lower(username));
 CREATE UNIQUE INDEX IF NOT EXISTS users_invite_code_unique ON users (invite_code);
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_ci_unique ON users (lower(email)) WHERE email IS NOT NULL;

@@ -14,6 +14,7 @@ export type PriceSnapshot = TokenRates & {
   priceSource?: string | null
   priceEffectiveAt?: string | null
   fxRateCnyMicros?: bigint | null
+  discountBps?: bigint
 }
 
 export type PriceContext = {
@@ -34,6 +35,7 @@ export type StoredPriceSnapshot = {
   priceSource: string | null
   priceEffectiveAt: string | null
   fxRateCnyMicros: string | null
+  discountBps: string
   rates: {
     inputSellMicrosPerMillion: string
     outputSellMicrosPerMillion: string
@@ -254,6 +256,21 @@ export function calculatePrice(price: PriceSnapshot, usage: UsageTokens, mode: B
   return calculateUsageMoney(usage, price)
 }
 
+/** Apply a per-user token discount while preserving provider cost rates. */
+export function applyTokenDiscount(price: PriceSnapshot, discountBps: bigint): PriceSnapshot {
+  if (discountBps < 0n || discountBps > 9900n) throw new Error('用户折扣必须为 0-99%')
+  if (discountBps === 0n || price.billingMode === 'fixed') return { ...price, discountBps }
+  const discounted = (rate: bigint): bigint => {
+    if (rate <= 0n) return 0n
+    const value = (rate * (10_000n - discountBps)) / 10_000n
+    return value > 0n ? value : 1n
+  }
+  return { ...price, discountBps,
+    inputSellMicrosPerMillion: discounted(price.inputSellMicrosPerMillion),
+    outputSellMicrosPerMillion: discounted(price.outputSellMicrosPerMillion),
+    cacheSellMicrosPerMillion: discounted(price.cacheSellMicrosPerMillion) }
+}
+
 export function estimatePrice(price: PriceSnapshot, payload: Record<string, unknown>, mode: BillingMode = price.billingMode || 'token'): { usage: UsageTokens; chargeMicros: bigint; costMicros: bigint } {
   const usage = estimatedRequestTokens(payload)
   return { usage, ...calculatePrice(price, usage, mode) }
@@ -270,6 +287,7 @@ export function serializePriceSnapshot(price: PriceSnapshot, estimatedUsage: Usa
     priceSource: price.priceSource || null,
     priceEffectiveAt: price.priceEffectiveAt || null,
     fxRateCnyMicros: price.fxRateCnyMicros?.toString() || null,
+    discountBps: (price.discountBps || 0n).toString(),
     rates: {
       inputSellMicrosPerMillion: price.inputSellMicrosPerMillion.toString(),
       outputSellMicrosPerMillion: price.outputSellMicrosPerMillion.toString(),
@@ -310,6 +328,7 @@ export function deserializePriceSnapshot(value: unknown, fallback?: PriceSnapsho
     fxRateCnyMicros: snapshot.fxRateCnyMicros === null || snapshot.fxRateCnyMicros === undefined
       ? fallback?.fxRateCnyMicros || null
       : bigintValue(snapshot.fxRateCnyMicros),
+    discountBps: bigintValue(snapshot.discountBps ?? fallback?.discountBps),
     inputSellMicrosPerMillion: bigintValue(rates.inputSellMicrosPerMillion ?? fallback?.inputSellMicrosPerMillion),
     outputSellMicrosPerMillion: bigintValue(rates.outputSellMicrosPerMillion ?? fallback?.outputSellMicrosPerMillion),
     cacheSellMicrosPerMillion: bigintValue(rates.cacheSellMicrosPerMillion ?? fallback?.cacheSellMicrosPerMillion),
@@ -570,18 +589,21 @@ export class BillingService {
         }
       : first
     const mode = input.billingMode || input.price.billingMode || 'token'
-    const estimate = estimatePrice(input.price, input.payload, mode)
-    if (estimate.chargeMicros <= 0n) throw new Error('售价配置必须大于 0，禁止无价格调用')
-    const snapshot = serializePriceSnapshot(input.price, estimate.usage, input, mode)
+    let estimate: ReturnType<typeof estimatePrice>
+    let snapshot: StoredPriceSnapshot
 
     return this.db.tx(async (client) => {
-      const user = await one<any>(client, 'SELECT id FROM users WHERE id = $1 FOR UPDATE', [input.userId])
+      const user = await one<any>(client, 'SELECT id, token_discount_bps FROM users WHERE id = $1 FOR UPDATE', [input.userId])
       if (!user) throw new Error('用户不存在')
       const existing = await one<any>(client, 'SELECT * FROM billing_reservations WHERE request_id = $1 FOR UPDATE', [input.requestId])
       if (existing) {
         if (String(existing.user_id) !== input.userId) throw new Error('请求编号已被占用')
         return reservationResult(existing)
       }
+      const effectivePrice = applyTokenDiscount(input.price, bigintValue(user.token_discount_bps))
+      estimate = estimatePrice(effectivePrice, input.payload, mode)
+      if (estimate.chargeMicros <= 0n) throw new Error('售价配置必须大于 0，禁止无价格调用')
+      snapshot = serializePriceSnapshot(effectivePrice, estimate.usage, input, mode)
       await client.query('INSERT INTO wallets(user_id) VALUES ($1) ON CONFLICT(user_id) DO NOTHING', [input.userId])
       const subscription = await one<any>(client, 'SELECT id, remaining_micros, reserved_micros, status, expires_at FROM subscriptions WHERE user_id = $1 FOR UPDATE', [input.userId])
       const wallet = await one<any>(client, 'SELECT balance_micros, reserved_micros FROM wallets WHERE user_id = $1 FOR UPDATE', [input.userId])

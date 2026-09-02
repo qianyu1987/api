@@ -414,7 +414,6 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           u.final_channel_id, u.final_channel_name_snapshot,
           u.input_tokens, u.output_tokens, u.cache_tokens, u.reported_total_tokens,
           u.plan_charge_micros, u.wallet_charge_micros, u.charge_micros,
-          u.cost_micros, u.profit_micros,
           u.status_code, u.status, u.success, u.duration_ms, u.latency_ms,
           u.is_estimated_usage, u.estimated_usage,
           k.name AS current_key_name, c.name AS current_channel_name
@@ -429,7 +428,6 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         channel: row.final_channel_name_snapshot || row.current_channel_name || '',
         inputTokens: String(row.input_tokens), outputTokens: String(row.output_tokens), cacheTokens: String(row.cache_tokens), totalTokens: String(row.reported_total_tokens),
         planCharge: publicMoney(row.plan_charge_micros), walletCharge: publicMoney(row.wallet_charge_micros), charge: publicMoney(row.charge_micros),
-        estimatedCost: publicMoney(row.cost_micros), profit: publicMoney(row.profit_micros),
         statusCode: row.status_code, status: row.status, success: row.success,
         latencyMs: Number(row.duration_ms ?? row.latency_ms ?? 0), estimatedUsage: Boolean(row.is_estimated_usage ?? row.estimated_usage),
       }))
@@ -438,8 +436,6 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         COALESCE(sum(charge_micros),0)::bigint AS charge,
         COALESCE(sum(plan_charge_micros),0)::bigint AS plan_charge,
         COALESCE(sum(wallet_charge_micros),0)::bigint AS wallet_charge,
-        COALESCE(sum(cost_micros),0)::bigint AS cost,
-        COALESCE(sum(profit_micros),0)::bigint AS profit,
         COALESCE(sum(input_tokens),0)::bigint AS input,
         COALESCE(sum(output_tokens),0)::bigint AS output,
         COALESCE(sum(cache_tokens),0)::bigint AS cache
@@ -447,7 +443,6 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       return { items, nextCursor, summary: {
         requests: Number(summary?.requests || 0), charge: publicMoney(summary?.charge),
         planCharge: publicMoney(summary?.plan_charge), walletCharge: publicMoney(summary?.wallet_charge),
-        estimatedCost: publicMoney(summary?.cost), profit: publicMoney(summary?.profit),
         inputTokens: String(summary?.input || 0), outputTokens: String(summary?.output || 0), cacheTokens: String(summary?.cache || 0),
       } }
     } catch (error) {
@@ -710,12 +705,23 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if (q.status) { values.push(String(q.status)); where.push(`u.status=$${values.length}`) }
     if (q.search) { values.push(`%${String(q.search).slice(0, 128)}%`); where.push(`u.username ILIKE $${values.length}`) }
     return { items: await db.query<any>(`SELECT u.id,u.username,u.email,u.role,u.status,u.invite_code,u.last_login_at,u.created_at,u.disabled_at,
-      w.balance_micros,aw.balance_micros AS affiliate_balance_micros,
+      w.balance_micros,aw.balance_micros AS affiliate_balance_micros,u.token_discount_bps,
       s.remaining_micros AS plan_remaining_micros,s.reset_quota_micros AS plan_quota_micros,
       s.expires_at AS plan_expires_at,s.next_reset_at AS plan_next_reset_at,s.last_reset_at AS plan_last_reset_at,s.status AS plan_status
       FROM users u LEFT JOIN wallets w ON w.user_id=u.id LEFT JOIN affiliate_wallets aw ON aw.user_id=u.id
       LEFT JOIN subscriptions s ON s.user_id=u.id ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY u.created_at DESC LIMIT 200`, values) }
+  })
+  app.patch('/api/admin/users/:id/discount', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const raw = (request.body as any)?.discountBps
+    const discountBps = Number(raw)
+    if (!Number.isInteger(discountBps) || discountBps < 0 || discountBps > 99) {
+      reply.code(400).send({ error: { message: '折扣必须为 0-99 的百分比' } }); return
+    }
+    const row = await db.one<any>('UPDATE users SET token_discount_bps=$1,updated_at=now() WHERE id=$2 RETURNING id,username,token_discount_bps', [discountBps * 100, String((request.params as any).id)])
+    if (!row) { reply.code(404).send({ error: { message: '用户不存在' } }); return }
+    return { id: String(row.id), username: row.username, discountBps: Number(row.token_discount_bps) / 100 }
   })
   app.get('/api/admin/subscription-resets', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return

@@ -174,7 +174,7 @@
       if (state.usageCursor) params.set('cursor', state.usageCursor)
       const data = await api('/api/me/usage?' + params)
       renderUsage('#usage-table', data.items, false, !reset); state.usageCursor = data.nextCursor; $('#usage-more').classList.toggle('hidden', !data.nextCursor)
-      $('#usage-summary').innerHTML = '<span>请求 <strong>' + integer(data.summary.requests) + '</strong></span><span>收费 <strong>' + money(data.summary.charge) + '</strong></span><span>套餐扣费 <strong>' + money(data.summary.planCharge) + '</strong></span><span>钱包扣费 <strong>' + money(data.summary.walletCharge) + '</strong></span><span>成本 <strong>' + money(data.summary.estimatedCost) + '</strong></span><span>利润 <strong>' + money(data.summary.profit) + '</strong></span>'
+      $('#usage-summary').innerHTML = '<span>请求 <strong>' + integer(data.summary.requests) + '</strong></span><span>收费 <strong>' + money(data.summary.charge) + '</strong></span><span>套餐扣费 <strong>' + money(data.summary.planCharge) + '</strong></span><span>钱包扣费 <strong>' + money(data.summary.walletCharge) + '</strong></span>'
     } catch (error) { toast(error.message, true) }
   }
   function renderUsage(selector, items, compact, append) {
@@ -182,7 +182,7 @@
     if (!items?.length) { if (!append) body.innerHTML = '<tr><td colspan="' + (compact ? 5 : 6) + '" class="empty">暂无用量记录</td></tr>'; return }
     const rows = items.map((item) => compact
       ? '<tr><td>' + date(item.time) + '</td><td>' + esc(item.model) + '</td><td>' + integer(item.totalTokens) + '</td><td>' + money(item.charge) + '</td><td><span class="state ' + (item.success ? 'good' : 'bad') + '">' + (item.success ? '成功' : '失败') + '</span></td></tr>'
-      : '<tr><td>' + date(item.time) + '</td><td><code>' + esc(item.requestId).slice(0, 12) + '…</code></td><td><strong>' + esc(item.model) + '</strong><small class="subline">' + esc(item.channel || '—') + '</small></td><td>' + integer(item.totalTokens) + '<small class="subline">入 ' + integer(item.inputTokens) + ' / 出 ' + integer(item.outputTokens) + '</small></td><td>' + money(item.charge) + '<small class="subline">套餐 ' + money(item.planCharge) + ' · 钱包 ' + money(item.walletCharge) + '</small><small class="subline">成本 ' + money(item.estimatedCost) + ' · 利润 ' + money(item.profit) + '</small></td><td><span class="state ' + (item.success ? 'good' : 'bad') + '">' + (item.statusCode ?? '—') + ' · ' + (item.success ? '成功' : '失败') + '</span></td></tr>').join('')
+      : '<tr><td>' + date(item.time) + '</td><td><code>' + esc(item.requestId).slice(0, 12) + '…</code></td><td><strong>' + esc(item.model) + '</strong><small class="subline">' + esc(item.channel || '—') + '</small></td><td>' + integer(item.totalTokens) + '<small class="subline">入 ' + integer(item.inputTokens) + ' / 出 ' + integer(item.outputTokens) + '</small></td><td>' + money(item.charge) + '<small class="subline">套餐 ' + money(item.planCharge) + ' · 钱包 ' + money(item.walletCharge) + '</small></td><td><span class="state ' + (item.success ? 'good' : 'bad') + '">' + (item.statusCode ?? '—') + ' · ' + (item.success ? '成功' : '失败') + '</span></td></tr>').join('')
     if (append) body.insertAdjacentHTML('beforeend', rows); else body.innerHTML = rows
   }
   async function loadAffiliate() {
@@ -378,7 +378,16 @@
     if (editor.dataset.adminForm === 'fixed-price' && event.target.matches('[data-fixed-sell]')) editor.dataset.manualSell = 'true'
   })
   $('#admin-content').addEventListener('submit', async (event) => {
-    const editor = event.target.closest('[data-admin-form]'); if (!editor) return; event.preventDefault()
+    event.preventDefault()
+    const discountForm = event.target.closest('.inline-discount')
+    if (discountForm) {
+      const value = Number(new FormData(discountForm).get('discount'))
+      if (!Number.isInteger(value) || value < 0 || value > 99) { toast('折扣必须为 0-99%', true); return }
+      const button = discountForm.querySelector('button'); pending(button, true, '保存中…')
+      try { await api('/api/admin/users/' + encodeURIComponent(discountForm.dataset.userId) + '/discount', { method: 'PATCH', body: JSON.stringify({ discountBps: value }) }); toast('用户折扣已保存'); await loadAdmin('users') } catch (error) { toast(error.message, true); pending(button, false) }
+      return
+    }
+    const editor = event.target.closest('[data-admin-form]'); if (!editor) return
     try { await submitAdmin(editor) } catch (error) { toast(error.message, true) }
   })
   $('#admin-content').addEventListener('click', async (event) => {

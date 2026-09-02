@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import {
   allocateSettlementCharge,
+  applyTokenDiscount,
   deserializePriceSnapshot,
   serializePriceSnapshot,
   nextShanghaiReset,
@@ -51,6 +52,13 @@ describe('billing invariants', () => {
       walletChargeMicros: 0n,
       overageMicros: 0n,
     })
+  })
+
+  test('applies user token discount to selling rates only', () => {
+    const discounted = applyTokenDiscount(price, 2500n)
+    expect(discounted.inputSellMicrosPerMillion).toBe(750_000n)
+    expect(discounted.outputSellMicrosPerMillion).toBe(1_500_000n)
+    expect(discounted.inputCostMicrosPerMillion).toBe(price.inputCostMicrosPerMillion)
   })
 
   test('uses a matched fixed-route specification and rejects an unpriced specification', async () => {
