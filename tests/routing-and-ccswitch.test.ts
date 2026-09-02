@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { buildCcswitchImportLink, ccswitchModel } from '../src/lib/ccswitch.js'
-import { safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
+import { normalizeResponsesTools, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
 
 afterEach(() => vi.restoreAllMocks())
 
 describe('channel failover policy', () => {
+  test('converts Responses custom tools to function tools accepted by upstream gateways', () => {
+    const payload: any = { tools: [{ type: 'custom', name: 'lookup', description: 'Look up data', format: { type: 'text' } }] }
+    normalizeResponsesTools(payload)
+    expect(payload.tools[0]).toMatchObject({ type: 'function', name: 'lookup', description: 'Look up data', parameters: { type: 'object' } })
+  })
   test.each([408, 429, 500, 502, 503, 599])('fails over retryable HTTP %i', (status) => {
     expect(shouldFailover(status)).toBe(true)
   })

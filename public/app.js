@@ -111,7 +111,9 @@
     try {
       const data = await api('/api/me/overview')
       state.user = data.user; $('#user-label').textContent = data.user.username
-      $('#balance-total').textContent = money({ micros: toMicros(data.balance.wallet) + toMicros(data.balance.planRemaining) })
+      const walletMicros = yuanToMicros(data.balance.wallet || '0')
+      const planMicros = yuanToMicros(data.balance.planRemaining || '0')
+      $('#balance-total').textContent = money({ micros: walletMicros + planMicros })
       $('#balance-detail').textContent = '钱包 ' + money(data.balance.wallet) + ' · 套餐 ' + money(data.balance.planRemaining)
       $('#plan-expiry').textContent = data.balance.planExpiresAt ? new Date(data.balance.planExpiresAt).toLocaleDateString('zh-CN') : '未开通'
       const resetNode = $('#plan-reset')
