@@ -227,6 +227,12 @@
       const rows = items.map((item) => '<tr><td><strong>' + esc(item.name) + '</strong><small class="subline">' + esc(item.code) + '</small></td><td>' + money({ micros: item.price_micros }) + '</td><td>' + money({ micros: item.quota_micros }) + '</td><td>周期重置</td><td>30 天</td><td><span class="state ' + (item.active && item.enabled ? 'good' : 'bad') + '">' + (item.active && item.enabled ? '启用' : '停用') + '</span></td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="plan" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button danger-button admin-delete" type="button" data-kind="plan" data-id="' + esc(item.id) + '">停用</button></td></tr>')
       return '<div class="admin-toolbar"><p>独立购买、支付入账和套餐优先扣费均已启用。</p><button class="button secondary" type="button" data-bootstrap="monthly-plan">初始化 ¥149 月套餐</button></div>' + editor + table(['套餐', '售价', '可消费额度', '毛利率', '有效期', '状态', '操作'], rows, '尚未配置套餐')
     }
+    if (tab === 'users-discount') {
+      return table(['用户', '钱包', 'Token 折扣', '套餐额度'], items.map((item) => {
+        const discount = Number(item.token_discount_bps || 0) / 100
+        return '<tr><td>' + esc(item.username) + '</td><td>' + money({ micros: item.balance_micros }) + '</td><td><form class="inline-discount" data-user-id="' + esc(item.id) + '"><input name="discount" type="number" min="0" max="99" value="' + esc(discount) + '"><button class="small-button" type="submit">保存</button></form></td><td>' + money({ micros: item.plan_remaining_micros }) + '</td></tr>'
+      }))
+    }
     if (tab === 'affiliate-admin') {
       const settings = Object.fromEntries((data.settings || []).map((item) => [item.key, item.value]))
       const editor = form('affiliate-settings', [field('rateBps', '返利比例（基点，1000 = 10%）', settings.affiliate_rate_bps || '1000', 'number', 'min="0" max="10000"'), check('enabled', '开启返利', settings.affiliate_enabled !== 'false')], '保存返利设置')
@@ -255,7 +261,7 @@
     state.adminTab = tab
     $$('.admin-tabs .tab').forEach((node) => node.classList.toggle('active', node.dataset.adminTab === tab))
     const endpoints = { channels: '/api/admin/channels', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', settings: '/api/admin/settings' }
-    try { $('#admin-content').innerHTML = renderAdmin(tab, await api(endpoints[tab])) } catch (error) { toast(error.message, true) }
+    try { $('#admin-content').innerHTML = renderAdmin(tab === 'users' ? 'users-discount' : tab, await api(endpoints[tab])) } catch (error) { toast(error.message, true) }
   }
   function setFormValue(editor, name, value) {
     const node = editor.elements.namedItem(name); if (!node) return
