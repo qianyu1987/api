@@ -59,8 +59,15 @@ function shouldFailover(status: number): boolean {
 
 export function normalizeResponsesTools(parsed: any): void {
   if (!Array.isArray(parsed?.tools)) return
-  parsed.tools = parsed.tools.map((tool: any) => {
-    if (!tool || typeof tool !== 'object' || tool.type !== 'custom') return tool
+  parsed.tools = parsed.tools.flatMap((tool: any) => {
+    if (!tool || typeof tool !== 'object') return [tool]
+    if (tool.type === 'namespace') {
+      const nested = Array.isArray(tool.functions) ? tool.functions : Array.isArray(tool.tools) ? tool.tools : null
+      if (nested?.length) {
+        return nested.map((entry: any) => ({ ...entry, name: tool.name && entry?.name ? `${String(tool.name).slice(0, 128)}.${String(entry.name).slice(0, 128)}` : entry?.name, type: entry?.type || 'function' }))
+      }
+    }
+    if (tool.type !== 'custom' && tool.type !== 'namespace') return [tool]
     const custom = tool.custom && typeof tool.custom === 'object' ? tool.custom : tool
     const format = custom.format && typeof custom.format === 'object' ? custom.format : null
     let parameters = custom.parameters || custom.input_schema || custom.schema
@@ -69,13 +76,13 @@ export function normalizeResponsesTools(parsed: any): void {
     // shape and keep the original description/name for model compatibility.
     if (!parameters && format && format.type === 'json_schema') parameters = format.schema || format.value
     if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) parameters = { type: 'object', properties: {}, additionalProperties: true }
-    return {
+    return [{
       type: 'function',
       name: String(custom.name || tool.name || 'custom_tool').slice(0, 256),
       description: typeof custom.description === 'string' ? custom.description.slice(0, 4096) : undefined,
       parameters,
       strict: custom.strict === true || tool.strict === true,
-    }
+    }]
   })
 }
 
@@ -92,7 +99,7 @@ function rewriteRequestBody(body: Buffer | undefined, requestedModel: string, up
       parsed.model = upstreamModel
       changed = true
     }
-    if (path === '/responses' && Array.isArray(parsed.tools) && parsed.tools.some((tool: any) => tool?.type === 'custom')) {
+    if (path === '/responses' && Array.isArray(parsed.tools) && parsed.tools.some((tool: any) => tool?.type === 'custom' || tool?.type === 'namespace')) {
       normalizeResponsesTools(parsed)
       changed = true
     }

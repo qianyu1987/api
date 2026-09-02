@@ -10,6 +10,12 @@ describe('channel failover policy', () => {
     normalizeResponsesTools(payload)
     expect(payload.tools[0]).toMatchObject({ type: 'function', name: 'lookup', description: 'Look up data', parameters: { type: 'object' } })
   })
+
+  test('expands Responses namespace tools into function tools', () => {
+    const payload: any = { tools: [{ type: 'namespace', name: 'files', functions: [{ name: 'search', parameters: { type: 'object' } }] }] }
+    normalizeResponsesTools(payload)
+    expect(payload.tools).toEqual([{ type: 'function', name: 'files.search', parameters: { type: 'object' } }])
+  })
   test.each([408, 429, 500, 502, 503, 599])('fails over retryable HTTP %i', (status) => {
     expect(shouldFailover(status)).toBe(true)
   })
