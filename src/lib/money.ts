@@ -1,6 +1,10 @@
 export const MICROS_PER_YUAN = 1_000_000n
 export const MICROS_PER_CENT = 10_000n
 export const TOKENS_PER_MILLION = 1_000_000n
+// JSON request bytes are not one token each. Use a conservative, provider-
+// neutral UTF-8 estimate so large Codex tool definitions do not make a user
+// with sufficient funds fail preauthorization unnecessarily.
+export const ESTIMATED_BYTES_PER_TOKEN = 4n
 // Large Codex clients commonly declare a provider maximum that is much higher
 // than the response they actually consume. Keep the reservation bounded; the
 // final settlement still uses reported usage when available.
@@ -107,12 +111,12 @@ function reservedOutputTokens(payload: Record<string, unknown>): bigint {
 }
 
 export function estimatedRequestTokens(payload: Record<string, unknown>): UsageTokens {
-  // A byte is a conservative upper bound for a token in a UTF-8 JSON request.
-  // Keep this bound so a successful request cannot later overrun the user's
-  // available balance when an upstream omits usage details.
+  // Estimate request tokens from UTF-8 JSON size. Final settlement still uses
+  // provider-reported usage where available; this estimate only reserves funds.
   let encoded = ''
   try { encoded = JSON.stringify(payload) || '' } catch { /* malformed local payloads remain billable */ }
-  const input = BigInt(Math.max(1, Buffer.byteLength(encoded, 'utf8')))
+  const inputBytes = BigInt(Math.max(1, Buffer.byteLength(encoded, 'utf8')))
+  const input = ceilDiv(inputBytes, ESTIMATED_BYTES_PER_TOKEN)
   // Newer OpenAI-compatible APIs use max_completion_tokens. Honor all common
   // aliases, but cap pathological client-declared maxima for the initial hold.
   const output = reservedOutputTokens(payload)
