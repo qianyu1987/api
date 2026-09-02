@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { buildCcswitchImportLink, ccswitchModel } from '../src/lib/ccswitch.js'
-import { normalizeResponsesTools, rewriteRequestBody, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
+import { isInvalidApiResponse, normalizeResponsesTools, rewriteRequestBody, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -27,6 +27,12 @@ describe('channel failover policy', () => {
 
   test.each([200, 201, 301, 400, 401, 403, 404, 409, 422, 499])('does not fail over ordinary HTTP %i', (status) => {
     expect(shouldFailover(status)).toBe(false)
+  })
+
+  test('rejects an HTML dashboard returned as a successful API response', () => {
+    expect(isInvalidApiResponse(200, { 'content-type': 'text/html; charset=utf-8' })).toBe(true)
+    expect(isInvalidApiResponse(200, { 'content-type': 'application/json; charset=utf-8' })).toBe(false)
+    expect(isInvalidApiResponse(500, { 'content-type': 'text/html' })).toBe(false)
   })
 
   test('normalizes failed-attempt diagnostics before persistence', () => {

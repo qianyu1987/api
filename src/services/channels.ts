@@ -57,6 +57,15 @@ function shouldFailover(status: number): boolean {
   return status === 408 || status === 429 || status >= 500
 }
 
+export function isInvalidApiResponse(status: number, headers: Record<string, unknown>): boolean {
+  if (status < 200 || status >= 300) return false
+  const contentType = String(headers['content-type'] || headers['Content-Type'] || '').toLowerCase()
+  // A common channel misconfiguration omits `/v1`, causing the provider's
+  // dashboard HTML to be returned with HTTP 200. It is never a valid OpenAI
+  // API response and must participate in normal channel failover.
+  return contentType.includes('text/html')
+}
+
 export function normalizeResponsesTools(parsed: any): void {
   if (!Array.isArray(parsed?.tools)) return
   parsed.tools = parsed.tools.flatMap((tool: any) => {
@@ -220,11 +229,17 @@ export class ChannelService {
         }
         const response = await request(target, { method: method as any, headers: outgoingHeaders, body: outgoingBody && outgoingBody.length ? outgoingBody : undefined, headersTimeout: channel.timeoutMs, bodyTimeout: channel.timeoutMs, maxRedirections: 0 })
         const latencyMs = Date.now() - started
-        const retryable = shouldFailover(response.statusCode)
+        const invalidResponse = isInvalidApiResponse(response.statusCode, response.headers as Record<string, unknown>)
+        const retryable = invalidResponse || shouldFailover(response.statusCode)
         const attempt: RelayAttempt = { channelId: channel.id, channelName: channel.name, attemptNo: index + 1, statusCode: response.statusCode, errorType: null, errorMessage: null, latencyMs }
         attempt.upstreamModel = upstreamModel
         attempt.retryable = retryable
-        attempt.outcome = responseOutcome(response.statusCode)
+        attempt.outcome = invalidResponse ? 'server_error' : responseOutcome(response.statusCode)
+        if (invalidResponse) {
+          attempt.errorType = 'invalid_response'
+          attempt.errorCode = 'upstream_invalid_content_type'
+          attempt.errorMessage = '上游返回非 API 响应'
+        }
         attempts.push(attempt)
         if (!retryable) {
           // Metrics/circuit bookkeeping must never turn an already successful
@@ -238,7 +253,7 @@ export class ChannelService {
         // channel attempt. Earlier bodies must be drained before failover; do
         // not retain one of those drained responses and accidentally return it
         // after a later network error.
-        if (index === channels.length - 1) return { response, channel, attempts, upstreamModel }
+        if (index === channels.length - 1 && !invalidResponse) return { response, channel, attempts, upstreamModel }
         try { for await (const _chunk of response.body as any) { /* drain */ } } catch { /* noop */ }
       } catch (error: any) {
         const latencyMs = Date.now() - started
