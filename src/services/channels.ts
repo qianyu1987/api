@@ -64,7 +64,10 @@ export function normalizeResponsesTools(parsed: any): void {
     if (tool.type === 'namespace') {
       const nested = Array.isArray(tool.functions) ? tool.functions : Array.isArray(tool.tools) ? tool.tools : null
       if (nested?.length) {
-        return nested.map((entry: any) => ({ ...entry, name: tool.name && entry?.name ? `${String(tool.name).slice(0, 128)}.${String(entry.name).slice(0, 128)}` : entry?.name, type: entry?.type || 'function' }))
+        const expanded = nested.map((entry: any) => ({ ...entry, name: tool.name && entry?.name ? `${String(tool.name).slice(0, 128)}.${String(entry.name).slice(0, 128)}` : entry?.name, type: entry?.type || 'function' }))
+        const holder = { tools: expanded }
+        normalizeResponsesTools(holder)
+        return holder.tools
       }
     }
     if (tool.type !== 'custom' && tool.type !== 'namespace') return [tool]
@@ -99,7 +102,7 @@ function rewriteRequestBody(body: Buffer | undefined, requestedModel: string, up
       parsed.model = upstreamModel
       changed = true
     }
-    if (path === '/responses' && Array.isArray(parsed.tools) && parsed.tools.some((tool: any) => tool?.type === 'custom' || tool?.type === 'namespace')) {
+    if (path.split('?')[0] === '/responses' && Array.isArray(parsed.tools) && parsed.tools.some((tool: any) => tool?.type === 'custom' || tool?.type === 'namespace')) {
       normalizeResponsesTools(parsed)
       changed = true
     }
