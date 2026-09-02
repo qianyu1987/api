@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { buildCcswitchImportLink, ccswitchModel } from '../src/lib/ccswitch.js'
-import { normalizeResponsesTools, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
+import { normalizeResponsesTools, rewriteRequestBody, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -15,6 +15,11 @@ describe('channel failover policy', () => {
     const payload: any = { tools: [{ type: 'namespace', name: 'files', functions: [{ name: 'search', parameters: { type: 'object' } }] }] }
     normalizeResponsesTools(payload)
     expect(payload.tools).toEqual([{ type: 'function', name: 'files.search', parameters: { type: 'object' } }])
+  })
+
+  test('drops tool_choice when a Responses request has no tools', () => {
+    const body = rewriteRequestBody(Buffer.from(JSON.stringify({ model: 'gpt-5.5', tool_choice: { type: 'function', name: 'tool_choice' } })), 'gpt-5.5', 'agnes-2.5-flash', '/responses?stream=true')
+    expect(JSON.parse(String(body))).toEqual({ model: 'agnes-2.5-flash' })
   })
   test.each([408, 429, 500, 502, 503, 599])('fails over retryable HTTP %i', (status) => {
     expect(shouldFailover(status)).toBe(true)

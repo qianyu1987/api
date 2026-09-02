@@ -89,7 +89,7 @@ export function normalizeResponsesTools(parsed: any): void {
   })
 }
 
-function rewriteRequestBody(body: Buffer | undefined, requestedModel: string, upstreamModel: string, path: string): Buffer | undefined {
+export function rewriteRequestBody(body: Buffer | undefined, requestedModel: string, upstreamModel: string, path: string): Buffer | undefined {
   if (!body || !body.length) return body
   // The relay accepts JSON OpenAI-compatible requests.  Keep malformed or
   // non-JSON payloads byte-for-byte intact; the upstream can then return its
@@ -102,9 +102,18 @@ function rewriteRequestBody(body: Buffer | undefined, requestedModel: string, up
       parsed.model = upstreamModel
       changed = true
     }
-    if (path.split('?')[0] === '/responses' && Array.isArray(parsed.tools) && parsed.tools.some((tool: any) => tool?.type === 'custom' || tool?.type === 'namespace')) {
-      normalizeResponsesTools(parsed)
-      changed = true
+    if (path.split('?')[0] === '/responses') {
+      if (Array.isArray(parsed.tools) && parsed.tools.some((tool: any) => tool?.type === 'custom' || tool?.type === 'namespace')) {
+        normalizeResponsesTools(parsed)
+        changed = true
+      }
+      // Some CC Switch Codex requests carry tool_choice even when the
+      // provider-specific tool list is empty. OpenAI-compatible upstreams
+      // reject that combination; with no tools, tool_choice has no effect.
+      if ((!Array.isArray(parsed.tools) || parsed.tools.length === 0) && Object.prototype.hasOwnProperty.call(parsed, 'tool_choice')) {
+        delete parsed.tool_choice
+        changed = true
+      }
     }
     return changed ? Buffer.from(JSON.stringify(parsed)) : body
   } catch { return body }
