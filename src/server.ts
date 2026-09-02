@@ -407,13 +407,14 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       }
       const values = [...filterValues]
       const where = [...filterWhere]
+      const adminFinanceSelect = user.role === 'admin' ? ', u.cost_micros, u.profit_micros' : ''
       if (cursor) { values.push(new Date(cursor.t), cursor.id); where.push(`(u.started_at, u.request_id) < ($${values.length - 1}, $${values.length})`) }
       const rows = await db.query<any>(`SELECT
           u.created_at, u.started_at, u.request_id, u.api_key_id, u.key_id,
           u.api_key_name_snapshot, u.requested_model, u.upstream_model,
           u.final_channel_id, u.final_channel_name_snapshot,
           u.input_tokens, u.output_tokens, u.cache_tokens, u.reported_total_tokens,
-          u.plan_charge_micros, u.wallet_charge_micros, u.charge_micros,
+          u.plan_charge_micros, u.wallet_charge_micros, u.charge_micros ${adminFinanceSelect},
           u.status_code, u.status, u.success, u.duration_ms, u.latency_ms,
           u.is_estimated_usage, u.estimated_usage,
           k.name AS current_key_name, c.name AS current_channel_name
@@ -430,12 +431,14 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         planCharge: publicMoney(row.plan_charge_micros), walletCharge: publicMoney(row.wallet_charge_micros), charge: publicMoney(row.charge_micros),
         statusCode: row.status_code, status: row.status, success: row.success,
         latencyMs: Number(row.duration_ms ?? row.latency_ms ?? 0), estimatedUsage: Boolean(row.is_estimated_usage ?? row.estimated_usage),
+        ...(user.role === 'admin' ? { estimatedCost: publicMoney(row.cost_micros), profit: publicMoney(row.profit_micros) } : {}),
       }))
       const nextCursor = rows.length > limit ? encodeCursor(rows[limit - 1].started_at || rows[limit - 1].created_at, rows[limit - 1].request_id) : null
       const summary = await db.one<any>(`SELECT count(*)::int AS requests,
         COALESCE(sum(charge_micros),0)::bigint AS charge,
         COALESCE(sum(plan_charge_micros),0)::bigint AS plan_charge,
-        COALESCE(sum(wallet_charge_micros),0)::bigint AS wallet_charge,
+        COALESCE(sum(wallet_charge_micros),0)::bigint AS wallet_charge
+        ${user.role === 'admin' ? ', COALESCE(sum(cost_micros),0)::bigint AS cost, COALESCE(sum(profit_micros),0)::bigint AS profit' : ''},
         COALESCE(sum(input_tokens),0)::bigint AS input,
         COALESCE(sum(output_tokens),0)::bigint AS output,
         COALESCE(sum(cache_tokens),0)::bigint AS cache
@@ -444,6 +447,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         requests: Number(summary?.requests || 0), charge: publicMoney(summary?.charge),
         planCharge: publicMoney(summary?.plan_charge), walletCharge: publicMoney(summary?.wallet_charge),
         inputTokens: String(summary?.input || 0), outputTokens: String(summary?.output || 0), cacheTokens: String(summary?.cache || 0),
+        ...(user.role === 'admin' ? { estimatedCost: publicMoney(summary?.cost), profit: publicMoney(summary?.profit) } : {}),
       } }
     } catch (error) {
       reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } })
