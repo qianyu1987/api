@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import {
   MICROS_PER_CENT,
+  MAX_RESERVED_OUTPUT_TOKENS,
   calculateUsageMoney,
   ceilDiv,
   centsFromMicros,
@@ -63,12 +64,13 @@ describe('money helpers', () => {
     expect(tokenCharge(9_007_199_254_740_993n, 2_000_000n)).toBe(18_014_398_509_481_986n)
   })
 
-  test('uses a conservative request-size estimate and every common output limit', () => {
+  test('uses a conservative request-size estimate and bounds pathological output limits', () => {
     const payload = { input: '你好', max_completion_tokens: '8192' }
     const usage = estimatedRequestTokens(payload)
     expect(usage.input).toBe(BigInt(Buffer.byteLength(JSON.stringify(payload), 'utf8')))
     expect(usage.output).toBe(8192n)
     expect(estimatedRequestTokens({ max_output_tokens: 22 }).output).toBe(22n)
     expect(estimatedRequestTokens({ max_tokens: 7 }).output).toBe(7n)
+    expect(estimatedRequestTokens({ max_output_tokens: 100_000 }).output).toBe(MAX_RESERVED_OUTPUT_TOKENS)
   })
 })

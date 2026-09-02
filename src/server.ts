@@ -80,7 +80,11 @@ function bearer(value: unknown): string {
 function errorStatus(error: any): number {
   if (Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode < 600) return error.statusCode
   const message = String(error?.message || '')
-  if (/余额不足/.test(message)) return 402
+  // Keep local billing failures out of CC Switch's provider failover circuit.
+  // CC Switch treats upstream 402 as retryable, so an account with no balance
+  // would incorrectly mark every configured provider as unhealthy. A 400 is a
+  // non-retryable request error and preserves the billing message for clients.
+  if (/余额不足/.test(message)) return 400
   if (/无效|错误|必须|缺少|不足|已存在/.test(message)) return 400
   return 500
 }

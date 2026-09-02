@@ -1,6 +1,10 @@
 export const MICROS_PER_YUAN = 1_000_000n
 export const MICROS_PER_CENT = 10_000n
 export const TOKENS_PER_MILLION = 1_000_000n
+// Large Codex clients commonly declare a provider maximum that is much higher
+// than the response they actually consume. Keep the reservation bounded; the
+// final settlement still uses reported usage when available.
+export const MAX_RESERVED_OUTPUT_TOKENS = 8_192n
 
 export type TokenRates = {
   inputSellMicrosPerMillion: bigint
@@ -96,16 +100,21 @@ function declaredOutputLimit(payload: Record<string, unknown>): bigint | null {
   return null
 }
 
+function reservedOutputTokens(payload: Record<string, unknown>): bigint {
+  const declared = declaredOutputLimit(payload)
+  const output = declared ?? 4_096n
+  return output > MAX_RESERVED_OUTPUT_TOKENS ? MAX_RESERVED_OUTPUT_TOKENS : output
+}
+
 export function estimatedRequestTokens(payload: Record<string, unknown>): UsageTokens {
   // A byte is a conservative upper bound for a token in a UTF-8 JSON request.
-  // Reserving from the exact serialized request size prevents the common
-  // Chinese/code prompt cases from exceeding the old chars/4 heuristic before
-  // the upstream returns real usage.
+  // Keep this bound so a successful request cannot later overrun the user's
+  // available balance when an upstream omits usage details.
   let encoded = ''
   try { encoded = JSON.stringify(payload) || '' } catch { /* malformed local payloads remain billable */ }
   const input = BigInt(Math.max(1, Buffer.byteLength(encoded, 'utf8')))
   // Newer OpenAI-compatible APIs use max_completion_tokens. Honor all common
-  // aliases so the reservation bounds the actual provider output limit.
-  const output = declaredOutputLimit(payload) ?? 4096n
+  // aliases, but cap pathological client-declared maxima for the initial hold.
+  const output = reservedOutputTokens(payload)
   return { input, output, cache: 0n, reportedTotal: input + output }
 }
