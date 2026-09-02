@@ -281,7 +281,6 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   CHECK (expires_at IS NULL OR started_at IS NULL OR expires_at >= started_at)
 );
 CREATE INDEX IF NOT EXISTS subscriptions_status_expiry_idx ON subscriptions (status, expires_at, user_id);
-CREATE INDEX IF NOT EXISTS subscriptions_reset_due_idx ON subscriptions (status, next_reset_at, expires_at);
 
 CREATE TABLE IF NOT EXISTS channels (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -862,6 +861,7 @@ ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reset_timezone TEXT NOT NULL 
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS next_reset_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_reset_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reset_version BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS subscriptions_reset_due_idx ON subscriptions (status, next_reset_at, expires_at);
 -- The v1.0.13 monthly plan uses a ¥149 weekly-reset quota. Existing plans
 -- keep their identity while their mutable configuration is upgraded in place.
 UPDATE plans
