@@ -157,6 +157,27 @@ function cleanText(value: unknown, name: string, max = 256): string {
   return text
 }
 
+async function settingInt(db: Database, key: string, fallback: number): Promise<number> {
+  const row = await db.one<any>('SELECT value FROM app_settings WHERE key=$1', [key])
+  const value = Number(row?.value)
+  return Number.isInteger(value) && value >= 0 ? value : fallback
+}
+
+function marginBps(cost: bigint, sell: bigint): bigint {
+  if (sell <= 0n) return -10_000n
+  return ((sell - cost) * 10_000n) / sell
+}
+
+function requireMinimumMargin(cost: bigint, sell: bigint, minimumBps: number, label: string): void {
+  const actual = marginBps(cost, sell)
+  if (actual < BigInt(minimumBps)) {
+    const required = grossMarginSell(cost, BigInt(minimumBps))
+    const error = new Error(`${label}低于最低毛利 ${minimumBps / 100}%：当前约 ${Number(actual) / 100}%，售价至少应为 ${formatMicros(required)} 元`)
+    Object.assign(error, { statusCode: 400 })
+    throw error
+  }
+}
+
 function responseHeader(headers: Record<string, string | string[] | undefined>, names: string[]): string | null {
   for (const name of names) {
     const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1]
@@ -539,13 +560,79 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   })
 
   app.get('/api/orders', async (request, reply) => { const user = await requireSession(request, reply); return user ? { items: await db.query<any>('SELECT id, order_no, kind, amount_micros, payment_method, status, qr_code_url, created_at, paid_at, expires_at FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100', [user.id]) } : undefined })
+  app.get('/api/me/orders/:id', async (request, reply) => {
+    const user = await requireSession(request, reply); if (!user) return
+    const id = String((request.params as any).id || '')
+    const row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
+    if (!row) { reply.code(404).send({ error: { message: '订单不存在' } }); return }
+    return { ...row, amount: publicMoney(row.amount_micros), paidAmount: row.paid_amount_micros ? publicMoney(row.paid_amount_micros) : null }
+  })
+  app.get('/api/me/billing/:requestId', async (request, reply) => {
+    const user = await requireSession(request, reply); if (!user) return
+    const row = await db.one<any>('SELECT request_id,requested_model,upstream_model,final_channel_name_snapshot,input_tokens,output_tokens,cache_tokens,reported_total_tokens,plan_charge_micros,wallet_charge_micros,charge_micros,status,success,status_code,is_estimated_usage,error_code,error_summary,started_at,finished_at FROM usage_logs WHERE request_id=$1 AND user_id=$2', [String((request.params as any).requestId || ''), user.id])
+    if (!row) { reply.code(404).send({ error: { message: '账单记录不存在' } }); return }
+    return { ...row, charge: publicMoney(row.charge_micros), planCharge: publicMoney(row.plan_charge_micros), walletCharge: publicMoney(row.wallet_charge_micros), billingNote: row.success ? (row.is_estimated_usage ? '本次用量由系统估算，后续可能按上游实际用量校正' : '按上游实际用量结算') : (Number(row.charge_micros) > 0 ? '请求失败但已产生可计费用量' : '请求失败，未产生收费') }
+  })
+  app.get('/api/me/onboarding', async (request, reply) => {
+    const user = await requireSession(request, reply); if (!user) return
+    const [key, usage] = await Promise.all([db.one<any>('SELECT id FROM api_keys WHERE user_id=$1 AND revoked_at IS NULL LIMIT 1', [user.id]), db.one<any>('SELECT request_id,status,success,started_at FROM usage_logs WHERE user_id=$1 ORDER BY started_at DESC LIMIT 1', [user.id])])
+    return { steps: { keyCreated: Boolean(key), firstRequest: Boolean(usage), firstRequestSuccess: Boolean(usage?.success) }, completed: Boolean(key && usage?.success) }
+  })
 
   app.get('/api/admin/channels', async (request, reply) => { if (!await requireAdmin(request, reply)) return; return { items: await channels.allForAdmin() } })
+
+  app.get('/api/admin/overview', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const q = (request.query || {}) as any
+    const from = q.from ? dateFilter(q.from) : new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const to = q.to ? dateFilter(q.to, true) : new Date()
+    const [usage, orders, fees, alerts, channelsSummary] = await Promise.all([
+      db.one<any>(`SELECT count(*)::int AS requests, COALESCE(sum(charge_micros),0)::bigint AS revenue,
+        COALESCE(sum(cost_micros),0)::bigint AS cost, COALESCE(sum(profit_micros),0)::bigint AS gross_profit,
+        COALESCE(sum(CASE WHEN success THEN 0 ELSE charge_micros END),0)::bigint AS failed_charge,
+        COALESCE(avg(duration_ms) FILTER (WHERE success),0)::numeric AS avg_latency
+        FROM usage_logs WHERE started_at >= $1 AND started_at < $2`, [from, to]),
+      db.one<any>(`SELECT COALESCE(sum(CASE WHEN status='paid' THEN amount_micros ELSE 0 END),0)::bigint AS paid,
+        count(*) FILTER (WHERE status='paid')::int AS paid_orders FROM orders WHERE created_at >= $1 AND created_at < $2`, [from, to]),
+      db.one<any>(`SELECT COALESCE(sum(commission_micros),0)::bigint AS rebates FROM affiliate_commissions WHERE created_at >= $1 AND created_at < $2`, [from, to]),
+      db.query<any>(`SELECT id,kind,severity,message,status,created_at FROM risk_alerts WHERE status <> 'resolved' ORDER BY severity DESC,created_at DESC LIMIT 50`),
+      db.query<any>(`SELECT c.id,c.name,c.enabled,c.failure_count,c.last_success_at,c.last_failure_at,c.circuit_open_until,
+        COALESCE(x.requests,0)::int AS requests,COALESCE(x.failures,0)::int AS failures
+        FROM channels c LEFT JOIN (SELECT final_channel_id,count(*) AS requests,count(*) FILTER(WHERE NOT success) AS failures FROM usage_logs WHERE started_at >= $1 AND started_at < $2 GROUP BY final_channel_id) x ON x.final_channel_id=c.id ORDER BY c.priority,c.name`, [from, to]),
+    ])
+    const revenue = BigInt(String(usage?.revenue || 0)); const cost = BigInt(String(usage?.cost || 0)); const rebates = BigInt(String(fees?.rebates || 0))
+    const net = revenue - cost - rebates
+    return { period: { from: from.toISOString(), to: to.toISOString() }, minimumMarginBps: await settingInt(db, 'profit_min_margin_bps', 3000), metrics: {
+      requests: Number(usage?.requests || 0), revenue: publicMoney(revenue), cost: publicMoney(cost), grossProfit: publicMoney(revenue - cost), rebates: publicMoney(rebates), netProfit: publicMoney(net), paidOrders: Number(orders?.paid_orders || 0), paid: publicMoney(orders?.paid), failedCharge: publicMoney(usage?.failed_charge), avgLatencyMs: Number(usage?.avg_latency || 0),
+    }, alerts, channels: channelsSummary }
+  })
+
+  app.get('/api/admin/profit', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const q = (request.query || {}) as any
+    const from = q.from ? dateFilter(q.from) : new Date(Date.now() - 30 * 86400_000); const to = q.to ? dateFilter(q.to, true) : new Date()
+    const rows = await db.query<any>(`SELECT requested_model AS model, COALESCE(final_channel_name_snapshot,'—') AS channel,
+      count(*)::int AS requests,COALESCE(sum(charge_micros),0)::bigint AS revenue,COALESCE(sum(cost_micros),0)::bigint AS cost,COALESCE(sum(profit_micros),0)::bigint AS profit
+      FROM usage_logs WHERE started_at >= $1 AND started_at < $2 GROUP BY requested_model,final_channel_name_snapshot ORDER BY profit ASC LIMIT 500`, [from, to])
+    return { from: from.toISOString(), to: to.toISOString(), items: rows.map((r) => ({ ...r, revenue: publicMoney(r.revenue), cost: publicMoney(r.cost), profit: publicMoney(r.profit), marginBps: Number(r.revenue) ? Number((BigInt(String(r.profit)) * 10000n) / BigInt(String(r.revenue))) : 0 })) }
+  })
+  app.get('/api/admin/profit/export', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const q = (request.query || {}) as any
+    const from = q.from ? dateFilter(q.from) : new Date(Date.now() - 30 * 86400_000); const to = q.to ? dateFilter(q.to, true) : new Date()
+    const rows = await db.query<any>(`SELECT started_at,requested_model,COALESCE(final_channel_name_snapshot,'') AS channel,charge_micros,cost_micros,profit_micros,status FROM usage_logs WHERE started_at >= $1 AND started_at < $2 ORDER BY started_at DESC LIMIT 10000`, [from, to])
+    const csv = ['时间,模型,渠道,收入,成本,利润,状态', ...rows.map((r) => [r.started_at, r.requested_model, r.channel, formatMicros(BigInt(String(r.charge_micros))), formatMicros(BigInt(String(r.cost_micros))), formatMicros(BigInt(String(r.profit_micros))), r.status].map((v) => `"${String(v ?? '').replaceAll('"', '""')}"`).join(','))].join('\n')
+    reply.header('Content-Type', 'text/csv; charset=utf-8').header('Content-Disposition', 'attachment; filename="relay-profit.csv"').send(`\uFEFF${csv}`)
+  })
+
+  app.get('/api/admin/risk-alerts', async (request, reply) => { if (!await requireAdmin(request, reply)) return; return { items: await db.query<any>(`SELECT * FROM risk_alerts WHERE status <> 'resolved' ORDER BY created_at DESC LIMIT 200`) } })
   app.post('/api/admin/channels', async (request, reply) => { if (!await requireAdmin(request, reply)) return; try { return await channels.upsert(request.body as any) } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) } })
   app.delete('/api/admin/channels/:id', async (request, reply) => { if (!await requireAdmin(request, reply)) return; await channels.remove(String((request.params as any).id)); return { ok: true } })
   app.get('/api/admin/prices', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
-    return { items: await db.query<any>('SELECT * FROM model_prices ORDER BY model_pattern') }
+    const items = await db.query<any>('SELECT * FROM model_prices ORDER BY model_pattern')
+    const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
+    return { items, minimumMarginBps, minimumMarginPercent: minimumMarginBps / 100 }
   })
   app.post('/api/admin/prices', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
@@ -566,6 +653,10 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         moneyInput(b.fixedCostMicros ?? 0, '固定成本'), moneyInput(b.fixedSellMicros ?? 0, '固定售价'), b.active !== false,
         String(b.priceSource || 'manual').slice(0, 512), b.priceEffectiveAt ? new Date(String(b.priceEffectiveAt)) : new Date(), b.fxRateMicros ? moneyInput(b.fxRateMicros, '汇率') : null,
       ]
+      const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
+      for (const [label, cost, sell] of [['输入', values[1], values[4]], ['输出', values[2], values[5]], ['缓存', values[3], values[6]] ] as const) {
+        requireMinimumMargin(BigInt(String(cost)), BigInt(String(sell)), minimumMarginBps, `${pattern} ${label}价格`)
+      }
       return await db.one<any>(`INSERT INTO model_prices(
         model_pattern,input_cost_micros,output_cost_micros,cache_cost_micros,
         input_sell_micros,output_sell_micros,cache_sell_micros,fixed_cost_micros,fixed_sell_micros,active,
@@ -619,6 +710,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const marginBps = Number(b.marginBps ?? 8000)
       if (!Number.isInteger(marginBps) || marginBps < 0 || marginBps >= 10_000) throw new Error('毛利率应为 0-9999 基点')
       const sell = b.sellYuan !== undefined ? yuanInput(b.sellYuan, '固定售价') : b.sellMicros !== undefined ? moneyInput(b.sellMicros, '固定售价') : grossMarginSell(cost, BigInt(marginBps)).toString()
+      const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
+      requireMinimumMargin(cost, BigInt(String(sell)), minimumMarginBps, '固定接口价格')
       if (b.id) {
         return await db.one<any>(`UPDATE fixed_route_prices SET http_method=$1,path_pattern=$2,requested_model=$3,cost_micros=$4,sell_micros=$5,enabled=$6,match_priority=$7,selectors=$8,unit_path=$9,unit_mode=$10,updated_at=now() WHERE id=$11 RETURNING *`,
           [method, pathPattern, model, cost.toString(), sell, b.enabled !== false, Math.max(0, Number(b.matchPriority ?? 100) || 0), JSON.stringify(selectors), unitPath, unitMode, String(b.id)])
@@ -645,6 +738,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const name = cleanText(b.name, '套餐名称', 128)
       const price = b.priceYuan !== undefined ? yuanInput(b.priceYuan, '套餐价格', false) : moneyInput(b.priceMicros, '套餐价格', false)
       const quota = b.quotaYuan !== undefined ? yuanInput(b.quotaYuan, '套餐额度', false) : moneyInput(b.quotaMicros, '套餐额度', false)
+      const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
+      requireMinimumMargin(BigInt(quota), BigInt(price), minimumMarginBps, '套餐价格')
       const order = Math.max(0, Number(b.displayOrder ?? 100) || 0)
       if (b.id) return await db.one<any>(`UPDATE plans SET code=$1,name=$2,price_micros=$3,quota_micros=$4,duration_days=30,active=$5,enabled=$5,display_order=$6,updated_at=now() WHERE id=$7 RETURNING *`, [code, name, price, quota, b.active !== false, order, String(b.id)])
       return await db.one<any>(`INSERT INTO plans(code,name,price_micros,quota_micros,duration_days,active,enabled,display_order) VALUES($1,$2,$3,$4,30,$5,$5,$6) RETURNING *`, [code, name, price, quota, b.active !== false, order])
@@ -692,15 +787,17 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   })
   app.post('/api/admin/bootstrap/monthly-plan', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
+    const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
+    const safePrice = grossMarginSell(149000000n, BigInt(minimumMarginBps))
     const row = await db.one<any>(`WITH updated AS (
-        UPDATE plans SET name='月套餐',price_micros=149000000,quota_micros=149000000,duration_days=30,active=true,enabled=true,display_order=10,updated_at=now()
+        UPDATE plans SET name='月套餐',price_micros=$1,quota_micros=149000000,duration_days=30,active=true,enabled=true,display_order=10,updated_at=now()
         WHERE lower(code)=lower('monthly-149') RETURNING *
       ), inserted AS (
         INSERT INTO plans(code,name,price_micros,quota_micros,duration_days,active,enabled,display_order)
-        SELECT 'monthly-149','月套餐',149000000,149000000,30,true,true,10 WHERE NOT EXISTS (SELECT 1 FROM updated)
+        SELECT 'monthly-149','月套餐',$1,149000000,30,true,true,10 WHERE NOT EXISTS (SELECT 1 FROM updated)
         RETURNING *
-      ) SELECT * FROM updated UNION ALL SELECT * FROM inserted LIMIT 1`)
-    return { item: row, priceYuan: '149.00', quotaYuan: '149.00', grossMargin: '0%' }
+      ) SELECT * FROM updated UNION ALL SELECT * FROM inserted LIMIT 1`, [safePrice.toString()])
+    return { item: row, priceYuan: formatMicros(safePrice), quotaYuan: '149.00', grossMargin: `${minimumMarginBps / 100}%` }
   })
 
   app.get('/api/admin/users', async (request, reply) => {
@@ -725,9 +822,36 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if (!Number.isInteger(discountBps) || discountBps < 0 || discountBps > 99) {
       reply.code(400).send({ error: { message: '折扣必须为 0-99 的百分比' } }); return
     }
+    const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
+    const worst = await db.one<any>(`SELECT min(input_sell_micros) AS sell, max(input_cost_micros) AS cost FROM model_prices WHERE active`)
+    if (worst?.sell && worst?.cost) requireMinimumMargin(BigInt(String(worst.cost)), (BigInt(String(worst.sell)) * BigInt(100 - discountBps)) / 100n, minimumMarginBps, '用户折扣')
     const row = await db.one<any>('UPDATE users SET token_discount_bps=$1,updated_at=now() WHERE id=$2 RETURNING id,username,token_discount_bps', [discountBps * 100, String((request.params as any).id)])
     if (!row) { reply.code(404).send({ error: { message: '用户不存在' } }); return }
     return { id: String(row.id), username: row.username, discountBps: Number(row.token_discount_bps) / 100 }
+  })
+  app.post('/api/admin/users/:id/wallet-adjustment', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    try {
+      const body = (request.body || {}) as any
+      const direction = String(body.direction || '').toLowerCase()
+      if (direction !== 'credit' && direction !== 'debit') throw new Error('调账方向必须为 credit 或 debit')
+      const amount = BigInt(yuanInput(body.amountYuan ?? body.amount, '调账金额', false))
+      const note = cleanText(body.note || '', '调账原因', 500)
+      const userId = String((request.params as any).id || '')
+      return await db.tx(async (client) => {
+        const user = await client.query<any>('SELECT id,username FROM users WHERE id=$1 FOR UPDATE', [userId])
+        if (!user.rowCount) throw Object.assign(new Error('用户不存在'), { statusCode: 404 })
+        await client.query('INSERT INTO wallets(user_id) VALUES($1) ON CONFLICT(user_id) DO NOTHING', [userId])
+        const wallet = (await client.query<any>('SELECT balance_micros,reserved_micros FROM wallets WHERE user_id=$1 FOR UPDATE', [userId])).rows[0]
+        const balance = BigInt(String(wallet.balance_micros)); const reserved = BigInt(String(wallet.reserved_micros)); const available = balance - reserved
+        if (direction === 'debit' && amount > available) throw new Error(`可扣余额不足，当前可用余额 ${formatMicros(available)} 元`)
+        const next = direction === 'credit' ? balance + amount : balance - amount
+        await client.query('UPDATE wallets SET balance_micros=$1,version=version+1,updated_at=now() WHERE user_id=$2', [next.toString(), userId])
+        await client.query(`INSERT INTO wallet_ledger(user_id,kind,entry_kind,amount_micros,balance_after_micros,reference_note,metadata) VALUES($1,'admin_adjustment',$2,$3,$4,$5,$6)`, [userId, direction, (direction === 'credit' ? amount : -amount).toString(), next.toString(), note, JSON.stringify({ actorUserId: actor.id, actorUsername: actor.username, direction, amountMicros: amount.toString() })])
+        await client.query(`INSERT INTO admin_audit_events(actor_user_id,action,target_type,target_id,metadata) VALUES($1,'wallet_adjustment','user',$2,$3)`, [actor.id, userId, JSON.stringify({ direction, amountMicros: amount.toString(), note })])
+        return { userId, username: user.rows[0].username, direction, amount: publicMoney(amount), balance: publicMoney(next), available: publicMoney(next - reserved), note }
+      })
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
   app.get('/api/admin/subscription-resets', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
@@ -795,6 +919,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const enabled = b.enabled !== false
     const rateBps = Number(b.rateBps)
     if (!Number.isInteger(rateBps) || rateBps < 0 || rateBps > 10000) { reply.code(400).send({ error: { message: '返利比例应为 0-10000 基点' } }); return }
+    const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
+    const worst = await db.one<any>(`SELECT min(input_sell_micros) AS sell, max(input_cost_micros) AS cost FROM model_prices WHERE active`)
+    if (worst?.sell && worst?.cost) requireMinimumMargin(BigInt(String(worst.cost)), (BigInt(String(worst.sell)) * BigInt(10000 - rateBps)) / 10000n, minimumMarginBps, '返利比例')
     await db.tx(async (client) => {
       await client.query(`INSERT INTO app_settings(key,value) VALUES('affiliate_enabled',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()`, [String(enabled)])
       await client.query(`INSERT INTO app_settings(key,value) VALUES('affiliate_rate_bps',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()`, [String(rateBps)])
@@ -804,6 +931,19 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.get('/api/admin/settings', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
     return { items: await db.query<any>('SELECT key, value, updated_at FROM app_settings ORDER BY key'), mail: mail.status }
+  })
+  app.patch('/api/admin/settings/profit', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const b = (request.body || {}) as any
+    const margin = Number(b.minimumMarginBps ?? b.minMarginBps)
+    const fee = Number(b.paymentFeeRateBps ?? 0)
+    if (!Number.isInteger(margin) || margin < 0 || margin >= 10000) { reply.code(400).send({ error: { message: '最低毛利率必须为 0-9999 基点' } }); return }
+    if (!Number.isInteger(fee) || fee < 0 || fee > 10000) { reply.code(400).send({ error: { message: '支付手续费率必须为 0-10000 基点' } }); return }
+    await db.tx(async (client) => {
+      await client.query(`INSERT INTO app_settings(key,setting_key,value,value_json) VALUES('profit_min_margin_bps','profit.min_margin_bps',$1,to_jsonb($1::text)) ON CONFLICT(key) DO UPDATE SET value=excluded.value,value_json=excluded.value_json,updated_at=now()`, [String(margin)])
+      await client.query(`INSERT INTO app_settings(key,setting_key,value,value_json) VALUES('payment_fee_rate_bps','profit.payment_fee_rate_bps',$1,to_jsonb($1::text)) ON CONFLICT(key) DO UPDATE SET value=excluded.value,value_json=excluded.value_json,updated_at=now()`, [String(fee)])
+    })
+    return { minimumMarginBps: margin, paymentFeeRateBps: fee }
   })
   app.put('/api/admin/settings/site', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return

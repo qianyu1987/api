@@ -1,5 +1,5 @@
 (() => {
-  const state = { registering: false, user: null, usageCursor: null, adminTab: 'channels', revealKeyId: null }
+  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null }
   const $ = (selector) => document.querySelector(selector)
   const $$ = (selector) => [...document.querySelectorAll(selector)]
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
@@ -166,7 +166,13 @@
     const image = payment.qrImage || payment.qrDataUrl || data.qrImage || (String(raw).startsWith('data:image/') ? raw : '')
     const codeUrl = payment.codeUrl || (!String(raw).startsWith('data:image/') ? raw : '')
     $('#payment-result').classList.remove('hidden')
-    $('#payment-result').innerHTML = '<div class="payment-layout">' + (image ? '<img class="payment-qr" src="' + esc(image) + '" alt="' + provider + '支付二维码">' : '') + '<div class="payment-details"><strong>订单已创建</strong><p>请使用' + provider + (image ? '扫描二维码' : '打开支付链接') + '完成支付，到账后余额会自动更新。</p>' + (codeUrl ? '<div class="copy-line"><code id="payment-code">' + esc(codeUrl) + '</code><button type="button" class="small-button" data-copy="payment-code">复制支付链接</button></div>' : '<p class="form-error">支付渠道未返回二维码，请稍后重试。</p>') + '</div></div>'
+    $('#payment-result').innerHTML = '<div class="payment-layout">' + (image ? '<img class="payment-qr" src="' + esc(image) + '" alt="' + provider + '支付二维码">' : '') + '<div class="payment-details"><strong id="payment-status">订单已创建</strong><p id="payment-status-note">请使用' + provider + (image ? '扫描二维码' : '打开支付链接') + '完成支付，到账后余额会自动更新。</p>' + (codeUrl ? '<div class="copy-line"><code id="payment-code">' + esc(codeUrl) + '</code><button type="button" class="small-button" data-copy="payment-code">复制支付链接</button></div>' : '<p class="form-error">支付渠道未返回二维码，请稍后重试。</p>') + '</div></div>'
+    if (data.orderId) {
+      const started = Date.now(); const timer = setInterval(async () => {
+        if (Date.now() - started > 31 * 60 * 1000) return clearInterval(timer)
+        try { const order = await api('/api/me/orders/' + encodeURIComponent(data.orderId)); if (order.status === 'paid') { clearInterval(timer); $('#payment-status').textContent = '支付成功'; $('#payment-status-note').textContent = '余额已入账，正在刷新账户信息。'; await Promise.all([loadOverview(), loadRecharge()]) } else if (['failed', 'expired', 'closed'].includes(order.status)) { clearInterval(timer); const labels = { failed: '失败', expired: '已过期', closed: '已关闭' }; $('#payment-status').textContent = '订单' + (labels[order.status] || order.status); $('#payment-status-note').textContent = '请重新创建订单或联系管理员处理。' } } catch { /* keep polling while the session is valid */ }
+      }, 5000)
+    }
   }
   async function loadUsage(reset) {
     try {
@@ -207,6 +213,10 @@
 
   function renderAdmin(tab, data) {
     const items = data.items || []
+    if (tab === 'overview') {
+      const m = data.metrics || {}; const mv = (v) => v?.yuan || '0'
+      return '<div class="summary-strip"><span>请求 <strong>' + integer(m.requests) + '</strong></span><span>收入 <strong>' + mv(m.revenue) + '</strong></span><span>模型成本 <strong>' + mv(m.cost) + '</strong></span><span>毛利 <strong>' + mv(m.grossProfit) + '</strong></span><span>返利 <strong>' + mv(m.rebates) + '</strong></span><span>净利润 <strong>' + mv(m.netProfit) + '</strong></span></div><div class="notice">最低毛利线：' + ((data.minimumMarginBps || 3000) / 100) + '% · 未处理告警：' + (data.alerts || []).length + '</div>' + table(['渠道', '请求', '失败', '状态'], (data.channels || []).map((c) => '<tr><td>' + esc(c.name) + '</td><td>' + integer(c.requests) + '</td><td>' + integer(c.failures) + '</td><td>' + (c.circuit_open_until ? '<span class="state bad">熔断</span>' : '<span class="state good">正常</span>') + '</td></tr>'), '暂无渠道数据')
+    }
     if (tab === 'channels') {
       const editor = form('channel', [field('name', '渠道名称', '', 'text', 'required'), field('baseUrl', '上游地址', '', 'url', 'required'), field('apiKey', '上游 Key', '', 'password', 'required'), field('priority', '优先级', '100', 'number', 'min="0"'), field('timeoutMs', '超时毫秒', '30000', 'number', 'min="1000" max="120000"'), field('modelMap', '模型映射 JSON', '{}'), check('enabled', '启用')], '新增渠道')
       const rows = items.map((item) => '<tr><td><strong>' + esc(item.name) + '</strong><small class="subline">' + esc(item.baseUrl) + '</small></td><td>' + item.priority + '</td><td>' + item.timeoutMs + ' ms</td><td><code class="inline-code">' + esc(JSON.stringify(item.modelMap || {})) + '</code></td><td><span class="state ' + (item.enabled ? 'good' : 'bad') + '">' + (item.enabled ? '启用' : '停用') + '</span></td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="channel" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button danger-button admin-delete" type="button" data-kind="channel" data-id="' + esc(item.id) + '">停用</button></td></tr>')
@@ -243,7 +253,7 @@
       const conversion = (data.conversions || []).map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>已完成</td></tr>')
       return editor + '<div><p class="admin-section-title">佣金流水</p>' + table(['时间', '邀请人', '被邀请人', '充值', '比例', '返利'], commission, '暂无佣金流水') + '</div><div><p class="admin-section-title">兑换流水</p>' + table(['时间', '用户', '兑换金额', '状态'], conversion, '暂无兑换流水') + '</div>'
     }
-    if (tab === 'users') return table(['用户', '角色', '钱包', '套餐额度', '套餐到期 / 下次重置', '状态', '操作'], items.map((item) => '<tr><td><strong>' + esc(item.username) + '</strong><small class="subline">' + esc(item.email || '未验证邮箱') + '</small></td><td>' + esc(item.role) + '</td><td>' + money({ micros: item.balance_micros }) + '</td><td>' + (item.plan_status === 'active' ? money({ micros: item.plan_remaining_micros }) + ' / ' + money({ micros: item.plan_quota_micros }) : '—') + '</td><td>' + (item.plan_status === 'active' ? date(item.plan_expires_at) + '<small class="subline">下次 ' + date(item.plan_next_reset_at) + '</small>' : '—') + '</td><td><span class="state ' + (item.status === 'active' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td>' + (item.plan_status === 'active' ? '<button class="small-button admin-reset-plan" type="button" data-id="' + esc(item.id) + '">重置额度</button>' : '—') + '</td></tr>'))
+    if (tab === 'users') return table(['用户', '角色', '钱包', '套餐额度', '套餐到期 / 下次重置', '状态', '操作'], items.map((item) => '<tr><td><strong>' + esc(item.username) + '</strong><small class="subline">' + esc(item.email || '未验证邮箱') + '</small></td><td>' + esc(item.role) + '</td><td>' + money({ micros: item.balance_micros }) + '</td><td>' + (item.plan_status === 'active' ? money({ micros: item.plan_remaining_micros }) + ' / ' + money({ micros: item.plan_quota_micros }) : '—') + '</td><td>' + (item.plan_status === 'active' ? date(item.plan_expires_at) + '<small class="subline">下次 ' + date(item.plan_next_reset_at) + '</small>' : '—') + '</td><td><span class="state ' + (item.status === 'active' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td class="admin-action-cell"><button class="small-button wallet-adjust" type="button" data-id="' + esc(item.id) + '" data-username="' + esc(item.username) + '">充值/扣费</button>' + (item.plan_status === 'active' ? '<button class="small-button admin-reset-plan" type="button" data-id="' + esc(item.id) + '">重置额度</button>' : '') + '</td></tr>'))
     if (tab === 'orders') return table(['时间', '用户', '类型', '金额', '方式', '状态', '订单号'], items.map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + esc(item.kind) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>' + esc(item.payment_method) + '</td><td><span class="state ' + (item.status === 'paid' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td><code>' + esc(item.order_no) + '</code></td></tr>'))
     if (tab === 'admin-usage') {
       const rows = items.map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td><code>' + esc(item.request_id) + '</code></td><td>' + esc(item.requested_model) + '</td><td>' + esc(item.final_channel_name_snapshot || '—') + '</td><td>' + money({ micros: item.charge_micros }) + '</td><td>' + money({ micros: item.cost_micros }) + ' / ' + money({ micros: item.profit_micros }) + '</td><td><button class="small-button admin-attempts" type="button" data-id="' + esc(item.request_id) + '">链路</button></td></tr>')
@@ -261,9 +271,13 @@
     return table([], [])
   }
   async function loadAdmin(tab) {
+    if (!document.querySelector('[data-admin-tab="overview"]')) {
+      const first = document.querySelector('.admin-tabs .tab');
+      if (first) first.insertAdjacentHTML('beforebegin', '<button class="tab" type="button" data-admin-tab="overview">经营概览</button>')
+    }
     state.adminTab = tab
     $$('.admin-tabs .tab').forEach((node) => node.classList.toggle('active', node.dataset.adminTab === tab))
-    const endpoints = { channels: '/api/admin/channels', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', settings: '/api/admin/settings' }
+    const endpoints = { overview: '/api/admin/overview', channels: '/api/admin/channels', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', settings: '/api/admin/settings' }
     try { $('#admin-content').innerHTML = renderAdmin(tab === 'users' ? 'users-discount' : tab, await api(endpoints[tab])) } catch (error) { toast(error.message, true) }
   }
   function setFormValue(editor, name, value) {
@@ -400,7 +414,15 @@
     try { await submitAdmin(editor) } catch (error) { toast(error.message, true) }
   })
   $('#admin-content').addEventListener('click', async (event) => {
-    const target = event.target; const bootstrap = target.closest('[data-bootstrap]'); const edit = target.closest('.admin-edit'); const remove = target.closest('.admin-delete'); const attempts = target.closest('.admin-attempts'); const resetPlan = target.closest('.admin-reset-plan')
+    const target = event.target; const bootstrap = target.closest('[data-bootstrap]'); const edit = target.closest('.admin-edit'); const remove = target.closest('.admin-delete'); const attempts = target.closest('.admin-attempts'); const resetPlan = target.closest('.admin-reset-plan'); const walletAdjust = target.closest('.wallet-adjust')
+    if (walletAdjust) {
+      const direction = prompt('输入 credit 充值或 debit 扣费', 'credit')?.trim().toLowerCase(); if (!direction) return
+      const amount = prompt('请输入金额（元）', '10')?.trim(); if (!amount) return
+      const note = prompt('请输入调账原因（必填）', '管理员人工调账')?.trim(); if (!note) return
+      pending(walletAdjust, true, '处理中…')
+      try { await api('/api/admin/users/' + encodeURIComponent(walletAdjust.dataset.id) + '/wallet-adjustment', { method: 'POST', body: JSON.stringify({ direction, amountYuan: amount, note }) }); toast('钱包调账成功'); await loadAdmin('users') } catch (error) { toast(error.message, true); pending(walletAdjust, false) }
+      return
+    }
     if (resetPlan) {
       pending(resetPlan, true, '重置中…')
       try { await api('/api/admin/users/' + encodeURIComponent(resetPlan.dataset.id) + '/subscription/reset', { method: 'POST', body: '{}' }); toast('套餐额度已重置'); await loadAdmin('users') } catch (error) { toast(error.message, true); pending(resetPlan, false) }

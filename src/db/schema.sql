@@ -737,6 +737,41 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Platform profit guardrails and auditable configuration changes.
+INSERT INTO app_settings(key, setting_key, value, value_json)
+VALUES ('profit_min_margin_bps', 'profit.min_margin_bps', '3000', to_jsonb('3000'::text))
+ON CONFLICT (key) DO NOTHING;
+INSERT INTO app_settings(key, setting_key, value, value_json)
+VALUES ('payment_fee_rate_bps', 'profit.payment_fee_rate_bps', '0', to_jsonb('0'::text))
+ON CONFLICT (key) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS config_audit_logs (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT,
+  before_value JSONB,
+  after_value JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS config_audit_logs_cursor_idx ON config_audit_logs(created_at DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS risk_alerts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'warning',
+  resource_type TEXT,
+  resource_id TEXT,
+  message TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  resolved_at TIMESTAMPTZ,
+  CHECK (severity IN ('info','warning','critical')),
+  CHECK (status IN ('open','acknowledged','resolved'))
+);
+CREATE INDEX IF NOT EXISTS risk_alerts_status_cursor_idx ON risk_alerts(status, severity, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS admin_audit_events (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
