@@ -1,5 +1,5 @@
 (() => {
-  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null }
+  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null, walletAdjustUserId: null, overviewTimer: null }
   const $ = (selector) => document.querySelector(selector)
   const $$ = (selector) => [...document.querySelectorAll(selector)]
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
@@ -35,6 +35,17 @@
     const amount = yuanToMicros(cost); const rate = BigInt(String(bps || 8000))
     if (amount <= 0n || rate < 0n || rate >= 10000n) return ''
     return microsToYuan((amount * 10000n + (10000n - rate) - 1n) / (10000n - rate))
+  }
+  function planProgressMarkup(balance, compact = false) {
+    const quota = toMicros(balance?.planQuotaMicros ?? balance?.planQuota ?? 0)
+    const used = toMicros(balance?.planUsedMicros ?? balance?.planUsed ?? 0)
+    const reserved = toMicros(balance?.planReservedMicros ?? balance?.planReserved ?? 0)
+    const available = toMicros(balance?.planRemainingMicros ?? balance?.planRemaining ?? 0)
+    const book = toMicros(balance?.planBookRemainingMicros ?? balance?.planBookRemaining ?? available + reserved)
+    const percent = quota > 0n ? Math.min(100, Math.max(0, Number((used * 10000n) / quota) / 100)) : 0
+    const status = balance?.planStatus === 'active' ? (available <= 0n ? '套餐额度已用尽，请充值' : available * 100n <= quota * 20n ? '套餐可用额度偏低' : '套餐运行正常') : balance?.planStatus === 'expired' ? '套餐已过期，请续费' : '尚未开通套餐'
+    if (quota <= 0n) return '<div class="plan-progress empty-progress"><div><strong>本周期套餐额度</strong><span>' + esc(status) + '</span></div></div>'
+    return '<div class="plan-progress ' + (compact ? 'compact' : '') + '"><div class="progress-heading"><strong>本周期套餐额度</strong><span>' + percent.toFixed(1).replace('.0', '') + '% 已用</span></div><div class="progress-track"><i style="width:' + percent + '%"></i></div><div class="progress-meta"><span>已用 ' + money({ micros: used }) + '</span><span>可用 ' + money({ micros: available }) + '</span></div><div class="progress-submeta"><span>预扣 ' + money({ micros: reserved }) + ' · 账面剩余 ' + money({ micros: book }) + '</span><span class="' + (available * 100n <= quota * 20n ? 'warn' : 'muted') + '">' + esc(status) + '</span></div></div>'
   }
 
   function toast(message, error = false) {
@@ -106,6 +117,8 @@
     if (view === 'affiliate') loadAffiliate()
     if (view === 'downloads') loadDownloads()
     if (view === 'admin') loadAdmin(state.adminTab)
+    if (state.overviewTimer) { clearInterval(state.overviewTimer); state.overviewTimer = null }
+    if (view === 'overview' && !document.hidden) state.overviewTimer = setInterval(() => loadOverview(), 30000)
   }
   async function loadOverview() {
     try {
@@ -121,6 +134,7 @@
       const resetNode = $('#plan-reset')
       if (resetNode) resetNode.textContent = data.balance.planNextResetAt ? new Date(data.balance.planNextResetAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
       $('#api-base').textContent = data.apiBaseUrl; $('#account-state').textContent = data.balance.isValid ? '有效' : '需充值'
+      const progress = $('#overview-plan-progress'); if (progress) progress.innerHTML = planProgressMarkup(data.balance)
       $('#chatgpt-link').href = data.downloads.chatgpt; $('#ccswitch-link').href = data.downloads.ccswitch
       $('#quick-config').textContent = 'Base URL: ' + data.apiBaseUrl + '\nAuthorization: Bearer sk-relay-…'
       renderUsage('#recent-usage', (await api('/api/me/usage?limit=5')).items, true)
@@ -157,7 +171,8 @@
   }
   async function loadRecharge() {
     try {
-      const plans = await api('/api/plans')
+      const [plans, overview] = await Promise.all([api('/api/plans'), api('/api/me/overview')])
+      const progress = $('#recharge-plan-progress'); if (progress) progress.innerHTML = planProgressMarkup(overview.balance)
       $('#plans').innerHTML = plans.items.length ? plans.items.map((plan) => '<div class="plan-option"><div><strong>' + esc(plan.name) + '</strong><small>' + money({ micros: plan.price_micros }) + ' · 可消费额度 ' + money({ micros: plan.quota_micros }) + ' · 30 天</small></div><button class="button secondary buy-plan" type="button" data-id="' + esc(plan.id) + '" data-amount="' + esc(plan.price_micros) + '">购买</button></div>').join('') : '<p class="empty">管理员尚未配置套餐</p>'
     } catch (error) { toast(error.message, true) }
   }
@@ -240,10 +255,13 @@
       const rows = items.map((item) => '<tr><td><strong>' + esc(item.name) + '</strong><small class="subline">' + esc(item.code) + '</small></td><td>' + money({ micros: item.price_micros }) + '</td><td>' + money({ micros: item.quota_micros }) + '</td><td>周期重置</td><td>30 天</td><td><span class="state ' + (item.active && item.enabled ? 'good' : 'bad') + '">' + (item.active && item.enabled ? '启用' : '停用') + '</span></td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="plan" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button danger-button admin-delete" type="button" data-kind="plan" data-id="' + esc(item.id) + '">停用</button></td></tr>')
       return '<div class="admin-toolbar"><p>独立购买、支付入账和套餐优先扣费均已启用。</p><button class="button secondary" type="button" data-bootstrap="monthly-plan">初始化 ¥149 月套餐</button></div>' + editor + table(['套餐', '售价', '可消费额度', '毛利率', '有效期', '状态', '操作'], rows, '尚未配置套餐')
     }
-    if (tab === 'users-discount') {
-      return table(['用户', '钱包', 'Token 折扣', '套餐额度'], items.map((item) => {
+    if (tab === 'users-discount') tab = 'users'
+    if (tab === 'users') {
+      return table(['用户', '钱包 / 可用', 'Token 折扣', '本周期额度', '到期 / 重置', '状态', '操作'], items.map((item) => {
         const discount = Number(item.token_discount_bps || 0) / 100
-        return '<tr><td>' + esc(item.username) + '</td><td>' + money({ micros: item.balance_micros }) + '</td><td><form class="inline-discount" data-user-id="' + esc(item.id) + '"><input name="discount" type="number" min="0" max="99" value="' + esc(discount) + '"><button class="small-button" type="submit">保存</button></form></td><td>' + money({ micros: item.plan_remaining_micros }) + '</td></tr>'
+        const wallet = toMicros(item.balance_micros); const walletReserved = toMicros(item.wallet_reserved_micros)
+        const planQuota = toMicros(item.plan_quota_micros); const planBook = toMicros(item.plan_remaining_micros); const planReserved = toMicros(item.plan_reserved_micros); const planAvailable = planBook > planReserved ? planBook - planReserved : 0n; const planUsed = planQuota > planBook ? planQuota - planBook : 0n
+        return '<tr><td><strong>' + esc(item.username) + '</strong><small class="subline">' + esc(item.email || '未验证邮箱') + '</small></td><td>' + money({ micros: wallet }) + '<small class="subline">可用 ' + money({ micros: wallet - walletReserved }) + ' · 预扣 ' + money({ micros: walletReserved }) + '</small></td><td><form class="inline-discount" data-user-id="' + esc(item.id) + '"><div class="discount-input"><input name="discount" type="number" min="0" max="99" step="1" value="' + esc(discount) + '" aria-label="' + esc(item.username) + ' 折扣减免比例"><span>%</span></div><button class="small-button" type="submit">保存</button><small class="subline">实际支付 ' + (100 - discount) + '%</small></form></td><td>' + (item.plan_status === 'active' ? planProgressMarkup({ planQuotaMicros: planQuota, planUsedMicros: planUsed, planReservedMicros: planReserved, planBookRemainingMicros: planBook, planRemainingMicros: planAvailable, planStatus: item.plan_status }, true) : '—') + '</td><td>' + (item.plan_status === 'active' ? date(item.plan_expires_at) + '<small class="subline">下次 ' + date(item.plan_next_reset_at) + '</small>' : '—') + '</td><td><span class="state ' + (item.status === 'active' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td><div class="admin-user-actions"><button class="small-button wallet-adjust" type="button" data-id="' + esc(item.id) + '" data-username="' + esc(item.username) + '">充值/扣费</button>' + (item.plan_status === 'active' ? '<button class="small-button admin-reset-plan" type="button" data-id="' + esc(item.id) + '">重置额度</button>' : '') + '</div></td></tr>'
       }))
     }
     if (tab === 'affiliate-admin') {
@@ -253,7 +271,6 @@
       const conversion = (data.conversions || []).map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>已完成</td></tr>')
       return editor + '<div><p class="admin-section-title">佣金流水</p>' + table(['时间', '邀请人', '被邀请人', '充值', '比例', '返利'], commission, '暂无佣金流水') + '</div><div><p class="admin-section-title">兑换流水</p>' + table(['时间', '用户', '兑换金额', '状态'], conversion, '暂无兑换流水') + '</div>'
     }
-    if (tab === 'users') return table(['用户', '角色', '钱包', '套餐额度', '套餐到期 / 下次重置', '状态', '操作'], items.map((item) => '<tr><td><strong>' + esc(item.username) + '</strong><small class="subline">' + esc(item.email || '未验证邮箱') + '</small></td><td>' + esc(item.role) + '</td><td>' + money({ micros: item.balance_micros }) + '</td><td>' + (item.plan_status === 'active' ? money({ micros: item.plan_remaining_micros }) + ' / ' + money({ micros: item.plan_quota_micros }) : '—') + '</td><td>' + (item.plan_status === 'active' ? date(item.plan_expires_at) + '<small class="subline">下次 ' + date(item.plan_next_reset_at) + '</small>' : '—') + '</td><td><span class="state ' + (item.status === 'active' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td class="admin-action-cell"><button class="small-button wallet-adjust" type="button" data-id="' + esc(item.id) + '" data-username="' + esc(item.username) + '">充值/扣费</button>' + (item.plan_status === 'active' ? '<button class="small-button admin-reset-plan" type="button" data-id="' + esc(item.id) + '">重置额度</button>' : '') + '</td></tr>'))
     if (tab === 'orders') return table(['时间', '用户', '类型', '金额', '方式', '状态', '订单号'], items.map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + esc(item.kind) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>' + esc(item.payment_method) + '</td><td><span class="state ' + (item.status === 'paid' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td><code>' + esc(item.order_no) + '</code></td></tr>'))
     if (tab === 'admin-usage') {
       const rows = items.map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td><code>' + esc(item.request_id) + '</code></td><td>' + esc(item.requested_model) + '</td><td>' + esc(item.final_channel_name_snapshot || '—') + '</td><td>' + money({ micros: item.charge_micros }) + '</td><td>' + money({ micros: item.cost_micros }) + ' / ' + money({ micros: item.profit_micros }) + '</td><td><button class="small-button admin-attempts" type="button" data-id="' + esc(item.request_id) + '">链路</button></td></tr>')
@@ -278,7 +295,7 @@
     state.adminTab = tab
     $$('.admin-tabs .tab').forEach((node) => node.classList.toggle('active', node.dataset.adminTab === tab))
     const endpoints = { overview: '/api/admin/overview', channels: '/api/admin/channels', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', settings: '/api/admin/settings' }
-    try { $('#admin-content').innerHTML = renderAdmin(tab === 'users' ? 'users-discount' : tab, await api(endpoints[tab])) } catch (error) { toast(error.message, true) }
+    try { $('#admin-content').innerHTML = renderAdmin(tab, await api(endpoints[tab])) } catch (error) { toast(error.message, true) }
   }
   function setFormValue(editor, name, value) {
     const node = editor.elements.namedItem(name); if (!node) return
@@ -418,11 +435,9 @@
   $('#admin-content').addEventListener('click', async (event) => {
     const target = event.target; const bootstrap = target.closest('[data-bootstrap]'); const edit = target.closest('.admin-edit'); const remove = target.closest('.admin-delete'); const attempts = target.closest('.admin-attempts'); const resetPlan = target.closest('.admin-reset-plan'); const walletAdjust = target.closest('.wallet-adjust')
     if (walletAdjust) {
-      const direction = prompt('输入 credit 充值或 debit 扣费', 'credit')?.trim().toLowerCase(); if (!direction) return
-      const amount = prompt('请输入金额（元）', '10')?.trim(); if (!amount) return
-      const note = prompt('请输入调账原因（必填）', '管理员人工调账')?.trim(); if (!note) return
-      pending(walletAdjust, true, '处理中…')
-      try { await api('/api/admin/users/' + encodeURIComponent(walletAdjust.dataset.id) + '/wallet-adjustment', { method: 'POST', body: JSON.stringify({ direction, amountYuan: amount, note }) }); toast('钱包调账成功'); await loadAdmin('users') } catch (error) { toast(error.message, true); pending(walletAdjust, false) }
+      state.walletAdjustUserId = walletAdjust.dataset.id
+      $('#wallet-adjust-user').textContent = '正在调整用户：' + (walletAdjust.dataset.username || '')
+      const form = $('#wallet-adjust-form'); form.reset(); $('#wallet-adjust-error').textContent = ''; $('#wallet-adjust-dialog').showModal(); form.elements.namedItem('amountYuan').focus()
       return
     }
     if (resetPlan) {
@@ -438,6 +453,16 @@
     if (edit) { try { editAdmin(edit.dataset.kind, JSON.parse(edit.dataset.item)) } catch { toast('无法读取这条配置', true) }; return }
     if (remove) { try { await deleteAdmin(remove.dataset.kind, remove.dataset.id, remove) } catch (error) { toast(error.message, true) }; return }
     if (attempts) loadAttempts(attempts.dataset.id)
+  })
+  $('#wallet-adjust-form').addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const form = event.currentTarget; const data = Object.fromEntries(new FormData(form).entries()); const button = form.querySelector('[type="submit"]')
+    pending(button, true, '处理中…'); $('#wallet-adjust-error').textContent = ''
+    try { await api('/api/admin/users/' + encodeURIComponent(state.walletAdjustUserId || '') + '/wallet-adjustment', { method: 'POST', body: JSON.stringify(data) }); form.closest('dialog').close(); toast('钱包调账成功'); await loadAdmin('users') } catch (error) { $('#wallet-adjust-error').textContent = error.message } finally { pending(button, false) }
+  })
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { if (state.overviewTimer) { clearInterval(state.overviewTimer); state.overviewTimer = null } }
+    else if ($('#view-overview')?.classList.contains('active-view') && !state.overviewTimer) { loadOverview(); state.overviewTimer = setInterval(() => loadOverview(), 30000) }
   })
   applyInvite()
   ;(async () => {

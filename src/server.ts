@@ -819,8 +819,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if (q.status) { values.push(String(q.status)); where.push(`u.status=$${values.length}`) }
     if (q.search) { values.push(`%${String(q.search).slice(0, 128)}%`); where.push(`u.username ILIKE $${values.length}`) }
     return { items: await db.query<any>(`SELECT u.id,u.username,u.email,u.role,u.status,u.invite_code,u.last_login_at,u.created_at,u.disabled_at,
-      w.balance_micros,aw.balance_micros AS affiliate_balance_micros,u.token_discount_bps,
-      s.remaining_micros AS plan_remaining_micros,s.reset_quota_micros AS plan_quota_micros,
+      w.balance_micros,COALESCE(w.reserved_micros,0) AS wallet_reserved_micros,aw.balance_micros AS affiliate_balance_micros,u.token_discount_bps,
+      s.remaining_micros AS plan_remaining_micros,COALESCE(s.reserved_micros,0) AS plan_reserved_micros,s.reset_quota_micros AS plan_quota_micros,
       s.expires_at AS plan_expires_at,s.next_reset_at AS plan_next_reset_at,s.last_reset_at AS plan_last_reset_at,s.status AS plan_status
       FROM users u LEFT JOIN wallets w ON w.user_id=u.id LEFT JOIN affiliate_wallets aw ON aw.user_id=u.id
       LEFT JOIN subscriptions s ON s.user_id=u.id ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
@@ -1008,7 +1008,11 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         balance: formatMicros(total), availableBalance: formatMicros(total),
         walletRemaining: formatMicros(balance.walletMicros), walletRemainingMicros: balance.walletMicros.toString(),
         planRemaining: formatMicros(balance.planMicros), planRemainingMicros: balance.planMicros.toString(),
+        planBookRemaining: formatMicros(balance.planBookMicros), planBookRemainingMicros: balance.planBookMicros.toString(),
+        planReserved: formatMicros(balance.planReservedMicros), planReservedMicros: balance.planReservedMicros.toString(),
+        planUsed: formatMicros(balance.planUsedMicros), planUsedMicros: balance.planUsedMicros.toString(),
         planQuota: formatMicros(balance.planQuotaMicros), planQuotaMicros: balance.planQuotaMicros.toString(),
+        walletReserved: formatMicros(balance.walletReservedMicros), walletReservedMicros: balance.walletReservedMicros.toString(),
         planExpiresAt: balance.planExpiresAt, planNextResetAt: balance.planNextResetAt, planLastResetAt: balance.planLastResetAt,
         planStatus: balance.planStatus, unit: 'CNY', isValid: balance.isValid, updatedAt: new Date().toISOString(),
       }

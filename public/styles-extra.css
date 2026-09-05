@@ -222,7 +222,7 @@
 /* Operations console: dense, calm, and easy to scan on desktop. */
 .view#view-admin { padding-top: 28px; }
 .view#view-admin .section-heading { margin: 0 0 22px; }
-.view#view-admin .section-heading h3 { font-size: 28px; letter-spacing: -.01em; }
+.view#view-admin .section-heading h3 { font-size: 28px; letter-spacing: 0; }
 .admin-tabs { gap: 0; margin: 0 -2px 24px; padding: 0 2px; overflow-x: auto; flex-wrap: nowrap; }
 .admin-tabs .tab { min-height: 48px; padding: 0 18px; border-bottom: 3px solid transparent; white-space: nowrap; font-size: 14px; font-weight: 600; }
 .admin-tabs .tab:hover { color: var(--ink); background: #f0f5f4; }
@@ -243,11 +243,38 @@
 .summary-strip span:first-child { padding-left: 0; }
 .summary-strip span:last-child { border-right: 0; }
 .summary-strip strong { display: block; margin: 4px 0 0; color: var(--ink); font-size: 19px; }
+td.admin-action-cell { display: table-cell; vertical-align: middle; }
 .admin-action-cell .small-button { min-height: 32px; padding: 5px 11px; font-weight: 650; }
+.admin-user-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 154px; }
+.inline-discount { display: grid; grid-template-columns: 96px auto; align-items: center; gap: 7px; min-width: 150px; }
+.inline-discount .discount-input { position: relative; }
+.inline-discount .discount-input input { width: 96px; padding-right: 24px; text-align: right; }
+.inline-discount .discount-input span { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.inline-discount .subline { grid-column: 1 / -1; margin-top: -2px; white-space: nowrap; }
+.plan-progress { margin: 18px 0 24px; padding: 18px 20px; border: 1px solid var(--line); background: var(--surface); }
+.plan-progress.compact { min-width: 240px; margin: 0; padding: 11px 12px; }
+.progress-heading, .progress-meta, .progress-submeta { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.progress-heading { margin-bottom: 10px; font-size: 14px; }
+.progress-heading span, .progress-meta, .progress-submeta { color: var(--muted); font-size: 12px; }
+.progress-track { height: 8px; overflow: hidden; border-radius: 99px; background: #e8efee; }
+.progress-track i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+.progress-meta { margin-top: 9px; color: var(--ink); }
+.progress-submeta { margin-top: 5px; font-size: 11px; }
+.progress-submeta .warn { color: var(--danger); }
+.empty-progress { display: flex; justify-content: space-between; }
+.empty-progress div { display: flex; justify-content: space-between; width: 100%; gap: 16px; }
+.empty-progress span { color: var(--muted); font-size: 12px; }
+.button, .small-button, .icon-button, .tab, .nav-item { transition: background-color .14s ease, border-color .14s ease, color .14s ease, transform .14s ease, box-shadow .14s ease; }
+.button:active, .small-button:active, .icon-button:active, .tab:active, .nav-item:active { transform: translateY(1px); }
+.button:focus-visible, .small-button:focus-visible, .icon-button:focus-visible, .tab:focus-visible, .nav-item:focus-visible { box-shadow: 0 0 0 3px rgba(11,122,117,.15); }
+.admin-content > .table-wrap, .admin-form { box-shadow: none; }
 @media (max-width: 800px) {
   .view#view-admin .section-heading h3 { font-size: 23px; }
   .admin-tabs .tab { padding: 0 14px; }
   .summary-strip span { flex-basis: 50%; padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--line); }
   .summary-strip span:first-child { padding-left: 12px; }
   .summary-strip span:nth-last-child(-n+2) { border-bottom: 0; }
+  .inline-discount { grid-template-columns: 96px auto; }
+  .plan-progress { padding: 16px; }
+  .plan-progress.compact { min-width: 220px; }
 }

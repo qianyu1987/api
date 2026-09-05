@@ -67,7 +67,11 @@ export type StoredPriceSnapshot = {
 
 export type BalanceView = {
   walletMicros: bigint
+  walletReservedMicros: bigint
   planMicros: bigint
+  planBookMicros: bigint
+  planReservedMicros: bigint
+  planUsedMicros: bigint
   planQuotaMicros: bigint
   planExpiresAt: string | null
   planNextResetAt: string | null
@@ -397,12 +401,21 @@ export class BillingService {
        WHERE u.id = $1`, [userId])
     const expires = row?.expires_at ? new Date(row.expires_at) : null
     const activePlan = row?.plan_status === 'active' && expires && expires.getTime() > Date.now()
-    const plan = activePlan ? nonNegative(bigintValue(row.plan) - bigintValue(row.plan_reserved)) : 0n
-    const wallet = nonNegative(bigintValue(row?.wallet) - bigintValue(row?.wallet_reserved))
+    const planBook = activePlan ? nonNegative(bigintValue(row.plan)) : 0n
+    const planReserved = activePlan ? nonNegative(bigintValue(row.plan_reserved)) : 0n
+    const plan = nonNegative(planBook - planReserved)
+    const planQuota = activePlan ? bigintValue(row.plan_quota) : 0n
+    const planUsed = planQuota > planBook ? planQuota - planBook : 0n
+    const walletReserved = nonNegative(bigintValue(row?.wallet_reserved))
+    const wallet = nonNegative(bigintValue(row?.wallet) - walletReserved)
     return {
       walletMicros: wallet,
+      walletReservedMicros: walletReserved,
       planMicros: plan,
-      planQuotaMicros: activePlan ? bigintValue(row.plan_quota) : 0n,
+      planBookMicros: planBook,
+      planReservedMicros: planReserved,
+      planUsedMicros: planUsed,
+      planQuotaMicros: planQuota,
       planExpiresAt: activePlan ? expires.toISOString() : null,
       planNextResetAt: activePlan && row.next_reset_at ? new Date(row.next_reset_at).toISOString() : null,
       planLastResetAt: activePlan && row.last_reset_at ? new Date(row.last_reset_at).toISOString() : null,
@@ -909,7 +922,12 @@ export class BillingService {
   static formatBalance(view: BalanceView): Record<string, unknown> {
     return {
       wallet: formatMicros(view.walletMicros),
+      walletReserved: formatMicros(view.walletReservedMicros),
+      walletAvailable: formatMicros(view.walletMicros),
       planRemaining: formatMicros(view.planMicros),
+      planBookRemaining: formatMicros(view.planBookMicros),
+      planReserved: formatMicros(view.planReservedMicros),
+      planUsed: formatMicros(view.planUsedMicros),
       planQuota: formatMicros(view.planQuotaMicros),
       planExpiresAt: view.planExpiresAt,
       planNextResetAt: view.planNextResetAt,
