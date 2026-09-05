@@ -350,6 +350,7 @@ CREATE TABLE IF NOT EXISTS model_prices (
   price_source TEXT,
   price_effective_at TIMESTAMPTZ,
   fx_rate_cny_micros BIGINT,
+  pricing_tiers JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (char_length(trim(model_pattern)) BETWEEN 1 AND 256),
@@ -919,6 +920,7 @@ ALTER TABLE fixed_route_prices ADD COLUMN IF NOT EXISTS unit_mode TEXT NOT NULL 
 ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS price_source TEXT;
 ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS price_effective_at TIMESTAMPTZ;
 ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS fx_rate_cny_micros BIGINT;
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS pricing_tiers JSONB;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS wallet_settled_micros BIGINT;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS pricing_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ NOT NULL DEFAULT now();

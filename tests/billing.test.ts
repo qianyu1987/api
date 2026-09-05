@@ -5,6 +5,8 @@ import {
   deserializePriceSnapshot,
   serializePriceSnapshot,
   nextShanghaiReset,
+  calculatePrice,
+  tierRates,
   type PriceSnapshot,
 } from '../src/services/billing.js'
 
@@ -22,12 +24,21 @@ const price: PriceSnapshot = {
 }
 
 describe('billing invariants', () => {
+  const tieredPrice: PriceSnapshot = { ...price, pricingTiers: [
+    { thresholdTokens: 0n, inputSellMicrosPerMillion: 1_000_000n, outputSellMicrosPerMillion: 2_000_000n, cacheSellMicrosPerMillion: 500_000n, inputCostMicrosPerMillion: 500_000n, outputCostMicrosPerMillion: 1_000_000n, cacheCostMicrosPerMillion: 250_000n },
+    { thresholdTokens: 272001n, inputSellMicrosPerMillion: 1_200_000n, outputSellMicrosPerMillion: 2_400_000n, cacheSellMicrosPerMillion: 600_000n, inputCostMicrosPerMillion: 600_000n, outputCostMicrosPerMillion: 1_200_000n, cacheCostMicrosPerMillion: 300_000n },
+  ] }
+  test('selects the standard tier at 272K and the high tier above it', () => {
+    expect(tierRates(tieredPrice, 272000n).inputSellMicrosPerMillion).toBe(1_000_000n)
+    expect(tierRates(tieredPrice, 272001n).inputSellMicrosPerMillion).toBe(1_200_000n)
+    expect(calculatePrice(tieredPrice, { input: 272001n, output: 0n, cache: 0n, reportedTotal: 272001n }).chargeMicros).toBe(ceilToken(272001n, 1_200_000n))
+  })
   test('computes the next Monday 09:00 in Shanghai time', () => {
     expect(nextShanghaiReset(new Date('2026-08-31T00:30:00.000Z')).toISOString()).toBe('2026-08-31T01:00:00.000Z')
     expect(nextShanghaiReset(new Date('2026-08-31T01:00:00.000Z')).toISOString()).toBe('2026-09-07T01:00:00.000Z')
   })
   test('price snapshots are immutable string values that can be restored exactly', () => {
-    const snapshot = serializePriceSnapshot(price, {
+    const snapshot = serializePriceSnapshot({ ...price, pricingTiers: [{ thresholdTokens: 272001n, ...price }] }, {
       input: 13n, output: 7n, cache: 3n, reportedTotal: 23n,
     }, {
       model: 'gpt-test', requestPath: '/v1/chat/completions', requestMethod: 'POST', keyId: 'key-1', keyName: 'main',
@@ -36,6 +47,7 @@ describe('billing invariants', () => {
     expect(restored.price.inputSellMicrosPerMillion).toBe(1_000_000n)
     expect(restored.price.outputSellMicrosPerMillion).toBe(2_000_000n)
     expect(restored.estimatedUsage).toEqual({ input: 13n, output: 7n, cache: 3n, reportedTotal: 23n })
+    expect(restored.price.pricingTiers?.[0].thresholdTokens).toBe(272001n)
     expect(restored.context).toMatchObject({ model: 'gpt-test', path: '/v1/chat/completions', method: 'POST' })
   })
 
@@ -83,3 +95,5 @@ describe('billing invariants', () => {
     })).rejects.toThrow('规格尚未配置价格')
   })
 })
+
+function ceilToken(tokens: bigint, rate: bigint): bigint { return (tokens * rate + 999999n) / 1000000n }

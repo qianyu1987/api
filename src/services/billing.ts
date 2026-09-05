@@ -3,6 +3,8 @@ import { calculateUsageMoney, estimatedRequestTokens, type TokenRates, type Usag
 
 export type BillingMode = 'token' | 'fixed'
 
+export type PricingTier = TokenRates & { thresholdTokens: bigint; label?: string }
+
 export type PriceSnapshot = TokenRates & {
   fixedSellMicros: bigint
   fixedCostMicros: bigint
@@ -15,6 +17,7 @@ export type PriceSnapshot = TokenRates & {
   priceEffectiveAt?: string | null
   fxRateCnyMicros?: bigint | null
   discountBps?: bigint
+  pricingTiers?: PricingTier[]
 }
 
 export type PriceContext = {
@@ -46,6 +49,7 @@ export type StoredPriceSnapshot = {
     fixedSellMicros: string
     fixedCostMicros: string
   }
+  pricingTiers?: Array<{ thresholdTokens: string; label?: string; rates: StoredPriceSnapshot['rates'] }>
   estimatedUsage: {
     input: string
     output: string
@@ -253,7 +257,12 @@ function usageFromStored(value: any): UsageTokens {
 
 export function calculatePrice(price: PriceSnapshot, usage: UsageTokens, mode: BillingMode = price.billingMode || 'token'): { chargeMicros: bigint; costMicros: bigint } {
   if (mode === 'fixed') return { chargeMicros: price.fixedSellMicros, costMicros: price.fixedCostMicros }
-  return calculateUsageMoney(usage, price)
+  return calculateUsageMoney(usage, tierRates(price, usage.input))
+}
+
+export function tierRates(price: PriceSnapshot, inputTokens: bigint): TokenRates {
+  const tiers = (price.pricingTiers || []).filter((tier) => tier.thresholdTokens <= inputTokens).sort((a, b) => a.thresholdTokens < b.thresholdTokens ? 1 : -1)
+  return tiers[0] || price
 }
 
 /** Apply a per-user token discount while preserving provider cost rates. */
@@ -268,7 +277,12 @@ export function applyTokenDiscount(price: PriceSnapshot, discountBps: bigint): P
   return { ...price, discountBps,
     inputSellMicrosPerMillion: discounted(price.inputSellMicrosPerMillion),
     outputSellMicrosPerMillion: discounted(price.outputSellMicrosPerMillion),
-    cacheSellMicrosPerMillion: discounted(price.cacheSellMicrosPerMillion) }
+    cacheSellMicrosPerMillion: discounted(price.cacheSellMicrosPerMillion),
+    pricingTiers: price.pricingTiers?.map((tier) => ({ ...tier,
+      inputSellMicrosPerMillion: discounted(tier.inputSellMicrosPerMillion),
+      outputSellMicrosPerMillion: discounted(tier.outputSellMicrosPerMillion),
+      cacheSellMicrosPerMillion: discounted(tier.cacheSellMicrosPerMillion),
+    })) }
 }
 
 export function estimatePrice(price: PriceSnapshot, payload: Record<string, unknown>, mode: BillingMode = price.billingMode || 'token'): { usage: UsageTokens; chargeMicros: bigint; costMicros: bigint } {
@@ -298,6 +312,9 @@ export function serializePriceSnapshot(price: PriceSnapshot, estimatedUsage: Usa
       fixedSellMicros: price.fixedSellMicros.toString(),
       fixedCostMicros: price.fixedCostMicros.toString(),
     },
+    pricingTiers: price.pricingTiers?.map((tier) => ({ thresholdTokens: tier.thresholdTokens.toString(), label: tier.label, rates: {
+      inputSellMicrosPerMillion: tier.inputSellMicrosPerMillion.toString(), outputSellMicrosPerMillion: tier.outputSellMicrosPerMillion.toString(), cacheSellMicrosPerMillion: tier.cacheSellMicrosPerMillion.toString(), inputCostMicrosPerMillion: tier.inputCostMicrosPerMillion.toString(), outputCostMicrosPerMillion: tier.outputCostMicrosPerMillion.toString(), cacheCostMicrosPerMillion: tier.cacheCostMicrosPerMillion.toString(), fixedSellMicros: '0', fixedCostMicros: '0',
+    } })),
     estimatedUsage: {
       input: estimatedUsage.input.toString(),
       output: estimatedUsage.output.toString(),
@@ -337,6 +354,7 @@ export function deserializePriceSnapshot(value: unknown, fallback?: PriceSnapsho
     cacheCostMicrosPerMillion: bigintValue(rates.cacheCostMicrosPerMillion ?? fallback?.cacheCostMicrosPerMillion),
     fixedSellMicros: bigintValue(rates.fixedSellMicros ?? fallback?.fixedSellMicros),
     fixedCostMicros: bigintValue(rates.fixedCostMicros ?? fallback?.fixedCostMicros),
+    pricingTiers: Array.isArray(snapshot.pricingTiers) ? snapshot.pricingTiers.map((tier: any) => ({ thresholdTokens: bigintValue(tier.thresholdTokens), label: cleanText(tier.label, 128) || undefined, inputSellMicrosPerMillion: bigintValue(tier.rates?.inputSellMicrosPerMillion), outputSellMicrosPerMillion: bigintValue(tier.rates?.outputSellMicrosPerMillion), cacheSellMicrosPerMillion: bigintValue(tier.rates?.cacheSellMicrosPerMillion), inputCostMicrosPerMillion: bigintValue(tier.rates?.inputCostMicrosPerMillion), outputCostMicrosPerMillion: bigintValue(tier.rates?.outputCostMicrosPerMillion), cacheCostMicrosPerMillion: bigintValue(tier.rates?.cacheCostMicrosPerMillion) })) : fallback?.pricingTiers,
   }
   const storedRequest = snapshot.request || {}
   return {
@@ -537,6 +555,7 @@ export class BillingService {
       priceSource: row.price_source || null,
       priceEffectiveAt: row.price_effective_at ? new Date(row.price_effective_at).toISOString() : null,
       fxRateCnyMicros: row.fx_rate_cny_micros == null ? null : bigintValue(row.fx_rate_cny_micros),
+      pricingTiers: Array.isArray(row.pricing_tiers) ? row.pricing_tiers.map((tier: any) => ({ thresholdTokens: bigintValue(tier.thresholdTokens), label: cleanText(tier.label, 128) || undefined, inputSellMicrosPerMillion: bigintValue(tier.inputSellMicrosPerMillion), outputSellMicrosPerMillion: bigintValue(tier.outputSellMicrosPerMillion), cacheSellMicrosPerMillion: bigintValue(tier.cacheSellMicrosPerMillion), inputCostMicrosPerMillion: bigintValue(tier.inputCostMicrosPerMillion), outputCostMicrosPerMillion: bigintValue(tier.outputCostMicrosPerMillion), cacheCostMicrosPerMillion: bigintValue(tier.cacheCostMicrosPerMillion) })) : undefined,
     }
   }
 

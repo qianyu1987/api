@@ -218,3 +218,36 @@
     flex-direction: column;
   }
 }
+
+/* Operations console: dense, calm, and easy to scan on desktop. */
+.view#view-admin { padding-top: 28px; }
+.view#view-admin .section-heading { margin: 0 0 22px; }
+.view#view-admin .section-heading h3 { font-size: 28px; letter-spacing: -.01em; }
+.admin-tabs { gap: 0; margin: 0 -2px 24px; padding: 0 2px; overflow-x: auto; flex-wrap: nowrap; }
+.admin-tabs .tab { min-height: 48px; padding: 0 18px; border-bottom: 3px solid transparent; white-space: nowrap; font-size: 14px; font-weight: 600; }
+.admin-tabs .tab:hover { color: var(--ink); background: #f0f5f4; }
+.admin-tabs .tab.active { color: var(--accent); border-bottom-color: var(--accent); background: transparent; }
+.admin-content { gap: 18px; }
+.admin-content > .table-wrap { box-shadow: 0 8px 22px rgba(19,39,46,.045); }
+.admin-content table { min-width: 860px; }
+.admin-content th { position: sticky; top: 0; z-index: 1; padding: 15px 18px; background: #f2f6f5; color: #53656b; font-size: 11px; }
+.admin-content td { padding: 16px 18px; font-size: 14px; }
+.admin-content tbody tr:hover td { background: #f6fbfa; }
+.admin-form { padding: 22px; gap: 16px; background: var(--surface); box-shadow: 0 8px 22px rgba(19,39,46,.045); }
+.admin-form label { color: #52636a; font-weight: 600; }
+.admin-form input, .admin-form select { min-height: 44px; border-color: #cdd9db; }
+.admin-form input:focus, .admin-form select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(11,122,117,.1); }
+.admin-toolbar { box-shadow: 0 8px 22px rgba(19,39,46,.045); }
+.summary-strip { background: var(--surface); box-shadow: 0 8px 22px rgba(19,39,46,.045); padding: 18px 20px; gap: 0; }
+.summary-strip span { flex: 1 1 140px; padding: 0 18px; border-right: 1px solid var(--line); }
+.summary-strip span:first-child { padding-left: 0; }
+.summary-strip span:last-child { border-right: 0; }
+.summary-strip strong { display: block; margin: 4px 0 0; color: var(--ink); font-size: 19px; }
+.admin-action-cell .small-button { min-height: 32px; padding: 5px 11px; font-weight: 650; }
+@media (max-width: 800px) {
+  .view#view-admin .section-heading h3 { font-size: 23px; }
+  .admin-tabs .tab { padding: 0 14px; }
+  .summary-strip span { flex-basis: 50%; padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .summary-strip span:first-child { padding-left: 12px; }
+  .summary-strip span:nth-last-child(-n+2) { border-bottom: 0; }
+}

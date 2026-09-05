@@ -653,8 +653,18 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         moneyInput(b.fixedCostMicros ?? 0, '固定成本'), moneyInput(b.fixedSellMicros ?? 0, '固定售价'), b.active !== false,
         String(b.priceSource || 'manual').slice(0, 512), b.priceEffectiveAt ? new Date(String(b.priceEffectiveAt)) : new Date(), b.fxRateMicros ? moneyInput(b.fxRateMicros, '汇率') : null,
       ]
+      const increasePercent = Number(b.tierIncreasePercent ?? 20)
+      if (!Number.isFinite(increasePercent) || increasePercent < 0 || increasePercent > 1000) throw new Error('272K+ 涨价比例必须在 0-1000% 之间')
+      const tierRate = (value: bigint) => (value * BigInt(Math.round((100 + increasePercent) * 100)) + 9999n) / 10000n
+      const baseRates = { inputCostMicrosPerMillion: BigInt(String(values[1])), outputCostMicrosPerMillion: BigInt(String(values[2])), cacheCostMicrosPerMillion: BigInt(String(values[3])), inputSellMicrosPerMillion: BigInt(String(values[4])), outputSellMicrosPerMillion: BigInt(String(values[5])), cacheSellMicrosPerMillion: BigInt(String(values[6])) }
+      const highRates = Object.fromEntries(Object.entries(baseRates).map(([key, value]) => [key, tierRate(value)])) as typeof baseRates
+      const pricingTiers = JSON.stringify([
+        { thresholdTokens: '0', label: '标准（≤272K）', ...baseRates },
+        { thresholdTokens: '272001', label: `272K+（涨价${increasePercent}%）`, ...highRates },
+      ], (_key, value) => typeof value === 'bigint' ? value.toString() : value)
+      values.push(pricingTiers)
       const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
-      for (const [label, cost, sell] of [['输入', values[1], values[4]], ['输出', values[2], values[5]], ['缓存', values[3], values[6]] ] as const) {
+      for (const [label, cost, sell] of [['输入', values[1], values[4]], ['输出', values[2], values[5]], ['缓存', values[3], values[6]], ['输入(272K+)', highRates.inputCostMicrosPerMillion, highRates.inputSellMicrosPerMillion], ['输出(272K+)', highRates.outputCostMicrosPerMillion, highRates.outputSellMicrosPerMillion], ['缓存(272K+)', highRates.cacheCostMicrosPerMillion, highRates.cacheSellMicrosPerMillion]] as const) {
         requireMinimumMargin(BigInt(String(cost)), BigInt(String(sell)), minimumMarginBps, `${pattern} ${label}价格`)
       }
       return await db.one<any>(`INSERT INTO model_prices(
@@ -662,8 +672,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         input_sell_micros,output_sell_micros,cache_sell_micros,fixed_cost_micros,fixed_sell_micros,active,
         input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,
         input_sell_micros_per_million,output_sell_micros_per_million,cache_sell_micros_per_million,
-        price_source,price_effective_at,fx_rate_cny_micros)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$2,$3,$4,$5,$6,$7,$11,$12,$13)
+        price_source,price_effective_at,fx_rate_cny_micros,pricing_tiers)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$2,$3,$4,$5,$6,$7,$11,$12,$13,$14)
         ON CONFLICT(model_pattern) DO UPDATE SET
           input_cost_micros=excluded.input_cost_micros, output_cost_micros=excluded.output_cost_micros,
           cache_cost_micros=excluded.cache_cost_micros, input_sell_micros=excluded.input_sell_micros,
@@ -677,6 +687,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           cache_sell_micros_per_million=excluded.cache_sell_micros_per_million,
           price_source=excluded.price_source, price_effective_at=excluded.price_effective_at,
           fx_rate_cny_micros=excluded.fx_rate_cny_micros,
+          pricing_tiers=excluded.pricing_tiers,
           active=excluded.active, updated_at=now() RETURNING *`, values)
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
