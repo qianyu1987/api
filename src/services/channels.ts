@@ -49,12 +49,17 @@ export function supportsRequestedModel(channel: Pick<Channel, 'modelMap'>, reque
 }
 
 /**
- * Only transient upstream failures are retried.  A normal client error is
- * returned to the caller so that an invalid request is not sent to every
- * configured provider (and so providers do not see duplicate side effects).
+ * Retry provider failures that are safe to route to another configured
+ * channel.  401/403 are included because channel credentials and upstream
+ * balances are provider-specific; the final provider response is still
+ * returned when every channel fails.
  */
 function shouldFailover(status: number): boolean {
-  return status === 408 || status === 429 || status >= 500
+  // Provider-specific authentication, balance, and permission failures
+  // should not block another configured channel from serving the model.
+  // The relay still returns the final provider response when every channel
+  // fails, so client errors remain visible to the caller.
+  return status === 401 || status === 403 || status === 408 || status === 429 || status >= 500
 }
 
 export function isInvalidApiResponse(status: number, headers: Record<string, unknown>): boolean {
@@ -140,6 +145,12 @@ function responseOutcome(status: number): RelayAttempt['outcome'] {
   if (status === 429) return 'rate_limited'
   if (status >= 500 || status === 408) return status === 408 ? 'timeout' : 'server_error'
   return status >= 400 ? 'client_error' : 'success'
+}
+
+export function responseFailure(status: number): Pick<RelayAttempt, 'errorType' | 'errorMessage' | 'errorCode'> {
+  if (status === 401) return { errorType: 'provider_auth', errorCode: 'upstream_unauthorized', errorMessage: '上游认证失败或 Key 无效' }
+  if (status === 403) return { errorType: 'provider_access', errorCode: 'upstream_forbidden', errorMessage: '上游拒绝访问，可能是权限或余额不足' }
+  return { errorType: null, errorCode: null, errorMessage: null }
 }
 
 /**
@@ -231,7 +242,8 @@ export class ChannelService {
         const latencyMs = Date.now() - started
         const invalidResponse = isInvalidApiResponse(response.statusCode, response.headers as Record<string, unknown>)
         const retryable = invalidResponse || shouldFailover(response.statusCode)
-        const attempt: RelayAttempt = { channelId: channel.id, channelName: channel.name, attemptNo: index + 1, statusCode: response.statusCode, errorType: null, errorMessage: null, latencyMs }
+        const failure = responseFailure(response.statusCode)
+        const attempt: RelayAttempt = { channelId: channel.id, channelName: channel.name, attemptNo: index + 1, statusCode: response.statusCode, ...failure, latencyMs }
         attempt.upstreamModel = upstreamModel
         attempt.retryable = retryable
         attempt.outcome = invalidResponse ? 'server_error' : responseOutcome(response.statusCode)

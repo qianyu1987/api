@@ -1,4 +1,5 @@
 import { Database, one, type DbClient } from '../db/index.js'
+import { applyChannelCost, snapshotChannelCost, type ChannelCostSnapshot } from '../lib/channel-cost.js'
 import { calculateUsageMoney, estimatedRequestTokens, type TokenRates, type UsageTokens, formatMicros } from '../lib/money.js'
 
 export type BillingMode = 'token' | 'fixed'
@@ -17,6 +18,8 @@ export type PriceSnapshot = TokenRates & {
   priceEffectiveAt?: string | null
   fxRateCnyMicros?: bigint | null
   discountBps?: bigint
+  channelCosts?: ChannelCostSnapshot[]
+  appliedChannelCost?: ChannelCostSnapshot
   pricingTiers?: PricingTier[]
 }
 
@@ -39,6 +42,8 @@ export type StoredPriceSnapshot = {
   priceEffectiveAt: string | null
   fxRateCnyMicros: string | null
   discountBps: string
+  channelCosts?: ChannelCostSnapshot[]
+  appliedChannelCost?: ChannelCostSnapshot
   rates: {
     inputSellMicrosPerMillion: string
     outputSellMicrosPerMillion: string
@@ -306,6 +311,8 @@ export function serializePriceSnapshot(price: PriceSnapshot, estimatedUsage: Usa
     priceEffectiveAt: price.priceEffectiveAt || null,
     fxRateCnyMicros: price.fxRateCnyMicros?.toString() || null,
     discountBps: (price.discountBps || 0n).toString(),
+    channelCosts: price.channelCosts,
+    appliedChannelCost: price.appliedChannelCost,
     rates: {
       inputSellMicrosPerMillion: price.inputSellMicrosPerMillion.toString(),
       outputSellMicrosPerMillion: price.outputSellMicrosPerMillion.toString(),
@@ -350,6 +357,8 @@ export function deserializePriceSnapshot(value: unknown, fallback?: PriceSnapsho
       ? fallback?.fxRateCnyMicros || null
       : bigintValue(snapshot.fxRateCnyMicros),
     discountBps: bigintValue(snapshot.discountBps ?? fallback?.discountBps),
+    channelCosts: snapshot.channelCosts,
+    appliedChannelCost: snapshot.appliedChannelCost,
     inputSellMicrosPerMillion: bigintValue(rates.inputSellMicrosPerMillion ?? fallback?.inputSellMicrosPerMillion),
     outputSellMicrosPerMillion: bigintValue(rates.outputSellMicrosPerMillion ?? fallback?.outputSellMicrosPerMillion),
     cacheSellMicrosPerMillion: bigintValue(rates.cacheSellMicrosPerMillion ?? fallback?.cacheSellMicrosPerMillion),
@@ -632,7 +641,14 @@ export class BillingService {
         if (String(existing.user_id) !== input.userId) throw new Error('请求编号已被占用')
         return reservationResult(existing)
       }
-      const effectivePrice = applyTokenDiscount(input.price, bigintValue(user.token_discount_bps))
+      const globalSetting = await one<any>(client, "SELECT value FROM app_settings WHERE key = 'global_token_discount_bps'")
+      const personalDiscount = bigintValue(user.token_discount_bps)
+      const globalDiscount = bigintValue(globalSetting?.value)
+      const effectivePrice = applyTokenDiscount(input.price, personalDiscount > globalDiscount ? personalDiscount : globalDiscount)
+      if (mode === 'token') {
+        const costs = await client.query(`SELECT * FROM channel_model_costs WHERE (model_pattern=$1 OR model_pattern='*') AND (price_effective_at IS NULL OR price_effective_at <= now())`, [input.model])
+        effectivePrice.channelCosts = costs.rows.map(snapshotChannelCost)
+      }
       estimate = estimatePrice(effectivePrice, input.payload, mode)
       if (estimate.chargeMicros <= 0n) throw new Error('售价配置必须大于 0，禁止无价格调用')
       snapshot = serializePriceSnapshot(effectivePrice, estimate.usage, input, mode)
@@ -687,6 +703,7 @@ export class BillingService {
       if (reservation.status !== 'reserved') return this.existingSettlement(client, input.requestId)
 
       const stored = deserializePriceSnapshot(reservation.pricing_snapshot, input.price)
+      stored.price = applyChannelCost(stored.price, stored.price.channelCosts || [], input.channelId)
       const mode = stored.price.billingMode || 'token'
       const reportedUsage = input.usage
       // A total-only usage object cannot be split across the configured input,
@@ -906,7 +923,7 @@ export class BillingService {
         input.requestId, input.userId, keyId, cleanText(input.keyName || stored.context.keyName, 128),
         String(input.model ?? stored.context.model).slice(0, 256), String(input.upstreamModel || '').slice(0, 256),
         input.channelId || null, cleanText(input.channelName, 128), path, method, stored.price.billingMode || 'token',
-        JSON.stringify(reservation.pricing_snapshot || {}), usage.input.toString(), usage.output.toString(), usage.cache.toString(), usage.reportedTotal.toString(),
+        JSON.stringify(serializePriceSnapshot(stored.price, stored.estimatedUsage, { model: stored.context.model, requestPath: stored.context.path, requestMethod: stored.context.method, keyId: stored.context.keyId, keyName: stored.context.keyName })), usage.input.toString(), usage.output.toString(), usage.cache.toString(), usage.reportedTotal.toString(),
         planCharge.toString(), walletCharge.toString(), charge.toString(), cost.toString(), (charge - cost).toString(),
         statusCode, input.success ? 'success' : 'failed', input.success, latency, estimatedUsage,
         cleanText(errorCode, 120), cleanText(errorSummary, 500), cleanText(input.upstreamRequestId, 256),
@@ -922,13 +939,21 @@ export class BillingService {
   static formatBalance(view: BalanceView): Record<string, unknown> {
     return {
       wallet: formatMicros(view.walletMicros),
+      walletMicros: view.walletMicros.toString(),
       walletReserved: formatMicros(view.walletReservedMicros),
+      walletReservedMicros: view.walletReservedMicros.toString(),
       walletAvailable: formatMicros(view.walletMicros),
+      walletAvailableMicros: view.walletMicros.toString(),
       planRemaining: formatMicros(view.planMicros),
+      planRemainingMicros: view.planMicros.toString(),
       planBookRemaining: formatMicros(view.planBookMicros),
+      planBookRemainingMicros: view.planBookMicros.toString(),
       planReserved: formatMicros(view.planReservedMicros),
+      planReservedMicros: view.planReservedMicros.toString(),
       planUsed: formatMicros(view.planUsedMicros),
+      planUsedMicros: view.planUsedMicros.toString(),
       planQuota: formatMicros(view.planQuotaMicros),
+      planQuotaMicros: view.planQuotaMicros.toString(),
       planExpiresAt: view.planExpiresAt,
       planNextResetAt: view.planNextResetAt,
       planLastResetAt: view.planLastResetAt,

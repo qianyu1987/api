@@ -7,6 +7,13 @@ import { nextShanghaiReset } from './billing.js'
 
 export type PaymentMethod = 'wechat' | 'alipay'
 
+/** New user orders are currently settled through WeChat only. */
+export function normalizeNewOrderPaymentMethod(value: unknown): 'wechat' {
+  const method = value === undefined || value === null ? 'wechat' : String(value).trim().toLowerCase()
+  if (!method || method === 'wechat') return 'wechat'
+  throw Object.assign(new Error('目前仅支持微信支付'), { statusCode: 400 })
+}
+
 /**
  * A verified provider callback.  The adapter currently calls the order number
  * `orderId` and reports an integer amount in fen.  `orderNo`/`amountMicros` and

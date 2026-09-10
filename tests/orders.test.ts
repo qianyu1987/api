@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import { OrderService } from '../src/services/orders.js'
+import { normalizeNewOrderPaymentMethod, OrderService } from '../src/services/orders.js'
 
 type PaymentEvent = {
   provider: string
@@ -81,5 +81,14 @@ describe('payment callback settlement', () => {
     expect(events).toHaveLength(1)
     expect(affiliate.creditForTopup).toHaveBeenCalledTimes(1)
     await expect(service.applyVerifiedCallback({ ...payment, eventId: 'evt-no-trade', transactionId: null })).rejects.toThrow('支付交易号缺失')
+  })
+})
+
+describe('new order payment method', () => {
+  test('defaults to and accepts WeChat only', () => {
+    expect(normalizeNewOrderPaymentMethod(undefined)).toBe('wechat')
+    expect(normalizeNewOrderPaymentMethod('wechat')).toBe('wechat')
+    expect(() => normalizeNewOrderPaymentMethod('alipay')).toThrow('目前仅支持微信支付')
+    expect(() => normalizeNewOrderPaymentMethod('card')).toThrow('目前仅支持微信支付')
   })
 })

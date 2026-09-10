@@ -37,11 +37,20 @@
     return microsToYuan((amount * 10000n + (10000n - rate) - 1n) / (10000n - rate))
   }
   function planProgressMarkup(balance, compact = false) {
-    const quota = toMicros(balance?.planQuotaMicros ?? balance?.planQuota ?? 0)
-    const used = toMicros(balance?.planUsedMicros ?? balance?.planUsed ?? 0)
-    const reserved = toMicros(balance?.planReservedMicros ?? balance?.planReserved ?? 0)
-    const available = toMicros(balance?.planRemainingMicros ?? balance?.planRemaining ?? 0)
-    const book = toMicros(balance?.planBookRemainingMicros ?? balance?.planBookRemaining ?? available + reserved)
+    // New responses expose exact micro-yuan strings. Keep accepting the older
+    // formatted yuan strings so a cached page or mixed-version API instance
+    // cannot render a valid decimal balance as zero.
+    const balanceAmount = (microsKey, yuanKey, fallback = 0n) => {
+      if (balance?.[microsKey] !== undefined && balance?.[microsKey] !== null) return toMicros(balance[microsKey])
+      const value = balance?.[yuanKey]
+      if (value === undefined || value === null || value === '') return fallback
+      try { return yuanToMicros(value) } catch { return fallback }
+    }
+    const quota = balanceAmount('planQuotaMicros', 'planQuota')
+    const used = balanceAmount('planUsedMicros', 'planUsed')
+    const reserved = balanceAmount('planReservedMicros', 'planReserved')
+    const available = balanceAmount('planRemainingMicros', 'planRemaining')
+    const book = balanceAmount('planBookRemainingMicros', 'planBookRemaining', available + reserved)
     const percent = quota > 0n ? Math.min(100, Math.max(0, Number((used * 10000n) / quota) / 100)) : 0
     const status = balance?.planStatus === 'active' ? (available <= 0n ? '套餐额度已用尽，请充值' : available * 100n <= quota * 20n ? '套餐可用额度偏低' : '套餐运行正常') : balance?.planStatus === 'expired' ? '套餐已过期，请续费' : '尚未开通套餐'
     if (quota <= 0n) return '<div class="plan-progress empty-progress"><div><strong>本周期套餐额度</strong><span>' + esc(status) + '</span></div></div>'
@@ -89,15 +98,16 @@
 
   function registerMode(enabled) {
     state.registering = enabled
-    for (const id of ['email-field', 'verification-field', 'invite-field', 'terms-field']) document.getElementById(id).classList.toggle('hidden', !enabled)
+    for (const id of ['email-field', 'invite-field', 'terms-field']) document.getElementById(id).classList.toggle('hidden', !enabled)
     $('#auth-title').textContent = enabled ? '创建账号' : '登录控制台'
-    $('#auth-intro').textContent = enabled ? '完成邮箱验证后即可创建 API Key 并开始调用。' : '管理 API Key、额度、调用用量和接入配置。'
+    $('#auth-intro').textContent = enabled ? '填写账号和密码即可注册，邮箱为可选信息。' : '管理 API Key、额度、调用用量和接入配置。'
     $('#auth-submit').textContent = enabled ? '注册并登录' : '登录'
     $('#auth-toggle').textContent = enabled ? '已有账号？登录' : '没有账号？注册'
-    $('#auth-form [name="email"]').required = enabled
-    $('#auth-form [name="verificationCode"]').required = enabled
+    $('#auth-form [name="email"]').required = false
     $('#auth-form [name="termsAccepted"]').required = enabled
     $('#auth-form [name="password"]').autocomplete = enabled ? 'new-password' : 'current-password'
+    const password = $('#auth-form [name="password"]'); const toggle = $('#toggle-auth-password')
+    password.type = 'password'; toggle.textContent = '显示'; toggle.setAttribute('aria-label', '显示密码'); toggle.setAttribute('aria-pressed', 'false')
     $('#auth-error').textContent = ''
   }
   function applyInvite() {
@@ -137,6 +147,7 @@
       const progress = $('#overview-plan-progress'); if (progress) progress.innerHTML = planProgressMarkup(data.balance)
       $('#chatgpt-link').href = data.downloads.chatgpt; $('#ccswitch-link').href = data.downloads.ccswitch
       $('#quick-config').textContent = 'Base URL: ' + data.apiBaseUrl + '\nAuthorization: Bearer sk-relay-…'
+      const guideBase = $('#guide-api-base'); if (guideBase) guideBase.textContent = data.apiBaseUrl
       renderUsage('#recent-usage', (await api('/api/me/usage?limit=5')).items, true)
     } catch (error) { toast(error.message, true) }
   }
@@ -173,11 +184,11 @@
     try {
       const [plans, overview] = await Promise.all([api('/api/plans'), api('/api/me/overview')])
       const progress = $('#recharge-plan-progress'); if (progress) progress.innerHTML = planProgressMarkup(overview.balance)
-      $('#plans').innerHTML = plans.items.length ? plans.items.map((plan) => '<div class="plan-option"><div><strong>' + esc(plan.name) + '</strong><small>' + money({ micros: plan.price_micros }) + ' · 可消费额度 ' + money({ micros: plan.quota_micros }) + ' · 30 天</small></div><button class="button secondary buy-plan" type="button" data-id="' + esc(plan.id) + '" data-amount="' + esc(plan.price_micros) + '">购买</button></div>').join('') : '<p class="empty">管理员尚未配置套餐</p>'
+      $('#plans').innerHTML = plans.items.length ? plans.items.map((plan) => '<div class="plan-option"><div><strong>' + esc(plan.name) + '</strong><small>30 天有效 · 每月 4 次额度 · 每次可消费额度 ' + money({ micros: plan.quota_micros }) + '</small><small class="plan-price">套餐价 ' + money({ micros: plan.price_micros }) + '</small></div><button class="button secondary buy-plan" type="button" data-id="' + esc(plan.id) + '" data-amount="' + esc(plan.price_micros) + '">购买套餐</button></div>').join('') : '<p class="empty">管理员尚未配置套餐</p>'
     } catch (error) { toast(error.message, true) }
   }
   function renderPayment(data) {
-    const payment = data.payment || {}; const provider = payment.provider === 'alipay' ? '支付宝' : '微信'; const raw = payment.qrCode || payment.codeUrl || ''
+    const payment = data.payment || {}; const provider = '微信'; const raw = payment.qrCode || payment.codeUrl || ''
     const image = payment.qrImage || payment.qrDataUrl || data.qrImage || (String(raw).startsWith('data:image/') ? raw : '')
     const codeUrl = payment.codeUrl || (!String(raw).startsWith('data:image/') ? raw : '')
     $('#payment-result').classList.remove('hidden')
@@ -204,9 +215,10 @@
   function renderUsage(selector, items, compact, append) {
     const body = $(selector)
     if (!items?.length) { if (!append) body.innerHTML = '<tr><td colspan="' + (compact ? 5 : 6) + '" class="empty">暂无用量记录</td></tr>'; return }
+    const reason = (item) => item.success ? '' : '<small class="subline">' + esc(item.errorSummary || (item.statusCode === 403 ? '上游拒绝访问，可能是权限或余额不足' : item.statusCode >= 500 ? '上游服务暂时不可用' : '请求失败')) + ' · ' + esc(item.billingNote || '请求失败，未产生收费') + '</small>'
     const rows = items.map((item) => compact
-      ? '<tr><td>' + date(item.time) + '</td><td>' + esc(item.model) + '</td><td>' + integer(item.totalTokens) + '</td><td>' + money(item.charge) + '</td><td><span class="state ' + (item.success ? 'good' : 'bad') + '">' + (item.success ? '成功' : '失败') + '</span></td></tr>'
-      : '<tr><td>' + date(item.time) + '</td><td><code>' + esc(item.requestId).slice(0, 12) + '…</code></td><td><strong>' + esc(item.model) + '</strong><small class="subline">' + esc(item.channel || '—') + '</small></td><td>' + integer(item.totalTokens) + '<small class="subline">入 ' + integer(item.inputTokens) + ' / 出 ' + integer(item.outputTokens) + '</small></td><td>' + money(item.charge) + '<small class="subline">套餐 ' + money(item.planCharge) + ' · 钱包 ' + money(item.walletCharge) + '</small>' + (item.profit ? '<small class="subline">成本 ' + money(item.estimatedCost) + ' · 利润 ' + money(item.profit) + '</small>' : '') + '</td><td><span class="state ' + (item.success ? 'good' : 'bad') + '">' + (item.statusCode ?? '—') + ' · ' + (item.success ? '成功' : '失败') + '</span></td></tr>').join('')
+      ? '<tr><td>' + date(item.time) + '</td><td>' + esc(item.model) + '</td><td>' + integer(item.totalTokens) + '</td><td>' + money(item.charge) + '</td><td><span class="state ' + (item.success ? 'good' : 'bad') + '">' + (item.success ? '成功' : '失败') + '</span>' + reason(item) + '</td></tr>'
+      : '<tr><td>' + date(item.time) + '</td><td><code>' + esc(item.requestId).slice(0, 12) + '…</code></td><td><strong>' + esc(item.model) + '</strong><small class="subline">' + esc(item.channel || '—') + '</small></td><td>' + integer(item.totalTokens) + '<small class="subline">入 ' + integer(item.inputTokens) + ' / 出 ' + integer(item.outputTokens) + '</small></td><td>' + money(item.charge) + '<small class="subline">套餐 ' + money(item.planCharge) + ' · 钱包 ' + money(item.walletCharge) + '</small>' + (item.profit ? '<small class="subline">成本 ' + money(item.estimatedCost) + ' · 利润 ' + money(item.profit) + '</small>' : '') + '</td><td><span class="state ' + (item.success ? 'good' : 'bad') + '">' + (item.statusCode ?? '—') + ' · ' + (item.success ? '成功' : '失败') + '</span>' + reason(item) + '</td></tr>').join('')
     if (append) body.insertAdjacentHTML('beforeend', rows); else body.innerHTML = rows
   }
   async function loadAffiliate() {
@@ -218,7 +230,7 @@
       $('#affiliate-ledger').innerHTML = data.ledger?.length ? data.ledger.map((row) => '<tr><td>' + date(row.createdAt) + '</td><td>' + (labels[row.kind] || esc(row.kind)) + '</td><td class="' + (toMicros(row.amountMicros) >= 0n ? 'amount-positive' : 'amount-negative') + '">' + (toMicros(row.amountMicros) > 0n ? '+' : '') + money({ micros: row.amountMicros }) + '</td><td>' + money({ micros: row.balanceAfterMicros }) + '</td></tr>').join('') : '<tr><td colspan="4" class="empty">暂无资金记录</td></tr>'
     } catch (error) { toast(error.message, true) }
   }
-  async function loadDownloads() { try { const data = await api('/api/downloads'); $('#chatgpt-link').href = data.chatgpt; $('#ccswitch-link').href = data.ccswitch } catch (error) { toast(error.message, true) } }
+  async function loadDownloads() { try { const data = await api('/api/downloads'); $('#chatgpt-link').href = data.chatgpt; $('#ccswitch-link').href = data.ccswitch; const guideLink = $('#ccswitch-guide-download'); if (guideLink) guideLink.href = data.ccswitch; const guideBase = $('#guide-api-base'); if (guideBase && data.apiBaseUrl) guideBase.textContent = data.apiBaseUrl } catch (error) { toast(error.message, true) } }
 
   const field = (name, label, value = '', type = 'text', extra = '') => '<label>' + label + '<input name="' + name + '" type="' + type + '" value="' + esc(value) + '" ' + extra + '></label>'
   const check = (name, label, checked = true) => '<label class="checkbox-label"><input name="' + name + '" type="checkbox" ' + (checked ? 'checked' : '') + '>' + label + '</label>'
@@ -241,7 +253,7 @@
       const inputs = ['input', 'output', 'cache'].flatMap((name) => [field(name + 'CostYuanPerMillion', (name === 'input' ? '输入' : name === 'output' ? '输出' : '缓存') + '成本（元/百万 Token）', '0', 'text', 'data-price-cost="' + name + '"'), field(name + 'SellYuanPerMillion', (name === 'input' ? '输入' : name === 'output' ? '输出' : '缓存') + '售价（元/百万 Token）', '0')])
       const editor = form('price', [field('modelPattern', '模型匹配', '*', 'text', 'required'), field('marginBps', '目标毛利率（基点）', '8000', 'number', 'min="0" max="9999" data-margin'), field('tierIncreasePercent', '272K+ 涨价比例（%）', '20', 'number', 'min="0" max="1000"'), ...inputs, check('active', '启用'), '<p class="admin-note wide">缓存按普通输入价计费；输入 Token 超过 272K 后自动使用涨价层。售价按目标毛利率自动计算；数据库仍以微元/百万 Token 保存。</p>'], '保存模型价格')
       const rows = items.map((item) => { const tiers = Array.isArray(item.pricing_tiers) ? item.pricing_tiers : []; const high = tiers.find((tier) => Number(tier.thresholdTokens) > 0); return '<tr><td><strong>' + esc(item.model_pattern) + '</strong><small class="subline">' + esc(item.price_source || '手工设置') + '</small></td><td>' + money({ micros: rate(item, 'input_sell') }) + (high ? '<small class="subline">272K+ ' + money({ micros: high.inputSellMicrosPerMillion }) + '</small>' : '') + '<small class="subline">成本 ' + money({ micros: rate(item, 'input_cost') }) + ' · ' + margin(rate(item, 'input_cost'), rate(item, 'input_sell')) + '</small></td><td>' + money({ micros: rate(item, 'output_sell') }) + (high ? '<small class="subline">272K+ ' + money({ micros: high.outputSellMicrosPerMillion }) + '</small>' : '') + '<small class="subline">成本 ' + money({ micros: rate(item, 'output_cost') }) + ' · ' + margin(rate(item, 'output_cost'), rate(item, 'output_sell')) + '</small></td><td>' + money({ micros: rate(item, 'cache_sell') }) + '</td><td><span class="state ' + (item.active ? 'good' : 'bad') + '">' + (item.active ? '启用' : '停用') + '</span></td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="price" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button danger-button admin-delete" type="button" data-kind="price" data-id="' + esc(item.id) + '">停用</button></td></tr>' })
-      return '<div class="admin-toolbar"><p>只会初始化已启用渠道实际映射的 OpenAI 模型。</p><button class="button secondary" type="button" data-bootstrap="openai-prices">按官方价格初始化</button></div>' + editor + table(['模型 / 来源', '输入售价', '输出售价', '缓存售价', '状态', '操作'], rows, '尚未配置模型价格')
+      return '<div class="admin-toolbar"><p>只会初始化已启用渠道实际映射的模型；上游页面标注为美元的数值按人民币 1:1 结算，不再乘以 7.2。</p><button class="button secondary" type="button" data-bootstrap="openai-prices">按上游 1:1 价格初始化</button></div>' + editor + table(['模型 / 来源', '输入售价', '输出售价', '缓存售价', '状态', '操作'], rows, '尚未配置模型价格')
     }
     if (tab === 'fixed-prices') {
       const method = '<label>方法<select name="httpMethod"><option>ANY</option><option>GET</option><option selected>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select></label>'
@@ -281,9 +293,11 @@
       return table(['时间', '用户', '类型', '执行者', '重置前', '重置后', '周期标识'], rows, '暂无套餐重置记录')
     }
     if (tab === 'settings') {
-      const settings = Object.fromEntries(items.map((item) => [item.key, item.value])); const smtp = data.mail || {}
-      const editor = form('site-settings', [field('name', '站点名称', settings.site_name || 'GPT TOKEN', 'text', 'required'), field('title', '浏览器标题', settings.site_title || 'GPT TOKEN | OpenAI 兼容 API 控制台', 'text', 'required'), field('logoUrl', 'Logo 地址', settings.site_logo_url || '/assets/gpt-token-mark-192.png', 'text', 'required'), '<p class="admin-note wide">Logo 已本地托管。SMTP 密码、上游 Key 和用户 API Key 不会出现在本页面、数据库或日志。</p>'], '保存站点设置')
-      return '<div class="settings-status"><div><span class="label">邮件服务</span><strong>' + (smtp.configured ? '已配置' : '未配置') + '</strong></div><div><span class="label">SMTP 主机</span><strong>' + esc(smtp.host || '—') + '</strong></div><div><span class="label">发件地址</span><strong>' + esc(smtp.from || '—') + '</strong></div><div><span class="label">TLS</span><strong>' + (smtp.secure ? '已启用' : '未启用') + '</strong></div></div>' + editor
+      const settings = Object.fromEntries(items.map((item) => [item.key, item.value])); const smtp = data.mail || {}; const profit = data.profit || {}
+      const siteEditor = form('site-settings', [field('name', '站点名称', settings.site_name || 'GPT TOKEN', 'text', 'required'), field('title', '浏览器标题', settings.site_title || 'GPT TOKEN | OpenAI 兼容 API 控制台', 'text', 'required'), field('logoUrl', 'Logo 地址', settings.site_logo_url || '/assets/gpt-token-mark-192.png', 'text', 'required'), '<p class="admin-note wide">Logo 已本地托管。SMTP 密码、上游 Key 和用户 API Key 不会出现在本页面、数据库或日志。</p>'], '保存站点设置')
+      const profitEditor = form('profit-settings', [field('minimumMarginBps', '最低毛利率（基点，3000 = 30%）', String(profit.minimumMarginBps ?? settings.profit_min_margin_bps ?? 3000), 'number', 'min="0" max="9999" required'), field('paymentFeeRateBps', '支付手续费率（基点）', String(profit.paymentFeeRateBps ?? settings.payment_fee_rate_bps ?? 0), 'number', 'min="0" max="10000" required'), field('globalDiscountBps', '全局减免比例（基点，1000 = 10%）', String(profit.globalDiscountBps ?? settings.global_token_discount_bps ?? 0), 'number', 'min="0" max="9900" required'), '<div class="admin-note wide">当前安全上限：<strong>' + ((Number(profit.maxDiscountBps || 0)) / 100) + '%</strong>。折扣、支付手续费和返利合计后必须达到最低毛利线；超过 272K 的价格层也会参与校验。</div>'], '保存利润设置')
+      const blockers = (profit.blockers || []).slice(0, 6).map((item) => '<li>' + esc(item.model + ' · ' + item.tier + ' · ' + item.part + '：' + (item.reason || '低于安全上限')) + '</li>').join('')
+      return '<div class="settings-status"><div><span class="label">邮件服务</span><strong>' + (smtp.configured ? '已配置' : '未配置') + '</strong></div><div><span class="label">SMTP 主机</span><strong>' + esc(smtp.host || '—') + '</strong></div><div><span class="label">发件地址</span><strong>' + esc(smtp.from || '—') + '</strong></div><div><span class="label">TLS</span><strong>' + (smtp.secure ? '已启用' : '未启用') + '</strong></div></div>' + profitEditor + (blockers ? '<div class="notice"><strong>风险配置</strong><ul>' + blockers + '</ul></div>' : '') + siteEditor
     }
     return table([], [])
   }
@@ -336,8 +350,8 @@
     for (const checkbox of editor.querySelectorAll('input[type="checkbox"]')) payload[checkbox.name] = checkbox.checked
     if (kind === 'channel') { try { payload.modelMap = JSON.parse(payload.modelMap || '{}') } catch { throw new Error('模型映射必须是合法 JSON') } }
     if (kind === 'fixed-price' && editor.dataset.manualSell !== 'true') delete payload.sellYuan
-    const endpoints = { channel: '/api/admin/channels', price: '/api/admin/prices', 'fixed-price': '/api/admin/fixed-prices', plan: '/api/admin/plans', 'affiliate-settings': '/api/admin/affiliate/settings', 'site-settings': '/api/admin/settings/site' }
-    const method = kind === 'affiliate-settings' ? 'PATCH' : kind === 'site-settings' ? 'PUT' : 'POST'
+    const endpoints = { channel: '/api/admin/channels', price: '/api/admin/prices', 'fixed-price': '/api/admin/fixed-prices', plan: '/api/admin/plans', 'affiliate-settings': '/api/admin/affiliate/settings', 'site-settings': '/api/admin/settings/site', 'profit-settings': '/api/admin/settings/profit' }
+    const method = kind === 'affiliate-settings' || kind === 'profit-settings' ? 'PATCH' : kind === 'site-settings' ? 'PUT' : 'POST'
     const button = editor.querySelector('[type="submit"]'); pending(button, true, '保存中…')
     try { await api(endpoints[kind], { method, body: JSON.stringify(payload) }); toast('已保存'); if (kind === 'site-settings') await loadSite(); await loadAdmin(kind === 'affiliate-settings' ? 'affiliate-admin' : state.adminTab) } finally { pending(button, false) }
   }
@@ -362,18 +376,48 @@
       state.user = result.user; $('#auth-view').classList.add('hidden'); $('#app-view').classList.remove('hidden')
       if (result.user.role === 'admin') $('.admin-only').classList.remove('hidden')
       show('overview')
-    } catch (error) { $('#auth-error').textContent = error.message }
+    } catch (error) {
+      $('#auth-error').textContent = error.message === '账号或密码错误'
+        ? '账号或密码错误。账号不区分大小写，密码区分大小写；请检查自动填充、输入法全角字符和密码首尾空格。'
+        : error.message
+    }
   })
   $('#auth-toggle').addEventListener('click', () => registerMode(!state.registering))
-  $('#send-verification-code').addEventListener('click', async (event) => {
-    const button = event.currentTarget; pending(button, true, '发送中…')
-    try {
-      const data = await api('/api/auth/email-verification', { method: 'POST', body: JSON.stringify({ email: $('#auth-form [name="email"]').value.trim() }) })
-      toast('验证码已发送，有效至 ' + new Date(data.expiresAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }))
-      $('#auth-form [name="verificationCode"]').focus()
-    } catch (error) { $('#auth-error').textContent = error.message } finally { pending(button, false) }
+  $('#toggle-auth-password').addEventListener('click', (event) => {
+    const input = $('#auth-form [name="password"]'); const button = event.currentTarget; const visible = input.type === 'text'
+    input.type = visible ? 'password' : 'text'; button.textContent = visible ? '显示' : '隐藏'
+    button.setAttribute('aria-label', visible ? '显示密码' : '隐藏密码'); button.setAttribute('aria-pressed', String(!visible))
   })
-  $('#logout').addEventListener('click', async () => { await api('/api/auth/logout', { method: 'POST' }); location.reload() })
+  $('#logout').addEventListener('click', async (event) => {
+    const button = event.currentTarget
+    pending(button, true, '退出中…')
+    try {
+      await api('/api/auth/logout', { method: 'POST', body: '{}' })
+      state.user = null
+      if (state.overviewTimer) { clearInterval(state.overviewTimer); state.overviewTimer = null }
+      $('#app-view').classList.add('hidden')
+      $('#auth-view').classList.remove('hidden')
+      $('#auth-error').textContent = ''
+      registerMode(false)
+      history.replaceState(null, '', '/')
+      location.reload()
+    } catch (error) {
+      toast(error.message, true)
+      pending(button, false)
+    }
+  })
+  $('#change-password').addEventListener('click', () => {
+    const form = $('#password-change-form'); form.reset(); $('#password-change-error').textContent = ''; $('#password-change-dialog').showModal(); form.elements.namedItem('currentPassword').focus()
+  })
+  $('#password-change-form').addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const form = event.currentTarget; const data = Object.fromEntries(new FormData(form).entries()); const button = form.querySelector('[type="submit"]')
+    $('#password-change-error').textContent = ''; pending(button, true, '保存中…')
+    try {
+      await api('/api/me/password', { method: 'PATCH', body: JSON.stringify(data) })
+      form.reset(); form.closest('dialog').close(); toast('密码已修改，请使用新密码登录'); await api('/api/auth/logout', { method: 'POST', body: '{}' }); location.reload()
+    } catch (error) { $('#password-change-error').textContent = error.message } finally { pending(button, false) }
+  })
   $$('#main-nav .nav-item').forEach((node) => node.addEventListener('click', () => show(node.dataset.view)))
   $$('[data-go]').forEach((node) => node.addEventListener('click', () => show(node.dataset.go)))
   document.addEventListener('click', (event) => {
@@ -402,11 +446,11 @@
   })
   $('#topup-form').addEventListener('submit', async (event) => {
     event.preventDefault(); const button = event.currentTarget.querySelector('[type="submit"]'); const data = new FormData(event.currentTarget); pending(button, true, '正在创建…')
-    try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'wallet_topup', amountMicros: yuanToMicros(data.get('amount')).toString(), paymentMethod: data.get('paymentMethod') }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }
+    try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'wallet_topup', amountMicros: yuanToMicros(data.get('amount')).toString(), paymentMethod: 'wechat' }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }
   })
   $('#plans').addEventListener('click', async (event) => {
     const button = event.target.closest('.buy-plan'); if (!button) return; pending(button, true, '正在创建…')
-    try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'subscription', planId: button.dataset.id, amountMicros: button.dataset.amount, paymentMethod: $('#plan-payment-method').value }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }
+    try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'subscription', planId: button.dataset.id, amountMicros: button.dataset.amount, paymentMethod: 'wechat' }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }
   })
   $('#affiliate-convert').addEventListener('click', async (event) => {
     const button = event.currentTarget; pending(button, true, '兑换中…')

@@ -7,6 +7,8 @@
   <title>GPT TOKEN | OpenAI 兼容 API 控制台</title>
   <link rel="stylesheet" href="/styles.css">
   <link rel="stylesheet" href="/styles-extra.css">
+  <link rel="stylesheet" href="/styles-auth.css">
+  <link rel="stylesheet" href="/styles-password.css">
 </head>
 <body>
   <div id="toast" role="status" aria-live="polite"></div>
@@ -20,12 +22,8 @@
       <p class="muted" id="auth-intro">管理 API Key、额度、调用用量和接入配置。</p>
       <form id="auth-form" class="form-stack">
         <label>账号<input name="username" autocomplete="username" required minlength="3" maxlength="32"></label>
-        <label>密码<input name="password" type="password" autocomplete="current-password" required minlength="8" maxlength="128"></label>
-        <label id="email-field" class="hidden">邮箱<input name="email" type="email" autocomplete="email" maxlength="254"></label>
-        <div id="verification-field" class="verification-row hidden">
-          <label>邮箱验证码<input name="verificationCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"></label>
-          <button id="send-verification-code" class="button secondary" type="button">获取验证码</button>
-        </div>
+        <label>密码<div class="password-control"><input name="password" type="password" autocomplete="current-password" required minlength="8" maxlength="128"><button id="toggle-auth-password" class="password-toggle" type="button" aria-label="显示密码" aria-pressed="false">显示</button></div></label>
+        <label id="email-field" class="hidden">邮箱（可选）<input name="email" type="email" autocomplete="email" maxlength="254"></label>
         <label id="invite-field" class="hidden">邀请码<input name="inviteCode" autocomplete="off" maxlength="32"></label>
         <label id="terms-field" class="checkbox-label hidden"><input name="termsAccepted" type="checkbox">我已阅读并同意 <a href="/terms" target="_blank" rel="noreferrer">登录与服务条款</a> 及 <a href="/privacy" target="_blank" rel="noreferrer">隐私说明</a></label>
         <button class="button primary" type="submit" id="auth-submit">登录</button>
@@ -50,7 +48,7 @@
         <button data-view="downloads" class="nav-item">下载入口</button>
         <button data-view="admin" class="nav-item admin-only hidden">管理后台</button>
       </nav>
-      <div class="sidebar-foot"><span id="user-label"></span><button id="logout" class="text-button" type="button">退出</button></div>
+      <div class="sidebar-foot"><span id="user-label"></span><div class="sidebar-actions"><button id="change-password" class="text-button" type="button">修改密码</button><button id="logout" class="text-button" type="button">退出</button></div></div>
     </aside>
     <main class="content">
       <header class="topbar"><button id="mobile-menu" class="icon-button" aria-label="打开导航" type="button">菜单</button><h2 id="view-title">总览</h2><span class="status-dot"><i></i>服务正常</span></header>
@@ -64,7 +62,7 @@
         <div class="table-wrap"><table><thead><tr><th>时间</th><th>模型</th><th>Token</th><th>收费</th><th>状态</th></tr></thead><tbody id="recent-usage"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody></table></div>
       </section>
 
-      <section id="view-recharge" class="view"><div class="section-heading"><h3>充值与套餐</h3></div><div id="recharge-plan-progress"></div><div class="recharge-layout"><form id="topup-form" class="panel form-stack"><h4>钱包充值</h4><label>充值金额（元）<input name="amount" type="number" min="1" step="0.01" value="20" required></label><label>支付方式<select name="paymentMethod"><option value="wechat">微信支付</option><option value="alipay">支付宝</option></select></label><button class="button primary" type="submit">生成支付二维码</button><p class="muted form-hint">支付成功后自动入账；钱包充值参与邀请返利。</p></form><div class="panel"><div class="panel-heading"><h4>30 天套餐</h4><label class="inline-select">支付方式<select id="plan-payment-method"><option value="wechat">微信支付</option><option value="alipay">支付宝</option></select></label></div><div id="plans" class="plan-list"><p class="empty">暂无可购买套餐</p></div></div></div><div id="payment-result" class="payment-result hidden" role="status" aria-live="polite"></div></section>
+      <section id="view-recharge" class="view"><div class="section-heading"><h3>充值与套餐</h3></div><div id="recharge-plan-progress"></div><aside class="plan-frequency-card" aria-labelledby="plan-frequency-title"><div class="plan-frequency-copy"><h4 id="plan-frequency-title">每月重置 4 次</h4><p>月套餐包含 4 次独立额度，每周一 09:00 自动开启新周期。购买月套餐即可使用；钱包充值只增加钱包余额。</p></div><div class="plan-frequency-mark" aria-label="每月四次独立额度"><strong>4</strong><span>次额度</span></div></aside><div class="recharge-layout"><form id="topup-form" class="panel form-stack"><h4>钱包充值</h4><label>充值金额（元）<input name="amount" type="number" min="1" step="0.01" value="20" required></label><p class="muted form-hint">支付方式：微信支付</p><button class="button primary" type="submit">生成支付二维码</button><p class="muted form-hint">支付成功后自动入账；钱包充值参与邀请返利。</p></form><div class="panel"><div class="panel-heading"><h4>30 天套餐</h4><p class="muted form-hint">支付方式：微信支付</p></div><div id="plans" class="plan-list"><p class="empty">暂无可购买套餐</p></div></div></div><div id="payment-result" class="payment-result hidden" role="status" aria-live="polite"></div></section>
 
       <section id="view-keys" class="view"><div class="section-heading"><h3>API Keys</h3><button id="new-key" class="button primary" type="button">新建 Key</button></div><div class="notice">复制已有 Key 时必须验证当前密码；完整值不会记录在浏览器日志或服务端审计内容中。</div><div class="table-wrap"><table><thead><tr><th>名称</th><th>前缀</th><th>创建时间</th><th>最近使用</th><th>状态</th><th>操作</th></tr></thead><tbody id="keys-table"><tr><td colspan="6" class="empty">加载中…</td></tr></tbody></table></div></section>
 
@@ -72,7 +70,7 @@
 
       <section id="view-affiliate" class="view"><div class="section-heading"><h3>邀请返利</h3></div><div class="affiliate-top"><div class="affiliate-balance"><span class="label">可兑换金额</span><strong id="affiliate-balance">--</strong><div class="affiliate-totals"><span>累计返利 <b id="affiliate-lifetime">--</b></span><span>已兑换 <b id="affiliate-converted">--</b></span></div><button id="affiliate-convert" class="button primary" type="button">兑换到 API 钱包</button></div><div class="invite-box"><span class="label">你的邀请码</span><div class="copy-line"><code id="invite-code">--</code><button class="small-button" type="button" data-copy="invite-code">复制</button></div><div class="copy-line"><code id="invite-link">--</code><button class="small-button" type="button" data-copy="invite-link">复制</button></div><p class="muted">成功注册：<b id="invite-count">0</b> 人 · 钱包充值按平台返利比例结算</p></div></div><div class="section-heading compact-heading"><h4>返利来源</h4></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>来源用户</th><th>充值金额</th><th>比例</th><th>返利</th></tr></thead><tbody id="affiliate-table"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody></table></div><div class="section-heading compact-heading"><h4>资金记录</h4></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>类型</th><th>金额</th><th>返利余额</th></tr></thead><tbody id="affiliate-ledger"><tr><td colspan="4" class="empty">加载中…</td></tr></tbody></table></div></section>
 
-      <section id="view-downloads" class="view"><div class="section-heading"><h3>下载入口</h3></div><div class="download-list"><a id="chatgpt-link" class="download-row" target="_blank" rel="noreferrer"><span><strong>ChatGPT</strong><small>OpenAI 官方下载页</small></span><b>打开</b></a><a id="ccswitch-link" class="download-row" target="_blank" rel="noreferrer"><span><strong>CC Switch</strong><small>官方 Release 页面</small></span><b>打开</b></a></div><div class="panel setup-panel"><h4>快速接入</h4><p>在客户端中填写 API Base URL，并使用 API Key 作为 Bearer Token。也可在 API Keys 页面一键导入 CC Switch。</p><code class="code-block" id="quick-config">Base URL: --\nAuthorization: Bearer sk-relay-…</code></div></section>
+      <section id="view-downloads" class="view"><div class="section-heading"><h3>下载入口</h3></div><div class="download-list"><a id="chatgpt-link" class="download-row" target="_blank" rel="noreferrer"><span><strong>ChatGPT</strong><small>OpenAI 官方下载页</small></span><b>打开</b></a><a id="ccswitch-link" class="download-row" target="_blank" rel="noreferrer"><span><strong>CC Switch</strong><small>官方 Release 页面</small></span><b>打开</b></a></div><div class="panel setup-panel"><h4>快速接入</h4><p>在客户端中填写 API Base URL，并使用 API Key 作为 Bearer Token。也可在 API Keys 页面一键导入 CC Switch。</p><code class="code-block" id="quick-config">Base URL: --\nAuthorization: Bearer sk-relay-…</code></div><div class="setup-guide" aria-labelledby="ccswitch-guide-title"><div class="guide-heading"><div><span class="label">个人中心 · 接入指南</span><h4 id="ccswitch-guide-title">CC Switch 配置教程</h4></div><span class="guide-badge">推荐一键导入</span></div><p class="guide-intro">完成下面 3 步即可开始使用。API Key 只在创建或验证后显示，请不要发给他人。</p><div class="guide-steps"><article class="guide-step"><div class="guide-step-marker">1</div><div class="guide-step-body"><h5>下载并打开 CC Switch</h5><p>使用上方 CC Switch 官方入口下载安装。首次打开后进入供应商或 Provider 管理页。</p><a id="ccswitch-guide-download" class="button secondary guide-action" target="_blank" rel="noreferrer">打开下载页</a></div></article><article class="guide-step"><div class="guide-step-marker">2</div><div class="guide-step-body"><h5>创建一个 API Key</h5><p>进入 API Keys 页面，点击“新建 Key”。完整 Key 只显示一次；如果已创建，可通过“复制完整 Key”并验证当前密码后查看。</p><button class="button secondary guide-action" type="button" data-go="keys">前往 API Keys</button></div></article><article class="guide-step"><div class="guide-step-marker">3</div><div class="guide-step-body"><h5>一键导入并测试</h5><p>在 API Keys 列表点击“导入 CC Switch”，浏览器会打开 CC Switch 并自动带入地址、模型和 Key。回到 CC Switch 后保存 Provider，再发送一条测试消息。</p><button class="button primary guide-action" type="button" data-go="keys">去导入 CC Switch</button></div></article></div><details class="guide-details"><summary>一键导入失败时，手动填写这些内容</summary><div class="manual-config"><div class="manual-row"><span>Provider 类型</span><strong>OpenAI Compatible</strong></div><div class="manual-row"><span>名称</span><strong>GPT TOKEN</strong></div><div class="manual-row"><span>API Base URL</span><div class="copy-line"><code id="guide-api-base">--</code><button class="small-button" type="button" data-copy="guide-api-base">复制</button></div></div><div class="manual-row"><span>API Key</span><strong>填写刚创建的完整 API Key</strong></div><div class="manual-row"><span>模型</span><strong>填写后台已启用的模型名，例如 <code>gpt-6-astra</code> 或 <code>gpt-5.6-sol</code></strong></div><div class="manual-row"><span>请求格式</span><strong>OpenAI Chat Completions / Responses（按客户端支持选择）</strong></div></div></details><details class="guide-details"><summary>测试失败怎么处理</summary><ul class="guide-faq"><li><strong>401 / Key 无效：</strong>确认复制的是完整 Key，且 Key 未撤销；必要时重新创建一个 Key。</li><li><strong>模型不存在：</strong>检查模型名称和后台启用列表，先用已启用的模型测试。</li><li><strong>余额不足：</strong>回到“充值与套餐”充值，到账后重新测试。</li><li><strong>连接超时：</strong>确认 Base URL 以 <code>/v1</code> 结尾，并检查网络后重试。</li></ul></details></div></section>
 
       <section id="view-admin" class="view"><div class="section-heading"><h3>管理后台</h3></div><div class="admin-tabs"><button class="tab active" type="button" data-admin-tab="channels">渠道</button><button class="tab" type="button" data-admin-tab="prices">模型价格</button><button class="tab" type="button" data-admin-tab="fixed-prices">固定接口价格</button><button class="tab" type="button" data-admin-tab="plans">套餐</button><button class="tab" type="button" data-admin-tab="users">用户</button><button class="tab" type="button" data-admin-tab="orders">订单</button><button class="tab" type="button" data-admin-tab="admin-usage">用量</button><button class="tab" type="button" data-admin-tab="resets">套餐重置</button><button class="tab" type="button" data-admin-tab="affiliate-admin">返利</button><button class="tab" type="button" data-admin-tab="settings">站点设置</button></div><div id="admin-content" class="admin-content"><p class="empty">加载中…</p></div></section>
     </main>
@@ -91,6 +89,17 @@
       <div id="key-reveal-actions" class="form-actions"><button class="button primary" type="submit">验证并显示</button></div>
     </form>
   </dialog>
-  <script src="/app.js" defer></script>
+  <dialog id="password-change-dialog" class="secure-dialog" aria-labelledby="password-change-title">
+    <form id="password-change-form" method="dialog" class="form-stack" autocomplete="off">
+      <div class="dialog-heading"><h3 id="password-change-title">修改密码</h3><button class="text-button" type="button" data-close-dialog="password-change-dialog">关闭</button></div>
+      <p class="muted">修改后使用新密码登录和验证 API Key。余额、套餐和 API Key 不会受到影响。</p>
+      <label>当前密码<input name="currentPassword" type="password" autocomplete="current-password" required minlength="8" maxlength="128"></label>
+      <label>新密码<input name="newPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
+      <label>确认新密码<input name="confirmPassword" type="password" autocomplete="new-password" required minlength="8" maxlength="128"></label>
+      <p id="password-change-error" class="form-error" role="alert"></p>
+      <div class="form-actions"><button class="button primary" type="submit">保存新密码</button></div>
+    </form>
+  </dialog>
+  <script src="/app.js?v=1.0.40" defer></script>
 </body>
 </html>

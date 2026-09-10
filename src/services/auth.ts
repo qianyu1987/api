@@ -32,6 +32,11 @@ function normalizedEmail(value: string): string {
   return email
 }
 
+function optionalEmail(value: unknown): string | null {
+  const text = String(value ?? '').trim()
+  return text ? normalizedEmail(text) : null
+}
+
 function verificationCode(value?: string): string {
   if (value && /^\d{6}$/.test(value)) return value
   return String(randomInt(100_000, 1_000_000))
@@ -98,25 +103,32 @@ export class AuthService {
     const cleanUsername = username.trim().toLowerCase()
     if (!/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(cleanUsername)) throw new Error('账号需为 3-32 位字母、数字或 _.-')
     if (password.length < 8 || password.length > 128) throw new Error('密码长度需为 8-128 位')
-    const email = normalizedEmail(String(input.email || ''))
+    const email = optionalEmail(input.email)
     const verificationCodeValue = String(input.verificationCode || '').trim()
-    if (!/^\d{6}$/.test(verificationCodeValue)) throw new Error('请输入 6 位邮箱验证码')
     if (input.termsAccepted !== true) throw new Error('请阅读并同意登录条款、服务条款和隐私说明')
+    let emailVerified = false
+    if (verificationCodeValue) {
+      if (!email) throw new Error('填写验证码时请同时填写邮箱')
+      if (!/^\d{6}$/.test(verificationCodeValue)) throw new Error('请输入 6 位邮箱验证码')
+      emailVerified = true
+    }
     const passwordHash = await argon2.hash(password, { type: argon2.argon2id })
     return this.db.tx(async (client) => {
-      const challenge = await one<any>(client,
-        `SELECT * FROM email_verification_challenges
-         WHERE email = $1 AND purpose = 'registration' AND consumed_at IS NULL
-         ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
-        [email],
-      )
-      if (!challenge || new Date(challenge.expires_at).getTime() <= Date.now()) throw new Error('验证码已过期，请重新获取')
-      if (Number(challenge.attempts) >= Number(challenge.max_attempts)) throw new Error('验证码尝试次数过多，请重新获取')
-      if (!secureEquals(String(challenge.code_hash), hashApiKey(verificationCodeValue, this.config.apiKeyPepper))) {
-        await client.query('UPDATE email_verification_challenges SET attempts = attempts + 1 WHERE id = $1', [challenge.id])
-        throw new Error('邮箱验证码错误')
+      if (emailVerified) {
+        const challenge = await one<any>(client,
+          `SELECT * FROM email_verification_challenges
+           WHERE email = $1 AND purpose = 'registration' AND consumed_at IS NULL
+           ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,
+          [email],
+        )
+        if (!challenge || new Date(challenge.expires_at).getTime() <= Date.now()) throw new Error('验证码已过期，请重新获取')
+        if (Number(challenge.attempts) >= Number(challenge.max_attempts)) throw new Error('验证码尝试次数过多，请重新获取')
+        if (!secureEquals(String(challenge.code_hash), hashApiKey(verificationCodeValue, this.config.apiKeyPepper))) {
+          await client.query('UPDATE email_verification_challenges SET attempts = attempts + 1 WHERE id = $1', [challenge.id])
+          throw new Error('邮箱验证码错误')
+        }
+        await client.query('UPDATE email_verification_challenges SET consumed_at = now() WHERE id = $1', [challenge.id])
       }
-      await client.query('UPDATE email_verification_challenges SET consumed_at = now() WHERE id = $1', [challenge.id])
       let inviter: any = null
       if (input.inviteCode?.trim()) {
         inviter = await one<any>(client, `SELECT id, invite_code FROM users WHERE invite_code = $1 AND disabled_at IS NULL AND status = 'active'`, [input.inviteCode.trim().toUpperCase()])
@@ -127,9 +139,9 @@ export class AuthService {
         try {
           const user = await one<any>(client,
             `INSERT INTO users(username,email,email_verified_at,password_hash,invite_code,invited_by)
-             VALUES ($1, $2, now(), $3, $4, $5)
+             VALUES ($1, $2, $3, $4, $5, $6)
              RETURNING id, username, email, email_verified_at, role, invite_code, created_at`,
-            [cleanUsername, email, passwordHash, code, inviter?.id ?? null],
+            [cleanUsername, email, emailVerified ? new Date() : null, passwordHash, code, inviter?.id ?? null],
           )
           if (!user) throw new Error('注册失败')
           await client.query('INSERT INTO wallets(user_id) VALUES ($1)', [user.id])
@@ -159,6 +171,30 @@ export class AuthService {
     if (!valid) throw new Error('账号或密码错误')
     await this.db.query('UPDATE users SET last_login_at = now() WHERE id = $1', [row.id])
     return publicUser(row)
+  }
+
+  async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
+    if (newPassword.length < 8 || newPassword.length > 128) throw Object.assign(new Error('新密码需为 8-128 位'), { statusCode: 400 })
+    if (currentPassword === newPassword) throw Object.assign(new Error('新密码不能与当前密码相同'), { statusCode: 400 })
+    const row = await this.db.one<any>('SELECT password_hash FROM users WHERE id = $1 AND status = \'active\' AND disabled_at IS NULL', [userId])
+    if (!row || !await argon2.verify(row.password_hash, currentPassword)) {
+      throw Object.assign(new Error('当前密码错误'), { statusCode: 401 })
+    }
+    const passwordHash = await argon2.hash(newPassword, { type: argon2.argon2id })
+    await this.db.tx(async (client) => {
+      const updated = await one<any>(client,
+        `UPDATE users SET password_hash = $1, updated_at = now()
+         WHERE id = $2 AND status = 'active' AND disabled_at IS NULL
+         RETURNING id`,
+        [passwordHash, userId],
+      )
+      if (!updated) throw Object.assign(new Error('账号状态已变化，请重新登录'), { statusCode: 401 })
+      await client.query(
+        `INSERT INTO admin_audit_events(actor_user_id, action, target_type, target_id, metadata)
+         VALUES($1, 'password_change', 'user', $2, $3)`,
+        [userId, userId, JSON.stringify({ selfService: true, method: 'argon2id' })],
+      )
+    })
   }
 
   async createApiKey(userId: string, name: string): Promise<{ id: string; name: string; key: string; prefix: string; createdAt: string }> {

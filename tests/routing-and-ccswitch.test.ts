@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { buildCcswitchImportLink, ccswitchModel } from '../src/lib/ccswitch.js'
-import { isInvalidApiResponse, normalizeResponsesTools, rewriteRequestBody, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
+import { isInvalidApiResponse, normalizeResponsesTools, responseFailure, rewriteRequestBody, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -21,11 +21,11 @@ describe('channel failover policy', () => {
     const body = rewriteRequestBody(Buffer.from(JSON.stringify({ model: 'gpt-5.5', tool_choice: { type: 'function', name: 'tool_choice' } })), 'gpt-5.5', 'agnes-2.5-flash', '/responses?stream=true')
     expect(JSON.parse(String(body))).toEqual({ model: 'agnes-2.5-flash' })
   })
-  test.each([408, 429, 500, 502, 503, 599])('fails over retryable HTTP %i', (status) => {
+  test.each([401, 403, 408, 429, 500, 502, 503, 599])('fails over retryable provider HTTP %i', (status) => {
     expect(shouldFailover(status)).toBe(true)
   })
 
-  test.each([200, 201, 301, 400, 401, 403, 404, 409, 422, 499])('does not fail over ordinary HTTP %i', (status) => {
+  test.each([200, 201, 301, 400, 404, 409, 422, 499])('does not fail over ordinary HTTP %i', (status) => {
     expect(shouldFailover(status)).toBe(false)
   })
 
@@ -42,6 +42,11 @@ describe('channel failover policy', () => {
     expect(safeRelayError('timeout')).toEqual({
       errorType: 'timeout', errorCode: 'upstream_timeout', errorMessage: '上游请求超时',
     })
+  })
+
+  test('explains provider credential and balance failures without exposing upstream bodies', () => {
+    expect(responseFailure(401)).toEqual({ errorType: 'provider_auth', errorCode: 'upstream_unauthorized', errorMessage: '上游认证失败或 Key 无效' })
+    expect(responseFailure(403)).toEqual({ errorType: 'provider_access', errorCode: 'upstream_forbidden', errorMessage: '上游拒绝访问，可能是权限或余额不足' })
   })
 
   test('requires explicit model mapping before a channel can receive a billed request', () => {

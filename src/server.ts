@@ -18,11 +18,12 @@ import { AuthService, type PublicUser } from './services/auth.js'
 import { BillingService, type PriceSnapshot } from './services/billing.js'
 import { AffiliateService } from './services/affiliate.js'
 import { ChannelService } from './services/channels.js'
-import { OrderService } from './services/orders.js'
+import { normalizeNewOrderPaymentMethod, OrderService } from './services/orders.js'
 import { MailService } from './services/mail.js'
 import { buildCcswitchImportLink } from './lib/ccswitch.js'
 import { calculateUsageMoney, estimatedRequestTokens, formatMicros, sellForGrossMargin, yuanToMicros } from './lib/money.js'
 import { parseSseUsage, usageFromPayload } from './lib/usage.js'
+import { ProfitService } from './services/profit.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -37,10 +38,14 @@ export type RelayApp = {
   channels: ChannelService
   orders: OrderService
   mail: MailService
+  profit: ProfitService
 }
 
 const OPENAI_PRICING_SOURCE = 'https://developers.openai.com/api/docs/pricing'
-const OPENAI_FX_MICROS = 7_200_000n
+// Some upstream consoles label these values in USD but debit the relay in CNY
+// at the displayed number. Store the effective 1:1 CNY settlement amount,
+// rather than applying a market USD/CNY conversion a second time.
+const UPSTREAM_DISPLAY_SETTLEMENT_FX_MICROS = 1_000_000n
 const OPENAI_TOKEN_PRICES: Record<string, readonly [number, number, number]> = {
   // OpenAI official standard prices per 1M tokens, captured 2026-09-01.
   // Values are input, output, and cached-input USD respectively.
@@ -148,7 +153,7 @@ function grossMarginSell(costMicros: bigint, marginBps: bigint): bigint {
 
 function officialCostMicros(usdPerMillion: number): bigint {
   const scaledUsd = BigInt(Math.round(usdPerMillion * 1_000_000))
-  return (scaledUsd * OPENAI_FX_MICROS + 999_999n) / 1_000_000n
+  return (scaledUsd * UPSTREAM_DISPLAY_SETTLEMENT_FX_MICROS + 999_999n) / 1_000_000n
 }
 
 function cleanText(value: unknown, name: string, max = 256): string {
@@ -245,6 +250,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   const channels = new ChannelService(db, config)
   const orders = new OrderService(db, affiliate, config)
   const mail = new MailService(db, config)
+  const profit = new ProfitService(db)
 
   await app.register(sensible)
   await app.register(cookie, { secret: config.cookieSecret })
@@ -351,8 +357,36 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       return { user }
     } catch (error) { reply.code(401).send({ error: { message: '账号或密码错误' } }) }
   })
-  app.post('/api/auth/logout', async (_request, reply) => { reply.clearCookie('relay_session', { path: '/' }); return { ok: true } })
+  app.post('/api/auth/logout', async (_request, reply) => {
+    // Match every attribute used when issuing the session cookie. Some
+    // browsers keep a cookie with the same name when the Secure/SameSite
+    // scope differs, which makes logout appear to succeed while the session
+    // is still sent on the next request.
+    reply.clearCookie('relay_session', {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: config.env === 'production',
+      path: '/',
+      expires: new Date(0),
+      maxAge: 0,
+    })
+    return { ok: true }
+  })
   app.get('/api/auth/me', async (request, reply) => { const user = await requireSession(request, reply); return user ? { user } : undefined })
+
+  app.patch('/api/me/password', { config: { rateLimit: { max: 5, timeWindow: '10 minutes' } } }, async (request, reply) => {
+    const user = await requireSession(request, reply); if (!user) return
+    try {
+      const body = (request.body || {}) as any
+      const currentPassword = String(body.currentPassword || '')
+      const newPassword = String(body.newPassword || '')
+      const confirmPassword = String(body.confirmPassword || '')
+      if (!currentPassword) throw Object.assign(new Error('请输入当前密码'), { statusCode: 400 })
+      if (newPassword !== confirmPassword) throw Object.assign(new Error('两次输入的新密码不一致'), { statusCode: 400 })
+      await auth.changePassword(user.id, currentPassword, newPassword)
+      return { ok: true }
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
 
   app.get('/api/me/overview', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
@@ -369,7 +403,18 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const actor = await requireAdmin(request, reply); if (!actor) return
     try {
       const result = await billing.resetSubscription(String((request.params as any).userId || ''), actor.id)
-      return { ...result, beforeRemaining: formatMicros(result.beforeRemainingMicros), afterRemaining: formatMicros(result.afterRemainingMicros), quotaCap: formatMicros(result.quotaCapMicros) }
+      // Fastify's JSON serializer cannot encode bigint values. Expose exact
+      // micro-yuan fields as strings and human-readable yuan values alongside
+      // them, matching the balance and usage API contracts.
+      return {
+        ...result,
+        beforeRemainingMicros: result.beforeRemainingMicros.toString(),
+        afterRemainingMicros: result.afterRemainingMicros.toString(),
+        quotaCapMicros: result.quotaCapMicros.toString(),
+        beforeRemaining: formatMicros(result.beforeRemainingMicros),
+        afterRemaining: formatMicros(result.afterRemainingMicros),
+        quotaCap: formatMicros(result.quotaCapMicros),
+      }
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
   app.get('/api/me/keys', async (request, reply) => { const user = await requireSession(request, reply); return user ? { items: await auth.listApiKeys(user.id) } : undefined })
@@ -439,7 +484,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           u.input_tokens, u.output_tokens, u.cache_tokens, u.reported_total_tokens,
           u.plan_charge_micros, u.wallet_charge_micros, u.charge_micros ${adminFinanceSelect},
           u.status_code, u.status, u.success, u.duration_ms, u.latency_ms,
-          u.is_estimated_usage, u.estimated_usage,
+          u.is_estimated_usage, u.estimated_usage, u.error_code, u.error_summary,
           k.name AS current_key_name, c.name AS current_channel_name
         FROM usage_logs u
         LEFT JOIN api_keys k ON k.id = COALESCE(u.api_key_id, u.key_id)
@@ -453,6 +498,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         inputTokens: String(row.input_tokens), outputTokens: String(row.output_tokens), cacheTokens: String(row.cache_tokens), totalTokens: String(row.reported_total_tokens),
         planCharge: publicMoney(row.plan_charge_micros), walletCharge: publicMoney(row.wallet_charge_micros), charge: publicMoney(row.charge_micros),
         statusCode: row.status_code, status: row.status, success: row.success,
+        errorCode: row.error_code || null, errorSummary: row.error_summary || null,
+        billingNote: row.success ? null : (BigInt(String(row.charge_micros || 0)) > 0n ? '请求失败但已产生可计费用量' : '请求失败，未产生收费'),
         latencyMs: Number(row.duration_ms ?? row.latency_ms ?? 0), estimatedUsage: Boolean(row.is_estimated_usage ?? row.estimated_usage),
         ...(user.role === 'admin' ? { estimatedCost: publicMoney(row.cost_micros), profit: publicMoney(row.profit_micros) } : {}),
       }))
@@ -487,7 +534,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
 
-  app.get('/api/downloads', async () => ({ chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl }))
+  app.get('/api/downloads', async () => ({ chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl, apiBaseUrl: `${config.publicBaseUrl}/v1` }))
 
   app.get('/api/plans', async () => ({ items: await db.query<any>('SELECT id, name, price_micros, quota_micros FROM plans WHERE active = true AND enabled = true ORDER BY price_micros ASC') }))
   app.post('/api/orders', async (request, reply) => {
@@ -496,7 +543,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     try {
       const body = (request.body || {}) as any
       const kind = body.kind === 'subscription' ? 'subscription' : 'wallet_topup'
-      const method = body.paymentMethod === 'alipay' ? 'alipay' : 'wechat'
+      const method = normalizeNewOrderPaymentMethod(body.paymentMethod)
       const planId = kind === 'subscription' ? String(body.planId || '') : null
       if (kind === 'subscription' && !planId) throw new Error('请选择套餐')
       let amountMicros: bigint | undefined
@@ -602,7 +649,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     ])
     const revenue = BigInt(String(usage?.revenue || 0)); const cost = BigInt(String(usage?.cost || 0)); const rebates = BigInt(String(fees?.rebates || 0))
     const net = revenue - cost - rebates
-    return { period: { from: from.toISOString(), to: to.toISOString() }, minimumMarginBps: await settingInt(db, 'profit_min_margin_bps', 3000), metrics: {
+    return { period: { from: from.toISOString(), to: to.toISOString() }, minimumMarginBps: await settingInt(db, 'profit_min_margin_bps', 3000), globalDiscountBps: await settingInt(db, 'global_token_discount_bps', 0), metrics: {
       requests: Number(usage?.requests || 0), revenue: publicMoney(revenue), cost: publicMoney(cost), grossProfit: publicMoney(revenue - cost), rebates: publicMoney(rebates), netProfit: publicMoney(net), paidOrders: Number(orders?.paid_orders || 0), paid: publicMoney(orders?.paid), failedCharge: publicMoney(usage?.failed_charge), avgLatencyMs: Number(usage?.avg_latency || 0),
     }, alerts, channels: channelsSummary }
   })
@@ -626,6 +673,30 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   })
 
   app.get('/api/admin/risk-alerts', async (request, reply) => { if (!await requireAdmin(request, reply)) return; return { items: await db.query<any>(`SELECT * FROM risk_alerts WHERE status <> 'resolved' ORDER BY created_at DESC LIMIT 200`) } })
+  app.get('/api/admin/channel-costs', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    return { items: await db.query<any>(`SELECT c.name AS channel_name,c.base_url,m.* FROM channel_model_costs m JOIN channels c ON c.id=m.channel_id ORDER BY c.priority,m.model_pattern`) }
+  })
+  app.post('/api/admin/channel-costs', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    try {
+      const b = (request.body || {}) as any
+      const channelId = cleanText(b.channelId, '渠道', 64)
+      const modelPattern = cleanText(b.modelPattern || '*', '模型匹配', 256)
+      const input = yuanInput(b.inputCostYuanPerMillion ?? 0, '输入成本')
+      const output = yuanInput(b.outputCostYuanPerMillion ?? 0, '输出成本')
+      const cache = yuanInput(b.cacheCostYuanPerMillion ?? 0, '缓存成本')
+      const source = String(b.priceSource || 'manual').slice(0, 512)
+      const effectiveAt = b.priceEffectiveAt ? new Date(String(b.priceEffectiveAt)) : new Date()
+      if (Number.isNaN(effectiveAt.getTime())) throw new Error('成本生效时间无效')
+      const row = await db.one<any>(`INSERT INTO channel_model_costs(channel_id,model_pattern,input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,price_source,price_effective_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7)
+        ON CONFLICT(channel_id,model_pattern) DO UPDATE SET input_cost_micros_per_million=excluded.input_cost_micros_per_million,output_cost_micros_per_million=excluded.output_cost_micros_per_million,cache_cost_micros_per_million=excluded.cache_cost_micros_per_million,price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,updated_at=now()
+        RETURNING *`, [channelId, modelPattern, input, output, cache, source, effectiveAt])
+      await db.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,after_value) VALUES($1,'channel_model_cost',concat($2,':',$3),$4)`, [actor.id, channelId, modelPattern, JSON.stringify(row)])
+      return row
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
   app.post('/api/admin/channels', async (request, reply) => { if (!await requireAdmin(request, reply)) return; try { return await channels.upsert(request.body as any) } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) } })
   app.delete('/api/admin/channels/:id', async (request, reply) => { if (!await requireAdmin(request, reply)) return; await channels.remove(String((request.params as any).id)); return { ok: true } })
   app.get('/api/admin/prices', async (request, reply) => {
@@ -788,12 +859,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
               input_cost_micros_per_million=excluded.input_cost_micros_per_million,output_cost_micros_per_million=excluded.output_cost_micros_per_million,cache_cost_micros_per_million=excluded.cache_cost_micros_per_million,
               input_sell_micros_per_million=excluded.input_sell_micros_per_million,output_sell_micros_per_million=excluded.output_sell_micros_per_million,cache_sell_micros_per_million=excluded.cache_sell_micros_per_million,
               active=true,price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,fx_rate_cny_micros=excluded.fx_rate_cny_micros,updated_at=now()`,
-            [...values.map((value) => typeof value === 'bigint' ? value.toString() : value), OPENAI_PRICING_SOURCE, effectiveAt, OPENAI_FX_MICROS.toString()],
+            [...values.map((value) => typeof value === 'bigint' ? value.toString() : value), `${OPENAI_PRICING_SOURCE} · 上游展示美元按人民币 1:1 结算`, effectiveAt, UPSTREAM_DISPLAY_SETTLEMENT_FX_MICROS.toString()],
           )
           inserted.push(model)
         }
       })
-      return { items: inserted, fxRate: '7.20', margin: '80%', source: OPENAI_PRICING_SOURCE, effectiveAt: effectiveAt.toISOString() }
+      return { items: inserted, fxRate: '1.00', margin: '80%', source: OPENAI_PRICING_SOURCE, effectiveAt: effectiveAt.toISOString() }
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
   app.post('/api/admin/bootstrap/monthly-plan', async (request, reply) => {
@@ -833,11 +904,18 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if (!Number.isInteger(discountBps) || discountBps < 0 || discountBps > 99) {
       reply.code(400).send({ error: { message: '折扣必须为 0-99 的百分比' } }); return
     }
-    const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
-    const worst = await db.one<any>(`SELECT min(input_sell_micros) AS sell, max(input_cost_micros) AS cost FROM model_prices WHERE active`)
-    if (worst?.sell && worst?.cost) requireMinimumMargin(BigInt(String(worst.cost)), (BigInt(String(worst.sell)) * BigInt(100 - discountBps)) / 100n, minimumMarginBps, '用户折扣')
-    const row = await db.one<any>('UPDATE users SET token_discount_bps=$1,updated_at=now() WHERE id=$2 RETURNING id,username,token_discount_bps', [discountBps * 100, String((request.params as any).id)])
-    if (!row) { reply.code(404).send({ error: { message: '用户不存在' } }); return }
+    const userId = String((request.params as any).id)
+    const current = await db.one<any>('SELECT id, token_discount_bps FROM users WHERE id=$1', [userId])
+    if (!current) { reply.code(404).send({ error: { message: '用户不存在' } }); return }
+    const currentDiscountPercent = Math.max(0, Math.min(99, Number(current.token_discount_bps || 0) / 100))
+    // Lowering an existing risky discount is always allowed. The margin guard
+    // only applies when an administrator increases the effective discount.
+    if (discountBps > currentDiscountPercent) {
+      const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
+      const worst = await db.one<any>(`SELECT min(input_sell_micros) AS sell, max(input_cost_micros) AS cost FROM model_prices WHERE active`)
+      if (worst?.sell && worst?.cost) requireMinimumMargin(BigInt(String(worst.cost)), (BigInt(String(worst.sell)) * BigInt(100 - discountBps)) / 100n, minimumMarginBps, '用户折扣')
+    }
+    const row = await db.one<any>('UPDATE users SET token_discount_bps=$1,updated_at=now() WHERE id=$2 RETURNING id,username,token_discount_bps', [discountBps * 100, userId])
     return { id: String(row.id), username: row.username, discountBps: Number(row.token_discount_bps) / 100 }
   })
   app.post('/api/admin/users/:id/wallet-adjustment', async (request, reply) => {
@@ -941,20 +1019,15 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   })
   app.get('/api/admin/settings', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
-    return { items: await db.query<any>('SELECT key, value, updated_at FROM app_settings ORDER BY key'), mail: mail.status }
+    return { items: await db.query<any>('SELECT key, value, updated_at FROM app_settings ORDER BY key'), mail: mail.status, profit: await profit.overview() }
   })
   app.patch('/api/admin/settings/profit', async (request, reply) => {
-    if (!await requireAdmin(request, reply)) return
-    const b = (request.body || {}) as any
-    const margin = Number(b.minimumMarginBps ?? b.minMarginBps)
-    const fee = Number(b.paymentFeeRateBps ?? 0)
-    if (!Number.isInteger(margin) || margin < 0 || margin >= 10000) { reply.code(400).send({ error: { message: '最低毛利率必须为 0-9999 基点' } }); return }
-    if (!Number.isInteger(fee) || fee < 0 || fee > 10000) { reply.code(400).send({ error: { message: '支付手续费率必须为 0-10000 基点' } }); return }
-    await db.tx(async (client) => {
-      await client.query(`INSERT INTO app_settings(key,setting_key,value,value_json) VALUES('profit_min_margin_bps','profit.min_margin_bps',$1,to_jsonb($1::text)) ON CONFLICT(key) DO UPDATE SET value=excluded.value,value_json=excluded.value_json,updated_at=now()`, [String(margin)])
-      await client.query(`INSERT INTO app_settings(key,setting_key,value,value_json) VALUES('payment_fee_rate_bps','profit.payment_fee_rate_bps',$1,to_jsonb($1::text)) ON CONFLICT(key) DO UPDATE SET value=excluded.value,value_json=excluded.value_json,updated_at=now()`, [String(fee)])
-    })
-    return { minimumMarginBps: margin, paymentFeeRateBps: fee }
+    const actor = await requireAdmin(request, reply)
+    if (!actor) return
+    try {
+      const result = await profit.update((request.body || {}) as any, actor.id)
+      return result
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
   app.put('/api/admin/settings/site', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
@@ -1245,7 +1318,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
 
   app.setErrorHandler((error: any, _request, reply) => { if (!reply.sent) reply.code(errorStatus(error)).send({ error: { message: error?.message || '服务器错误' } }) })
   app.addHook('onClose', async () => { await redis.close() })
-  return { app, db, redis, config, auth, billing, affiliate, channels, orders, mail }
+  return { app, db, redis, config, auth, billing, affiliate, channels, orders, mail, profit }
 }
 
 async function recordAttempts(db: Database, requestId: string, attempts: any[], failedAttemptCostMicros = 0n): Promise<void> {

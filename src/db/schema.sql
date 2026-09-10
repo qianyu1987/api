@@ -368,6 +368,26 @@ CREATE TABLE IF NOT EXISTS model_prices (
 CREATE INDEX IF NOT EXISTS model_prices_active_lookup_idx ON model_prices (active, model_pattern);
 CREATE UNIQUE INDEX IF NOT EXISTS model_prices_pattern_unique ON model_prices (model_pattern);
 
+-- Optional provider-specific cost overrides. Selling prices remain in
+-- model_prices; these costs are selected after the final channel is known.
+CREATE TABLE IF NOT EXISTS channel_model_costs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  channel_id UUID NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  model_pattern TEXT NOT NULL,
+  input_cost_micros_per_million BIGINT NOT NULL DEFAULT 0,
+  output_cost_micros_per_million BIGINT NOT NULL DEFAULT 0,
+  cache_cost_micros_per_million BIGINT NOT NULL DEFAULT 0,
+  price_source TEXT,
+  price_effective_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (char_length(trim(model_pattern)) BETWEEN 1 AND 256),
+  CHECK (input_cost_micros_per_million >= 0 AND output_cost_micros_per_million >= 0 AND cache_cost_micros_per_million >= 0)
+);
+ALTER TABLE channel_model_costs ADD COLUMN IF NOT EXISTS high_context_multiplier_bps INTEGER NOT NULL DEFAULT 12000 CHECK (high_context_multiplier_bps BETWEEN 10000 AND 110000);
+CREATE UNIQUE INDEX IF NOT EXISTS channel_model_costs_unique ON channel_model_costs(channel_id, model_pattern);
+CREATE INDEX IF NOT EXISTS channel_model_costs_lookup_idx ON channel_model_costs(channel_id, model_pattern);
+
 CREATE TABLE IF NOT EXISTS fixed_route_prices (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   http_method TEXT NOT NULL DEFAULT 'ANY',
@@ -745,6 +765,9 @@ ON CONFLICT (key) DO NOTHING;
 INSERT INTO app_settings(key, setting_key, value, value_json)
 VALUES ('payment_fee_rate_bps', 'profit.payment_fee_rate_bps', '0', to_jsonb('0'::text))
 ON CONFLICT (key) DO NOTHING;
+INSERT INTO app_settings(key, setting_key, value, value_json)
+VALUES ('global_token_discount_bps', 'profit.global_token_discount_bps', '0', to_jsonb('0'::text))
+ON CONFLICT (key) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS config_audit_logs (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -986,3 +1009,10 @@ ALTER TABLE wallet_ledger ADD CONSTRAINT wallet_ledger_kind_check
 ALTER TABLE affiliate_ledger DROP CONSTRAINT IF EXISTS affiliate_ledger_kind_check;
 ALTER TABLE affiliate_ledger ADD CONSTRAINT affiliate_ledger_kind_check
   CHECK (kind IN ('commission_credit', 'commission', 'conversion_debit', 'convert', 'admin_adjustment', 'reversal'));
+
+-- Existing installations may have created this table before the monthly
+-- reset ledger entry was introduced. Rebuild the check in-place so manual
+-- and automatic quota resets can be recorded without changing ledger rows.
+ALTER TABLE subscription_ledger DROP CONSTRAINT IF EXISTS subscription_ledger_kind_check;
+ALTER TABLE subscription_ledger ADD CONSTRAINT subscription_ledger_kind_check
+  CHECK (kind IN ('purchase_credit', 'quota_reset', 'usage_reserve', 'usage_settle', 'usage_release', 'expiry_forfeit', 'admin_adjustment'));

@@ -73,6 +73,32 @@ describe('billing invariants', () => {
     expect(discounted.inputCostMicrosPerMillion).toBe(price.inputCostMicrosPerMillion)
   })
 
+  test('formats balance with exact micro-yuan fields for UI and clients', async () => {
+    const { BillingService } = await import('../src/services/billing.js')
+    expect(BillingService.formatBalance({
+      walletMicros: 5_186_394n,
+      walletReservedMicros: 120_000n,
+      planMicros: 143_527_210n,
+      planBookMicros: 145_106_470n,
+      planReservedMicros: 1_579_260n,
+      planUsedMicros: 3_893_530n,
+      planQuotaMicros: 149_000_000n,
+      planExpiresAt: null,
+      planNextResetAt: null,
+      planLastResetAt: null,
+      planStatus: 'active',
+      isValid: true,
+    })).toMatchObject({
+      planRemaining: '143.52721',
+      planRemainingMicros: '143527210',
+      planUsed: '3.89353',
+      planUsedMicros: '3893530',
+      planQuota: '149',
+      planQuotaMicros: '149000000',
+      planReservedMicros: '1579260',
+    })
+  })
+
   test('uses a matched fixed-route specification and rejects an unpriced specification', async () => {
     const db = {
       query: async () => [{

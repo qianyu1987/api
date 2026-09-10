@@ -198,6 +198,169 @@
   line-height: 1.8;
 }
 
+.setup-guide {
+  max-width: 900px;
+  margin-top: 28px;
+  padding-top: 26px;
+  border-top: 1px solid var(--line);
+}
+
+.guide-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.guide-heading .label {
+  display: block;
+  margin-bottom: 5px;
+}
+
+.guide-heading h4 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.guide-badge {
+  flex: none;
+  padding: 4px 9px;
+  border: 1px solid #b9ded8;
+  border-radius: 999px;
+  color: var(--accent);
+  background: #eef8f6;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.guide-intro {
+  max-width: 68ch;
+  margin: 9px 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.guide-steps {
+  display: grid;
+  gap: 10px;
+}
+
+.guide-step {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.guide-step-marker {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.guide-step-body {
+  min-width: 0;
+}
+
+.guide-step h5 {
+  margin: 1px 0 5px;
+  font-size: 14px;
+}
+
+.guide-step p {
+  max-width: 70ch;
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.guide-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  text-decoration: none;
+}
+
+.guide-details {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.guide-details summary {
+  padding: 13px 15px;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.guide-details summary:focus-visible {
+  outline: 3px solid rgba(11, 122, 117, .28);
+  outline-offset: -3px;
+}
+
+.manual-config {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--line);
+}
+
+.manual-row {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding: 12px 15px;
+  border-bottom: 1px solid #e8edef;
+  font-size: 13px;
+}
+
+.manual-row:last-child {
+  border-bottom: 0;
+}
+
+.manual-row > span {
+  color: var(--muted);
+}
+
+.manual-row strong {
+  min-width: 0;
+  font-weight: 600;
+}
+
+.manual-row .copy-line {
+  min-width: 0;
+}
+
+.guide-faq {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 13px 28px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.guide-faq strong {
+  color: var(--ink);
+}
+
+.guide-faq code,
+.manual-row code {
+  color: #31515a;
+  font-size: 12px;
+}
+
 @media (max-width: 800px) {
   .verification-row,
   .settings-status {
@@ -216,6 +379,20 @@
   .admin-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .guide-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .guide-badge {
+    align-self: flex-start;
+  }
+
+  .manual-row {
+    grid-template-columns: 1fr;
+    gap: 5px;
   }
 }
 
@@ -253,6 +430,15 @@ td.admin-action-cell { display: table-cell; vertical-align: middle; }
 .inline-discount .subline { grid-column: 1 / -1; margin-top: -2px; white-space: nowrap; }
 .plan-progress { margin: 18px 0 24px; padding: 18px 20px; border: 1px solid var(--line); background: var(--surface); }
 .plan-progress.compact { min-width: 240px; margin: 0; padding: 11px 12px; }
+.plan-frequency-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 28px; margin: 0 0 18px; padding: 22px 24px; border: 1px solid #0b6965; border-radius: 8px; background: #123b3a; color: #f7fffd; }
+.plan-frequency-copy h4 { margin: 0 0 6px; font-size: 26px; line-height: 1.2; letter-spacing: 0; }
+.plan-frequency-copy p { max-width: 62ch; margin: 0; color: #c7ded9; font-size: 14px; }
+.plan-frequency-mark { display: grid; min-width: 108px; place-items: center; align-content: center; padding: 10px 0 8px; border-left: 1px solid rgba(224, 246, 239, .3); font-variant-numeric: tabular-nums; }
+.plan-frequency-mark strong { color: #f3c66b; font-size: 50px; line-height: .9; }
+.plan-frequency-mark span { margin-top: 6px; color: #e1f4ef; font-size: 13px; font-weight: 700; }
+.plan-option { align-items: flex-start; }
+.plan-option small { display: block; margin-top: 3px; }
+.plan-option .plan-price { color: var(--ink); font-weight: 650; }
 .progress-heading, .progress-meta, .progress-submeta { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .progress-heading { margin-bottom: 10px; font-size: 14px; }
 .progress-heading span, .progress-meta, .progress-submeta { color: var(--muted); font-size: 12px; }
@@ -277,4 +463,8 @@ td.admin-action-cell { display: table-cell; vertical-align: middle; }
   .inline-discount { grid-template-columns: 96px auto; }
   .plan-progress { padding: 16px; }
   .plan-progress.compact { min-width: 220px; }
+  .plan-frequency-card { grid-template-columns: 1fr; gap: 16px; padding: 20px; }
+  .plan-frequency-copy h4 { font-size: 24px; }
+  .plan-frequency-mark { justify-items: start; grid-template-columns: auto auto; gap: 9px; min-width: 0; padding: 13px 0 0; border-top: 1px solid rgba(224, 246, 239, .3); border-left: 0; }
+  .plan-frequency-mark span { margin-top: 0; }
 }
