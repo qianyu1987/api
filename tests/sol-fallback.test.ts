@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { Readable } from 'node:stream'
+import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib'
 import { MockAgent, getGlobalDispatcher, setGlobalDispatcher } from 'undici'
 import { ChannelService } from '../src/services/channels.js'
 import { encryptSecret } from '../src/lib/crypto.js'
 import { PublicModelSse, rewritePublicModel } from '../src/lib/public-model.js'
+import { decodeResponseStream } from '../src/lib/response-compression.js'
 import { buildApp, type RelayApp } from '../src/server.js'
 import { loadConfig } from '../src/config.js'
 
@@ -134,14 +136,17 @@ describe('relay HTTP integration and billing boundary', () => {
     await services.app.ready()
   })
   afterEach(async () => { if (services) { await services.app.close(); await services.db.close() } })
-  async function relayResponse(sse: boolean, fail = false, requestedModel = model) {
+  async function relayResponse(sse: boolean, fail = false, requestedModel = model, encoding = '', corrupt = false) {
     const finalModel = requestedModel === model ? upstream : requestedModel
     const payload = { model: finalModel, choices: [], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } }
+    const plain = Buffer.from(sse ? `data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n` : JSON.stringify(payload))
+    const compress = { gzip: gzipSync, deflate: deflateSync, br: brotliCompressSync }[encoding]
+    const bytes = corrupt ? Buffer.from('invalid compressed response') : compress ? compress(plain) : plain
     const attempts = [{ channelId: 'real', channelName: 'Real', attemptNo: 1, statusCode: 503, outcome: 'server_error' }, { channelId: 'fallback', channelName: '低价plus', upstreamModel: finalModel, attemptNo: 2, statusCode: fail ? 503 : 200, outcome: fail ? 'server_error' : 'success' }]
     vi.spyOn(services.channels, 'relay').mockResolvedValue({
       upstreamModel: finalModel, channel: { id: 'fallback', name: '低价plus' }, attempts,
-      response: { statusCode: fail ? 503 : 200, headers: { 'content-type': sse ? 'text/event-stream' : 'application/json' },
-        body: sse ? Readable.from([...Buffer.from(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`)].map(b => Buffer.from([b]))) : { arrayBuffer: async () => Buffer.from(JSON.stringify(payload)) } },
+      response: { statusCode: fail ? 503 : 200, headers: { 'content-type': sse ? 'text/event-stream' : 'application/json', ...(encoding ? { 'content-encoding': encoding, 'content-length': String(bytes.length) } : {}) },
+        body: sse ? Readable.from([...bytes].map(b => Buffer.from([b]))) : { arrayBuffer: async () => bytes } },
     } as any)
     return services.app.inject({ method: 'POST', url: '/v1/chat/completions', headers: { authorization: 'Bearer test' }, payload: { model: requestedModel } })
   }
@@ -162,6 +167,29 @@ describe('relay HTTP integration and billing boundary', () => {
     expect(response.statusCode).toBe(503)
     expect(services.billing.settle).toHaveBeenCalledTimes(1)
     expect(services.billing.settle).toHaveBeenCalledWith(expect.objectContaining({ success: false }))
+    expect(services.billing.release).not.toHaveBeenCalled()
+  })
+  test.each(['gzip', 'deflate', 'br'])('decodes %s before model rewriting and actual-usage settlement', async encoding => {
+    for (const sse of [false, true]) {
+      const response = await relayResponse(sse, false, model, encoding)
+      expect(response.statusCode).toBe(200)
+      expect(response.headers).not.toHaveProperty('content-encoding')
+      expect(response.body).toContain(model)
+      expect(response.body).not.toContain(upstream)
+      if (sse) expect(response.body).toContain('[DONE]')
+      expect(services.billing.settle).toHaveBeenLastCalledWith(expect.objectContaining({
+        upstreamModel: upstream, estimatedUsage: false,
+        usage: { input: 5n, output: 2n, cache: 0n, reportedTotal: 7n },
+      }))
+    }
+  })
+  test.each([false, true])('corrupt compressed response with SSE=%s settles as failed exactly once', async sse => {
+    const response = await relayResponse(sse, false, model, 'gzip', true)
+    if (!sse) expect(response.statusCode).toBe(502)
+    expect(response.body).not.toContain('invalid compressed response')
+    expect(services.billing.reserve).toHaveBeenCalledTimes(1)
+    expect(services.billing.settle).toHaveBeenCalledTimes(1)
+    expect(services.billing.settle).toHaveBeenCalledWith(expect.objectContaining({ success: false, usage: null }))
     expect(services.billing.release).not.toHaveBeenCalled()
   })
   test('all transport failures settle the single reservation as failed', async () => {
@@ -191,5 +219,22 @@ describe('relay HTTP integration and billing boundary', () => {
       expect(usage.json().items[0]).not.toHaveProperty('profit')
       expect((await services.app.inject({ url: '/api/admin/profit', headers })).statusCode).toBe(403)
     }
+  })
+})
+
+describe('compressed stream lifecycle', () => {
+  test('propagates upstream connection failure to the reader', async () => {
+    const source = new Readable({ read() { this.destroy(new Error('upstream disconnected')) } })
+    const output = decodeResponseStream(source, 'gzip')
+    await expect((async () => { for await (const _chunk of output) { /* consume */ } })()).rejects.toThrow('upstream disconnected')
+    expect(source.destroyed).toBe(true)
+  })
+  test('cancels the upstream when the reader disconnects', async () => {
+    const source = new Readable({ read() {} })
+    const output = decodeResponseStream(source, 'gzip')
+    const completed = (async () => { for await (const _chunk of output) { /* consume */ } })()
+    output.destroy(new Error('client disconnected'))
+    await expect(completed).rejects.toThrow('client disconnected')
+    expect(source.destroyed).toBe(true)
   })
 })

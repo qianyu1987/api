@@ -24,6 +24,7 @@ import { buildCcswitchImportLink } from './lib/ccswitch.js'
 import { calculateUsageMoney, estimatedRequestTokens, formatMicros, sellForGrossMargin, yuanToMicros } from './lib/money.js'
 import { parseSseUsage, usageFromPayload } from './lib/usage.js'
 import { PublicModelSse, rewritePublicModel } from './lib/public-model.js'
+import { decodeResponseBuffer, decodeResponseStream } from './lib/response-compression.js'
 import { ProfitService } from './services/profit.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -1197,12 +1198,13 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const responseHeaders = response.headers as Record<string, string | string[] | undefined>
     const upstreamRequestId = responseHeader(responseHeaders, ['x-request-id', 'openai-request-id', 'request-id'])
     const isSse = String(responseHeaders['content-type'] || '').includes('text/event-stream')
+    const contentEncoding = responseHeaders['content-encoding']
     const rewriteModel = model === 'gpt-5.6-sol' && relay.upstreamModel !== model
     if (isSse) {
       reply.hijack()
       reply.raw.statusCode = response.statusCode
       reply.raw.setHeader('X-Request-Id', requestId)
-      for (const [key, value] of Object.entries(responseHeaders)) if (!['content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.raw.setHeader(key, value as any)
+      for (const [key, value] of Object.entries(responseHeaders)) if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.raw.setHeader(key, value as any)
       const decoder = new StringDecoder('utf8')
       const publicStream = rewriteModel ? new PublicModelSse(model) : null
       let pending = ''
@@ -1223,7 +1225,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       reply.raw.once('close', abortForClientDisconnect)
       reply.raw.once('error', abortForClientDisconnect)
       try {
-        for await (const chunk of response.body as any) {
+        for await (const chunk of decodeResponseStream(response.body, contentEncoding)) {
           if (clientDisconnected || reply.raw.destroyed || reply.raw.writableEnded) throw new Error('客户端连接已关闭')
           const buffer = Buffer.from(chunk)
           consumeUsage(decoder.write(buffer))
@@ -1267,7 +1269,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       return
     }
     let data: Buffer
-    try { data = Buffer.from(await response.body.arrayBuffer()) } catch (error) {
+    try { data = await decodeResponseBuffer(Buffer.from(await response.body.arrayBuffer()), contentEncoding) } catch (error) {
       if (!isMetadata) {
         await billing.settle({
           requestId, userId: identity.user.id, model, usage: null, price: price as PriceSnapshot,
@@ -1310,7 +1312,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         .catch((error) => app.log.warn({ err: error, requestId }, 'failed to record relay attempts'))
     }
     reply.code(response.statusCode)
-    for (const [key, value] of Object.entries(responseHeaders)) if (!['content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.header(key, value as any)
+    for (const [key, value] of Object.entries(responseHeaders)) if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.header(key, value as any)
     // Billing above always receives the unmodified upstream metadata.
     reply.send(rewriteModel ? Buffer.from(rewritePublicModel(data.toString('utf8'), model)) : data)
   }

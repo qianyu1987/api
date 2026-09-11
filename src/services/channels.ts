@@ -238,6 +238,9 @@ export class ChannelService {
           ].includes(lower)) outgoingHeaders[key] = value
         }
         outgoingHeaders.authorization = `Bearer ${apiKey}`
+        // Fallback metadata must be inspected and rewritten. Prefer plain bytes;
+        // the response layer also handles providers that still send compression.
+        if (fallback(channel)) outgoingHeaders['accept-encoding'] = 'identity'
         const outgoingBody = rewriteRequestBody(body, requestedModel, upstreamModel, path)
         if (outgoingBody && outgoingBody !== body) {
           // The original content-length is deliberately removed above; undici
