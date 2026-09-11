@@ -1,5 +1,5 @@
 (() => {
-  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null, walletAdjustUserId: null, overviewTimer: null }
+  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null, walletAdjustUserId: null, overviewTimer: null, topupMultiplierBps: 30000 }
   const $ = (selector) => document.querySelector(selector)
   const $$ = (selector) => [...document.querySelectorAll(selector)]
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
@@ -25,6 +25,28 @@
     const negative = amount < 0n
     const cents = ((negative ? -amount : amount) + 5000n) / 10000n
     return (negative ? '-' : '') + '¥' + String(cents / 100n) + '.' + String(cents % 100n).padStart(2, '0')
+  }
+  const topupMultiplierLabel = () => {
+    const bps = Number(state.topupMultiplierBps || 30000)
+    const value = Number.isFinite(bps) && bps >= 10000 ? bps / 10000 : 3
+    return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+  }
+  function applyTopupMultiplier(bps) {
+    const parsed = Number(bps)
+    if (Number.isInteger(parsed) && parsed >= 10000 && parsed <= 100000) state.topupMultiplierBps = parsed
+    const ratio = topupMultiplierLabel()
+    const title = $('#wallet-recharge-title'); if (title) title.textContent = '充值 1 元，到账 ' + ratio + ' 元'
+    const mark = $('#wallet-recharge-ratio'); if (mark) mark.textContent = '1 : ' + ratio
+    updateTopupCreditHint()
+  }
+  function updateTopupCreditHint() {
+    const input = $('#topup-form [name="amount"]'); const hint = $('#topup-credit-hint'); if (!input || !hint) return
+    try {
+      const paid = yuanToMicros(input.value)
+      const bps = BigInt(String(state.topupMultiplierBps || 30000))
+      const credit = (paid * bps) / 10000n
+      hint.textContent = '支付 ' + money({ micros: paid }) + '，钱包到账 ' + money({ micros: credit })
+    } catch { hint.textContent = '支付金额将按当前充值倍率计入钱包' }
   }
   const integer = (value) => String(toMicros(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   const margin = (cost, sell) => {
@@ -133,6 +155,7 @@
   async function loadOverview() {
     try {
       const data = await api('/api/me/overview')
+      applyTopupMultiplier(data.walletTopupMultiplierBps)
       state.user = data.user; $('#user-label').textContent = data.user.username
       const walletMicros = yuanToMicros(data.balance.wallet || '0')
       const planMicros = yuanToMicros(data.balance.planRemaining || '0')
@@ -183,6 +206,7 @@
   async function loadRecharge() {
     try {
       const [plans, overview] = await Promise.all([api('/api/plans'), api('/api/me/overview')])
+      applyTopupMultiplier(overview.walletTopupMultiplierBps)
       const progress = $('#recharge-plan-progress'); if (progress) progress.innerHTML = planProgressMarkup(overview.balance)
       $('#plans').innerHTML = plans.items.length ? plans.items.map((plan) => '<div class="plan-option"><div><strong>' + esc(plan.name) + '</strong><small>30 天有效 · 每月 4 次额度 · 每次可消费额度 ' + money({ micros: plan.quota_micros }) + '</small><small class="plan-price">套餐价 ' + money({ micros: plan.price_micros }) + '</small></div><button class="button secondary buy-plan" type="button" data-id="' + esc(plan.id) + '" data-amount="' + esc(plan.price_micros) + '">购买套餐</button></div>').join('') : '<p class="empty">管理员尚未配置套餐</p>'
     } catch (error) { toast(error.message, true) }
@@ -192,11 +216,12 @@
     const image = payment.qrImage || payment.qrDataUrl || data.qrImage || (String(raw).startsWith('data:image/') ? raw : '')
     const codeUrl = payment.codeUrl || (!String(raw).startsWith('data:image/') ? raw : '')
     $('#payment-result').classList.remove('hidden')
-    $('#payment-result').innerHTML = '<div class="payment-layout">' + (image ? '<img class="payment-qr" src="' + esc(image) + '" alt="' + provider + '支付二维码">' : '') + '<div class="payment-details"><strong id="payment-status">订单已创建</strong><p id="payment-status-note">请使用' + provider + (image ? '扫描二维码' : '打开支付链接') + '完成支付，到账后余额会自动更新。</p>' + (codeUrl ? '<div class="copy-line"><code id="payment-code">' + esc(codeUrl) + '</code><button type="button" class="small-button" data-copy="payment-code">复制支付链接</button></div>' : '<p class="form-error">支付渠道未返回二维码，请稍后重试。</p>') + '</div></div>'
+    const creditNote = data.walletCreditAmount ? '支付 ' + money(data.amount) + '，钱包到账 ' + money(data.walletCreditAmount) + '。' : ''
+    $('#payment-result').innerHTML = '<div class="payment-layout">' + (image ? '<img class="payment-qr" src="' + esc(image) + '" alt="' + provider + '支付二维码">' : '') + '<div class="payment-details"><strong id="payment-status">订单已创建</strong><p id="payment-status-note">请使用' + provider + (image ? '扫描二维码' : '打开支付链接') + '完成支付。' + creditNote + '到账后余额会自动更新。</p>' + (codeUrl ? '<div class="copy-line"><code id="payment-code">' + esc(codeUrl) + '</code><button type="button" class="small-button" data-copy="payment-code">复制支付链接</button></div>' : '<p class="form-error">支付渠道未返回二维码，请稍后重试。</p>') + '</div></div>'
     if (data.orderId) {
       const started = Date.now(); const timer = setInterval(async () => {
         if (Date.now() - started > 31 * 60 * 1000) return clearInterval(timer)
-        try { const order = await api('/api/me/orders/' + encodeURIComponent(data.orderId)); if (order.status === 'paid') { clearInterval(timer); $('#payment-status').textContent = '支付成功'; $('#payment-status-note').textContent = '余额已入账，正在刷新账户信息。'; await Promise.all([loadOverview(), loadRecharge()]) } else if (['failed', 'expired', 'closed'].includes(order.status)) { clearInterval(timer); const labels = { failed: '失败', expired: '已过期', closed: '已关闭' }; $('#payment-status').textContent = '订单' + (labels[order.status] || order.status); $('#payment-status-note').textContent = '请重新创建订单或联系管理员处理。' } } catch { /* keep polling while the session is valid */ }
+        try { const order = await api('/api/me/orders/' + encodeURIComponent(data.orderId)); if (order.status === 'paid') { clearInterval(timer); $('#payment-status').textContent = '支付成功'; $('#payment-status-note').textContent = order.walletCreditAmount ? '钱包已到账 ' + money(order.walletCreditAmount) + '，正在刷新账户信息。' : '余额已入账，正在刷新账户信息。'; await Promise.all([loadOverview(), loadRecharge()]) } else if (['failed', 'expired', 'closed'].includes(order.status)) { clearInterval(timer); const labels = { failed: '失败', expired: '已过期', closed: '已关闭' }; $('#payment-status').textContent = '订单' + (labels[order.status] || order.status); $('#payment-status-note').textContent = '请重新创建订单或联系管理员处理。' } } catch { /* keep polling while the session is valid */ }
       }, 5000)
     }
   }
@@ -448,6 +473,7 @@
     event.preventDefault(); const button = event.currentTarget.querySelector('[type="submit"]'); const data = new FormData(event.currentTarget); pending(button, true, '正在创建…')
     try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'wallet_topup', amountMicros: yuanToMicros(data.get('amount')).toString(), paymentMethod: 'wechat' }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }
   })
+  $('#topup-form [name="amount"]').addEventListener('input', updateTopupCreditHint)
   $('#plans').addEventListener('click', async (event) => {
     const button = event.target.closest('.buy-plan'); if (!button) return; pending(button, true, '正在创建…')
     try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'subscription', planId: button.dataset.id, amountMicros: button.dataset.amount, paymentMethod: 'wechat' }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }

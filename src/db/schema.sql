@@ -427,6 +427,10 @@ CREATE TABLE IF NOT EXISTS orders (
   plan_quota_micros BIGINT,
   plan_duration_days SMALLINT,
   amount_micros BIGINT NOT NULL,
+  -- Immutable promotion terms for wallet top-ups. Existing rows default to
+  -- 1:1; new rows snapshot the configured multiplier when created.
+  topup_multiplier_bps INTEGER NOT NULL DEFAULT 10000,
+  wallet_credit_micros BIGINT,
   payment_method TEXT NOT NULL DEFAULT 'wechat',
   payment_provider TEXT NOT NULL DEFAULT 'wechat_native',
   currency CHAR(3) NOT NULL DEFAULT 'CNY',
@@ -446,6 +450,8 @@ CREATE TABLE IF NOT EXISTS orders (
   CHECK (kind IN ('wallet_topup', 'subscription', 'subscription_purchase')),
   CHECK (order_type IN ('wallet_topup', 'subscription', 'subscription_purchase')),
   CHECK (amount_micros > 0),
+  CONSTRAINT orders_topup_multiplier_bps_check CHECK (topup_multiplier_bps BETWEEN 10000 AND 100000),
+  CONSTRAINT orders_wallet_credit_micros_check CHECK (wallet_credit_micros IS NULL OR wallet_credit_micros > 0),
   CHECK (payment_method IN ('wechat', 'alipay', 'wechat_native', 'alipay_precreate')),
   CHECK (payment_provider IN ('wechat', 'alipay', 'wechat_native', 'alipay_precreate')),
   CHECK (currency = 'CNY'),
@@ -887,6 +893,12 @@ ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS encrypted_key TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_name_snapshot TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_quota_micros BIGINT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_duration_days SMALLINT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS topup_multiplier_bps INTEGER NOT NULL DEFAULT 10000;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet_credit_micros BIGINT;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_topup_multiplier_bps_check;
+ALTER TABLE orders ADD CONSTRAINT orders_topup_multiplier_bps_check CHECK (topup_multiplier_bps BETWEEN 10000 AND 100000);
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_wallet_credit_micros_check;
+ALTER TABLE orders ADD CONSTRAINT orders_wallet_credit_micros_check CHECK (wallet_credit_micros IS NULL OR wallet_credit_micros > 0);
 
 -- Normalize rows written by the early compatibility API before using `kind`
 -- for settlement dispatch.  The trigger keeps new writes canonical, but it

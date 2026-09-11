@@ -393,7 +393,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const balance = await billing.balance(user.id)
     const discount = await db.one<any>('SELECT token_discount_bps FROM users WHERE id = $1', [user.id])
     const discountBps = Math.max(0, Math.min(9900, Number(discount?.token_discount_bps || 0)))
-    return { user, balance: BillingService.formatBalance(balance), tokenDiscountBps: discountBps, tokenDiscountPercent: discountBps / 100, apiBaseUrl: `${config.publicBaseUrl}/v1`, downloads: { chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl }, mailConfigured: mail.configured }
+    return { user, balance: BillingService.formatBalance(balance), tokenDiscountBps: discountBps, tokenDiscountPercent: discountBps / 100, walletTopupMultiplierBps: config.walletTopupMultiplierBps, apiBaseUrl: `${config.publicBaseUrl}/v1`, downloads: { chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl }, mailConfigured: mail.configured }
   })
   app.get('/api/me/balance', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
@@ -570,6 +570,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         orderNo: created.orderNo,
         status: 'pending',
         amount: publicMoney(created.amountMicros),
+        walletCreditAmount: created.walletCreditMicros === null ? null : publicMoney(created.walletCreditMicros),
+        topupMultiplierBps: created.topupMultiplierBps,
         payment: { ...native, ...(qrImage ? { qrImage } : {}) },
       }
     } catch (error) {
@@ -606,13 +608,13 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     }
   })
 
-  app.get('/api/orders', async (request, reply) => { const user = await requireSession(request, reply); return user ? { items: await db.query<any>('SELECT id, order_no, kind, amount_micros, payment_method, status, qr_code_url, created_at, paid_at, expires_at FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100', [user.id]) } : undefined })
+  app.get('/api/orders', async (request, reply) => { const user = await requireSession(request, reply); return user ? { items: await db.query<any>('SELECT id, order_no, kind, amount_micros, paid_amount_micros, wallet_credit_micros, topup_multiplier_bps, payment_method, status, qr_code_url, created_at, paid_at, expires_at FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100', [user.id]) } : undefined })
   app.get('/api/me/orders/:id', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
     const id = String((request.params as any).id || '')
-    const row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
+    const row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,wallet_credit_micros,topup_multiplier_bps,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
     if (!row) { reply.code(404).send({ error: { message: '订单不存在' } }); return }
-    return { ...row, amount: publicMoney(row.amount_micros), paidAmount: row.paid_amount_micros ? publicMoney(row.paid_amount_micros) : null }
+    return { ...row, amount: publicMoney(row.amount_micros), paidAmount: row.paid_amount_micros ? publicMoney(row.paid_amount_micros) : null, walletCreditAmount: row.wallet_credit_micros ? publicMoney(row.wallet_credit_micros) : null }
   })
   app.get('/api/me/billing/:requestId', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return

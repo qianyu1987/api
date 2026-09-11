@@ -45,6 +45,7 @@ export type AppConfig = {
   adminPassword: string
   usageRetentionDays: number
   defaultAffiliateRateBps: number
+  walletTopupMultiplierBps: number
   chatgptDownloadUrl: string
   ccswitchDownloadUrl: string
   smtp: SmtpConfig
@@ -125,6 +126,9 @@ export function loadConfig(): AppConfig {
     adminPassword,
     usageRetentionDays: positiveInt('USAGE_RETENTION_DAYS', 90),
     defaultAffiliateRateBps: nonNegativeInt('DEFAULT_AFFILIATE_RATE_BPS', 1000),
+    // A wallet top-up is a promotional credit: paying ¥1 currently adds ¥3
+    // to the API wallet. The payment order still records the amount paid.
+    walletTopupMultiplierBps: nonNegativeInt('WALLET_TOPUP_MULTIPLIER_BPS', 30000),
     chatgptDownloadUrl: text('CHATGPT_DOWNLOAD_URL', 'https://chatgpt.com/download/'),
     ccswitchDownloadUrl: text('CCSWITCH_DOWNLOAD_URL', 'https://github.com/farion1231/cc-switch/releases/latest'),
     smtp: {

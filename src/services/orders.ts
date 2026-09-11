@@ -43,9 +43,18 @@ export type CreatedOrder = {
   orderNo: string
   kind: 'wallet_topup' | 'subscription'
   amountMicros: bigint
+  walletCreditMicros: bigint | null
+  topupMultiplierBps: number
   paymentMethod: PaymentMethod
   planId: string | null
   expiresAt: Date
+}
+
+export function topupCreditAmount(paymentMicros: bigint, multiplierBps: number | bigint): bigint {
+  if (paymentMicros <= 0n) throw new Error('充值金额必须大于 0')
+  const multiplier = typeof multiplierBps === 'bigint' ? multiplierBps : BigInt(multiplierBps)
+  if (multiplier < 10000n || multiplier > 100000n) throw new Error('充值倍率无效')
+  return (paymentMicros * multiplier) / 10000n
 }
 
 function bigintValue(value: unknown): bigint {
@@ -205,6 +214,9 @@ export class OrderService {
     let planQuotaSnapshot: bigint | null = null
     let planDurationSnapshot: number | null = null
     let amount = input.amountMicros || 0n
+    const configuredTopupMultiplier = Number(this.config.walletTopupMultiplierBps ?? 30000)
+    if (!Number.isInteger(configuredTopupMultiplier) || configuredTopupMultiplier < 10000 || configuredTopupMultiplier > 100000) throw new Error('充值倍率配置无效')
+    const topupMultiplierBps = input.kind === 'wallet_topup' ? configuredTopupMultiplier : 10000
     if (input.kind === 'subscription') {
       if (!planId) throw new Error('请选择套餐')
       const plan = await this.db.one<any>('SELECT id, name, price_micros, quota_micros, duration_days, active, enabled FROM plans WHERE id = $1', [planId])
@@ -222,13 +234,15 @@ export class OrderService {
       `INSERT INTO orders(
          order_no, user_id, kind, order_type, amount_micros, plan_id,
          plan_name_snapshot, plan_quota_micros, plan_duration_days,
-         payment_method, payment_provider, expires_at
-       ) VALUES ($1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-       RETURNING id, order_no, kind, amount_micros, plan_id, payment_method, expires_at`,
-      [no, userId, input.kind, amount.toString(), planId, planNameSnapshot, planQuotaSnapshot?.toString() || null, planDurationSnapshot, input.paymentMethod, paymentProvider(input.paymentMethod), expiresAt],
+         topup_multiplier_bps, payment_method, payment_provider, expires_at
+       ) VALUES ($1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       RETURNING id, order_no, kind, amount_micros, topup_multiplier_bps, plan_id, payment_method, expires_at`,
+      [no, userId, input.kind, amount.toString(), planId, planNameSnapshot, planQuotaSnapshot?.toString() || null, planDurationSnapshot, topupMultiplierBps, input.paymentMethod, paymentProvider(input.paymentMethod), expiresAt],
     )
     if (!row) throw new Error('创建订单失败')
-    return { id: String(row.id), orderNo: String(row.order_no), kind: row.kind, amountMicros: bigintValue(row.amount_micros), paymentMethod: row.payment_method, planId: row.plan_id ? String(row.plan_id) : null, expiresAt: new Date(row.expires_at) }
+    const orderAmount = bigintValue(row.amount_micros)
+    const storedMultiplier = Number(row.topup_multiplier_bps ?? topupMultiplierBps)
+    return { id: String(row.id), orderNo: String(row.order_no), kind: row.kind, amountMicros: orderAmount, walletCreditMicros: row.kind === 'wallet_topup' ? topupCreditAmount(orderAmount, storedMultiplier) : null, topupMultiplierBps: storedMultiplier, paymentMethod: row.payment_method, planId: row.plan_id ? String(row.plan_id) : null, expiresAt: new Date(row.expires_at) }
   }
 
   async attachNativePayment(orderId: string, payment: { providerOrderId: string | null; codeUrl: string }): Promise<void> {
@@ -400,7 +414,9 @@ export class OrderService {
       `SELECT balance_micros FROM wallets WHERE user_id = $1 FOR UPDATE`,
       [order.user_id],
     )
-    const next = bigintValue(wallet?.balance_micros) + payment.amountMicros
+    const multiplierBps = Number(order.topup_multiplier_bps ?? 10000)
+    const creditedAmount = topupCreditAmount(payment.amountMicros, Number.isInteger(multiplierBps) ? multiplierBps : 10000)
+    const next = bigintValue(wallet?.balance_micros) + creditedAmount
     if (wallet) {
       await client.query(
         `UPDATE wallets
@@ -422,12 +438,16 @@ export class OrderService {
        ) VALUES ($1, 'wallet_topup', $2, $3, $4, $5, $6)`,
       [
         order.user_id,
-        payment.amountMicros.toString(),
+        creditedAmount.toString(),
         next.toString(),
         order.id,
-        'payment callback',
-        JSON.stringify({ provider: payment.provider, eventId: payment.eventId }),
+        'payment callback · wallet credit',
+        JSON.stringify({ provider: payment.provider, eventId: payment.eventId, paidAmountMicros: payment.amountMicros.toString(), creditedAmountMicros: creditedAmount.toString(), topupMultiplierBps: multiplierBps }),
       ],
+    )
+    await client.query(
+      `UPDATE orders SET wallet_credit_micros = $1 WHERE id = $2`,
+      [creditedAmount.toString(), order.id],
     )
   }
 

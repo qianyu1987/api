@@ -436,6 +436,13 @@ td.admin-action-cell { display: table-cell; vertical-align: middle; }
 .plan-frequency-mark { display: grid; min-width: 108px; place-items: center; align-content: center; padding: 10px 0 8px; border-left: 1px solid rgba(224, 246, 239, .3); font-variant-numeric: tabular-nums; }
 .plan-frequency-mark strong { color: #f3c66b; font-size: 50px; line-height: .9; }
 .plan-frequency-mark span { margin-top: 6px; color: #e1f4ef; font-size: 13px; font-weight: 700; }
+.wallet-recharge-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 28px; margin: 0 0 18px; padding: 22px 24px; border: 1px solid #c9943b; border-radius: 8px; background: #fff7e6; color: #332613; }
+.wallet-recharge-copy h4 { margin: 0 0 6px; color: #6d4308; font-size: 26px; line-height: 1.2; letter-spacing: 0; }
+.wallet-recharge-copy p { max-width: 62ch; margin: 0; color: #745f3d; font-size: 14px; }
+.wallet-recharge-mark { display: grid; min-width: 150px; place-items: center; align-content: center; padding: 8px 0 6px; border-left: 1px solid #e4c889; font-variant-numeric: tabular-nums; }
+.wallet-recharge-mark strong { color: #9a5c00; font-size: 38px; line-height: 1; }
+.wallet-recharge-mark span { margin-top: 7px; color: #795d2f; font-size: 12px; font-weight: 700; }
+.topup-credit-hint { margin: 0; padding: 10px 12px; border: 1px solid #e4c889; border-radius: 6px; background: #fffaf0; color: #7a4c08; font-size: 13px; font-weight: 650; }
 .plan-option { align-items: flex-start; }
 .plan-option small { display: block; margin-top: 3px; }
 .plan-option .plan-price { color: var(--ink); font-weight: 650; }
@@ -467,4 +474,8 @@ td.admin-action-cell { display: table-cell; vertical-align: middle; }
   .plan-frequency-copy h4 { font-size: 24px; }
   .plan-frequency-mark { justify-items: start; grid-template-columns: auto auto; gap: 9px; min-width: 0; padding: 13px 0 0; border-top: 1px solid rgba(224, 246, 239, .3); border-left: 0; }
   .plan-frequency-mark span { margin-top: 0; }
+  .wallet-recharge-card { grid-template-columns: 1fr; gap: 16px; padding: 20px; }
+  .wallet-recharge-copy h4 { font-size: 24px; }
+  .wallet-recharge-mark { justify-items: start; grid-template-columns: auto auto; gap: 9px; min-width: 0; padding: 13px 0 0; border-top: 1px solid #e4c889; border-left: 0; }
+  .wallet-recharge-mark span { margin-top: 0; }
 }
