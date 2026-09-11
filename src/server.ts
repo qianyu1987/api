@@ -26,6 +26,7 @@ import { parseSseUsage, usageFromPayload } from './lib/usage.js'
 import { PublicModelSse, rewritePublicModel } from './lib/public-model.js'
 import { decodeResponseBuffer, decodeResponseStream } from './lib/response-compression.js'
 import { ProfitService } from './services/profit.js'
+import { fallbackCostAlerts, fallbackCostPending, pendingFallbackCostSql } from './lib/cost-status.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -631,18 +632,23 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     return { steps: { keyCreated: Boolean(key), firstRequest: Boolean(usage), firstRequestSuccess: Boolean(usage?.success) }, completed: Boolean(key && usage?.success) }
   })
 
-  app.get('/api/admin/channels', async (request, reply) => { if (!await requireAdmin(request, reply)) return; return { items: await channels.allForAdmin() } })
+  app.get('/api/admin/channels', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const [items, alerts] = await Promise.all([channels.allForAdmin(), fallbackCostAlerts(db)])
+    return { items: items.map(item => ({ ...item, fallbackCostPending: alerts.some(alert => alert.resource_id === item.id) })) }
+  })
 
   app.get('/api/admin/overview', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
     const q = (request.query || {}) as any
     const from = q.from ? dateFilter(q.from) : new Date(Date.now() - 24 * 60 * 60 * 1000)
     const to = q.to ? dateFilter(q.to, true) : new Date()
-    const [usage, orders, fees, alerts, channelsSummary] = await Promise.all([
+    const [usage, orders, fees, alerts, channelsSummary, costAlerts] = await Promise.all([
       db.one<any>(`SELECT count(*)::int AS requests, COALESCE(sum(charge_micros),0)::bigint AS revenue,
         COALESCE(sum(cost_micros),0)::bigint AS cost, COALESCE(sum(profit_micros),0)::bigint AS gross_profit,
         COALESCE(sum(CASE WHEN success THEN 0 ELSE charge_micros END),0)::bigint AS failed_charge,
-        COALESCE(avg(duration_ms) FILTER (WHERE success),0)::numeric AS avg_latency
+        COALESCE(avg(duration_ms) FILTER (WHERE success),0)::numeric AS avg_latency,
+        count(*) FILTER (WHERE ${pendingFallbackCostSql})::int AS pending_cost_requests
         FROM usage_logs WHERE started_at >= $1 AND started_at < $2`, [from, to]),
       db.one<any>(`SELECT COALESCE(sum(CASE WHEN status='paid' THEN amount_micros ELSE 0 END),0)::bigint AS paid,
         count(*) FILTER (WHERE status='paid')::int AS paid_orders FROM orders WHERE created_at >= $1 AND created_at < $2`, [from, to]),
@@ -651,12 +657,14 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       db.query<any>(`SELECT c.id,c.name,c.enabled,c.failure_count,c.last_success_at,c.last_failure_at,c.circuit_open_until,
         COALESCE(x.requests,0)::int AS requests,COALESCE(x.failures,0)::int AS failures
         FROM channels c LEFT JOIN (SELECT final_channel_id,count(*) AS requests,count(*) FILTER(WHERE NOT success) AS failures FROM usage_logs WHERE started_at >= $1 AND started_at < $2 GROUP BY final_channel_id) x ON x.final_channel_id=c.id ORDER BY c.priority,c.name`, [from, to]),
+      fallbackCostAlerts(db),
     ])
     const revenue = BigInt(String(usage?.revenue || 0)); const cost = BigInt(String(usage?.cost || 0)); const rebates = BigInt(String(fees?.rebates || 0))
     const net = revenue - cost - rebates
     return { period: { from: from.toISOString(), to: to.toISOString() }, minimumMarginBps: await settingInt(db, 'profit_min_margin_bps', 3000), globalDiscountBps: await settingInt(db, 'global_token_discount_bps', 0), metrics: {
       requests: Number(usage?.requests || 0), revenue: publicMoney(revenue), cost: publicMoney(cost), grossProfit: publicMoney(revenue - cost), rebates: publicMoney(rebates), netProfit: publicMoney(net), paidOrders: Number(orders?.paid_orders || 0), paid: publicMoney(orders?.paid), failedCharge: publicMoney(usage?.failed_charge), avgLatencyMs: Number(usage?.avg_latency || 0),
-    }, alerts, channels: channelsSummary }
+      pendingCostRequests: Number(usage?.pending_cost_requests || 0),
+    }, alerts: [...costAlerts, ...alerts], channels: channelsSummary }
   })
 
   app.get('/api/admin/profit', async (request, reply) => {
@@ -664,7 +672,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const q = (request.query || {}) as any
     const from = q.from ? dateFilter(q.from) : new Date(Date.now() - 30 * 86400_000); const to = q.to ? dateFilter(q.to, true) : new Date()
     const rows = await db.query<any>(`SELECT requested_model AS model, COALESCE(final_channel_name_snapshot,'—') AS channel,
-      count(*)::int AS requests,COALESCE(sum(charge_micros),0)::bigint AS revenue,COALESCE(sum(cost_micros),0)::bigint AS cost,COALESCE(sum(profit_micros),0)::bigint AS profit
+      count(*)::int AS requests,COALESCE(sum(charge_micros),0)::bigint AS revenue,COALESCE(sum(cost_micros),0)::bigint AS cost,COALESCE(sum(profit_micros),0)::bigint AS profit,
+      count(*) FILTER (WHERE ${pendingFallbackCostSql})::int AS pending_cost_requests
       FROM usage_logs WHERE started_at >= $1 AND started_at < $2 GROUP BY requested_model,final_channel_name_snapshot ORDER BY profit ASC LIMIT 500`, [from, to])
     return { from: from.toISOString(), to: to.toISOString(), items: rows.map((r) => ({ ...r, revenue: publicMoney(r.revenue), cost: publicMoney(r.cost), profit: publicMoney(r.profit), marginBps: Number(r.revenue) ? Number((BigInt(String(r.profit)) * 10000n) / BigInt(String(r.revenue))) : 0 })) }
   })
@@ -672,12 +681,16 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if (!await requireAdmin(request, reply)) return
     const q = (request.query || {}) as any
     const from = q.from ? dateFilter(q.from) : new Date(Date.now() - 30 * 86400_000); const to = q.to ? dateFilter(q.to, true) : new Date()
-    const rows = await db.query<any>(`SELECT started_at,requested_model,COALESCE(final_channel_name_snapshot,'') AS channel,charge_micros,cost_micros,profit_micros,status FROM usage_logs WHERE started_at >= $1 AND started_at < $2 ORDER BY started_at DESC LIMIT 10000`, [from, to])
-    const csv = ['时间,模型,渠道,收入,成本,利润,状态', ...rows.map((r) => [r.started_at, r.requested_model, r.channel, formatMicros(BigInt(String(r.charge_micros))), formatMicros(BigInt(String(r.cost_micros))), formatMicros(BigInt(String(r.profit_micros))), r.status].map((v) => `"${String(v ?? '').replaceAll('"', '""')}"`).join(','))].join('\n')
+    const rows = await db.query<any>(`SELECT started_at,requested_model,COALESCE(final_channel_name_snapshot,'') AS channel,charge_micros,cost_micros,profit_micros,status,${pendingFallbackCostSql} AS pending_cost FROM usage_logs WHERE started_at >= $1 AND started_at < $2 ORDER BY started_at DESC LIMIT 10000`, [from, to])
+    const csv = ['时间,模型,渠道,收入,成本,利润,状态,成本说明', ...rows.map((r) => [r.started_at, r.requested_model, r.channel, formatMicros(BigInt(String(r.charge_micros))), formatMicros(BigInt(String(r.cost_micros))), formatMicros(BigInt(String(r.profit_micros))), r.status, r.pending_cost ? '兜底成本待核实，利润为估算' : '按历史成本快照'].map((v) => `"${String(v ?? '').replaceAll('"', '""')}"`).join(','))].join('\n')
     reply.header('Content-Type', 'text/csv; charset=utf-8').header('Content-Disposition', 'attachment; filename="relay-profit.csv"').send(`\uFEFF${csv}`)
   })
 
-  app.get('/api/admin/risk-alerts', async (request, reply) => { if (!await requireAdmin(request, reply)) return; return { items: await db.query<any>(`SELECT * FROM risk_alerts WHERE status <> 'resolved' ORDER BY created_at DESC LIMIT 200`) } })
+  app.get('/api/admin/risk-alerts', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const [alerts, costAlerts] = await Promise.all([db.query<any>(`SELECT * FROM risk_alerts WHERE status <> 'resolved' ORDER BY created_at DESC LIMIT 200`), fallbackCostAlerts(db)])
+    return { items: [...costAlerts, ...alerts] }
+  })
   app.get('/api/admin/channel-costs', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
     return { items: await db.query<any>(`SELECT c.name AS channel_name,c.base_url,m.* FROM channel_model_costs m JOIN channels c ON c.id=m.channel_id ORDER BY c.priority,m.model_pattern`) }
@@ -990,7 +1003,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       if (q.from) { values.push(dateFilter(q.from)); where.push(`l.started_at >= $${values.length}`) }
       if (q.to) { values.push(dateFilter(q.to, true)); where.push(`l.started_at < $${values.length}`) }
       const rows = await db.query<any>(`SELECT l.*,u.username FROM usage_logs l JOIN users u ON u.id=l.user_id ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY l.started_at DESC,l.request_id DESC LIMIT ${boundedLimit(q.limit, 100, 500)}`, values)
-      return { items: rows }
+      return { items: rows.map(row => ({ ...row, fallbackCostPending: fallbackCostPending(row) })) }
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
   app.get('/api/admin/usage/:requestId/attempts', async (request, reply) => {
