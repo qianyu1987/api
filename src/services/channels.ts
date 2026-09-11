@@ -1,5 +1,6 @@
 import { request, type Dispatcher } from 'undici'
 import { decryptSecret } from '../lib/crypto.js'
+import { isSolFallback } from '../lib/public-model.js'
 import type { AppConfig } from '../config.js'
 import { Database } from '../db/index.js'
 
@@ -211,7 +212,13 @@ export class ChannelService {
   }
 
   async relay(path: string, method: string, headers: Record<string, string>, body: Buffer | undefined, requestedModel: string): Promise<RelayResult> {
-    const channels = (await this.list()).filter((channel) => supportsRequestedModel(channel, requestedModel))
+    const fallback = (channel: Channel) => isSolFallback(requestedModel, channel.modelMap[requestedModel] || channel.modelMap['*'] || requestedModel)
+    const channels = (await this.list()).filter((channel) => {
+      if (!supportsRequestedModel(channel, requestedModel)) return false
+      // This text fallback supports only the synchronous Chat/Responses APIs.
+      // Do not route image, audio, embedding or response-management operations to it.
+      return !fallback(channel) || (method.toUpperCase() === 'POST' && ['/chat/completions', '/responses'].includes(path.split('?')[0]))
+    }).sort((a, b) => Number(fallback(a)) - Number(fallback(b)))
     if (!channels.length) throw new Error(requestedModel ? '当前模型没有已启用上游渠道，请联系管理员配置模型映射' : '暂无可用上游渠道，请联系管理员')
     const attempts: RelayAttempt[] = []
     for (let index = 0; index < channels.length; index += 1) {

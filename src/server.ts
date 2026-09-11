@@ -23,6 +23,7 @@ import { MailService } from './services/mail.js'
 import { buildCcswitchImportLink } from './lib/ccswitch.js'
 import { calculateUsageMoney, estimatedRequestTokens, formatMicros, sellForGrossMargin, yuanToMicros } from './lib/money.js'
 import { parseSseUsage, usageFromPayload } from './lib/usage.js'
+import { PublicModelSse, rewritePublicModel } from './lib/public-model.js'
 import { ProfitService } from './services/profit.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -493,7 +494,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const items = rows.slice(0, limit).map((row) => ({
         time: row.started_at || row.created_at, requestId: row.request_id,
         keyId: row.api_key_id || row.key_id, keyName: row.api_key_name_snapshot || row.current_key_name || '',
-        model: row.requested_model, upstreamModel: row.upstream_model,
+        model: row.requested_model, upstreamModel: user.role === 'admin' ? row.upstream_model : row.requested_model,
         channel: row.final_channel_name_snapshot || row.current_channel_name || '',
         inputTokens: String(row.input_tokens), outputTokens: String(row.output_tokens), cacheTokens: String(row.cache_tokens), totalTokens: String(row.reported_total_tokens),
         planCharge: publicMoney(row.plan_charge_micros), walletCharge: publicMoney(row.wallet_charge_micros), charge: publicMoney(row.charge_micros),
@@ -620,6 +621,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const user = await requireSession(request, reply); if (!user) return
     const row = await db.one<any>('SELECT request_id,requested_model,upstream_model,final_channel_name_snapshot,input_tokens,output_tokens,cache_tokens,reported_total_tokens,plan_charge_micros,wallet_charge_micros,charge_micros,status,success,status_code,is_estimated_usage,error_code,error_summary,started_at,finished_at FROM usage_logs WHERE request_id=$1 AND user_id=$2', [String((request.params as any).requestId || ''), user.id])
     if (!row) { reply.code(404).send({ error: { message: '账单记录不存在' } }); return }
+    if (user.role !== 'admin') row.upstream_model = row.requested_model
     return { ...row, charge: publicMoney(row.charge_micros), planCharge: publicMoney(row.plan_charge_micros), walletCharge: publicMoney(row.wallet_charge_micros), billingNote: row.success ? (row.is_estimated_usage ? '本次用量由系统估算，后续可能按上游实际用量校正' : '按上游实际用量结算') : (Number(row.charge_micros) > 0 ? '请求失败但已产生可计费用量' : '请求失败，未产生收费') }
   })
   app.get('/api/me/onboarding', async (request, reply) => {
@@ -1195,12 +1197,14 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const responseHeaders = response.headers as Record<string, string | string[] | undefined>
     const upstreamRequestId = responseHeader(responseHeaders, ['x-request-id', 'openai-request-id', 'request-id'])
     const isSse = String(responseHeaders['content-type'] || '').includes('text/event-stream')
+    const rewriteModel = model === 'gpt-5.6-sol' && relay.upstreamModel !== model
     if (isSse) {
       reply.hijack()
       reply.raw.statusCode = response.statusCode
       reply.raw.setHeader('X-Request-Id', requestId)
       for (const [key, value] of Object.entries(responseHeaders)) if (!['content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.raw.setHeader(key, value as any)
       const decoder = new StringDecoder('utf8')
+      const publicStream = rewriteModel ? new PublicModelSse(model) : null
       let pending = ''
       let usage = null as ReturnType<typeof parseSseUsage>
       const consumeUsage = (value: string) => {
@@ -1223,10 +1227,13 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           if (clientDisconnected || reply.raw.destroyed || reply.raw.writableEnded) throw new Error('客户端连接已关闭')
           const buffer = Buffer.from(chunk)
           consumeUsage(decoder.write(buffer))
-          if (!reply.raw.write(buffer)) await waitForWritableDrain(reply.raw)
+          const outgoing = publicStream ? publicStream.write(buffer) : buffer
+          if (outgoing.length && !reply.raw.write(outgoing)) await waitForWritableDrain(reply.raw)
         }
         if (clientDisconnected) throw new Error('客户端连接已关闭')
         consumeUsage(`${decoder.end()}\n`)
+        const tail = publicStream?.end()
+        if (tail && !reply.raw.write(tail)) await waitForWritableDrain(reply.raw)
       } catch (error) {
         streamError = error
         try { (response.body as any).destroy?.(error) } catch { /* noop */ }
@@ -1304,7 +1311,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     }
     reply.code(response.statusCode)
     for (const [key, value] of Object.entries(responseHeaders)) if (!['content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.header(key, value as any)
-    reply.send(data)
+    // Billing above always receives the unmodified upstream metadata.
+    reply.send(rewriteModel ? Buffer.from(rewritePublicModel(data.toString('utf8'), model)) : data)
   }
 
   // CC Switch installations created before v1.0.6 sometimes retain the host
