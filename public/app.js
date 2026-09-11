@@ -1,5 +1,5 @@
 (() => {
-  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null, walletAdjustUserId: null, overviewTimer: null, topupMultiplierBps: 30000 }
+  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null, walletAdjustUserId: null, overviewTimer: null, topupMultiplierBps: 30000, channelCostData: null, selectedCostChannel: null, selectedCostModel: null }
   const $ = (selector) => document.querySelector(selector)
   const $$ = (selector) => [...document.querySelectorAll(selector)]
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
@@ -271,8 +271,26 @@
     }
     if (tab === 'channels') {
       const editor = form('channel', [field('name', '渠道名称', '', 'text', 'required'), field('baseUrl', '上游地址', '', 'url', 'required'), field('apiKey', '上游 Key', '', 'password', 'required'), field('priority', '优先级', '100', 'number', 'min="0"'), field('timeoutMs', '超时毫秒', '30000', 'number', 'min="1000" max="120000"'), field('modelMap', '模型映射 JSON', '{}'), check('enabled', '启用')], '新增渠道')
-      const rows = items.map((item) => '<tr><td><strong>' + esc(item.name) + '</strong><small class="subline">' + esc(item.baseUrl) + '</small></td><td>' + item.priority + '</td><td>' + item.timeoutMs + ' ms</td><td><code class="inline-code">' + esc(JSON.stringify(item.modelMap || {})) + '</code></td><td><span class="state ' + (item.enabled ? 'good' : 'bad') + '">' + (item.enabled ? '启用' : '停用') + '</span>' + (item.fallbackCostPending ? '<small class="subline">兜底成本待核实</small>' : '') + '</td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="channel" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button danger-button admin-delete" type="button" data-kind="channel" data-id="' + esc(item.id) + '">停用</button></td></tr>')
+      const rows = items.map((item) => '<tr><td><strong>' + esc(item.name) + '</strong><small class="subline">' + esc(item.baseUrl) + '</small></td><td>' + item.priority + '</td><td>' + item.timeoutMs + ' ms</td><td><code class="inline-code">' + esc(JSON.stringify(item.modelMap || {})) + '</code></td><td><span class="state ' + (item.enabled ? 'good' : 'bad') + '">' + (item.enabled ? '启用' : '停用') + '</span>' + (item.fallbackCostPending ? '<small class="subline">兜底成本待核实</small>' : '') + '</td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="channel" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button" type="button" data-channel-cost="' + esc(item.id) + '">成本</button><button class="small-button danger-button admin-delete" type="button" data-kind="channel" data-id="' + esc(item.id) + '">停用</button></td></tr>')
       return editor + table(['渠道', '优先级', '超时', '模型映射', '状态', '操作'], rows, '尚未添加上游渠道')
+    }
+    if (tab === 'channel-costs') {
+      state.channelCostData = data
+      const options = (data.channels || []).map(c => '<option value="' + esc(c.id) + '">' + esc(c.name) + (c.enabled ? '' : '（停用）') + '</option>').join('')
+      const editor = form('channel-cost', [
+        '<label>渠道<select name="channelId" required>' + options + '</select></label>',
+        '<label>用户调用的模型<select name="modelPattern" required></select></label>',
+        '<p id="channel-cost-target" class="admin-note wide"></p>',
+        ...['input', 'output', 'cache'].map((part, i) => field(part + 'CostYuanPerMillion', ['输入', '输出', '缓存'][i] + '实际成本（元 / 百万 Token）', '', 'text', 'inputmode="decimal" required')),
+        field('highContextIncreasePercent', '超过 272K 的成本涨幅（%）', '20', 'number', 'min="0" max="1000" step="0.01" required'),
+        field('priceSource', '成本来源（账单日期或供应商报价）', '', 'text', 'maxlength="512" required'),
+        '<p class="admin-note wide">填写已包含账户折扣的人民币实际成本，不再乘汇率。缓存免费时明确填 0。保存后立即用于新请求，已有账单及用户售价保持原快照。</p>',
+        '<p id="channel-cost-preview" class="admin-note wide" aria-live="polite"></p><p id="channel-cost-error" class="form-error wide" role="alert"></p>',
+      ], '保存渠道成本')
+      const amount = row => row ? ['input', 'output', 'cache'].map(part => microsToYuan(row[part + '_cost_micros_per_million'])).join(' / ') : '未配置'
+      const rows = items.map(item => '<tr><td>' + esc(item.channel_name) + '</td><td>' + esc(item.model_pattern) + '</td><td>' + esc(amount(item)) + '</td><td>' + (Number(item.high_context_multiplier_bps) / 10000) + ' 倍</td><td>' + esc(item.price_source || '未填写') + '</td><td>' + date(item.price_effective_at) + '</td></tr>')
+      const audits = (data.audits || []).map(item => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.actor_name || '系统') + '</td><td>' + esc((data.channels || []).find(c => c.id === item.after_value?.channel_id)?.name || item.after_value?.channel_id || '—') + '<small class="subline">' + esc(item.after_value?.model_pattern) + '</small></td><td>' + esc(amount(item.before_value)) + '</td><td>' + esc(amount(item.after_value)) + '</td><td>' + esc(item.after_value?.price_source || '—') + '</td></tr>')
+      return editor + '<p class="admin-section-title">当前成本 · 输入 / 输出 / 缓存（元 / 百万 Token）</p>' + table(['渠道', '公开模型', '标准成本', '272K+ 倍率', '来源', '生效时间'], rows, '尚未配置渠道成本') + '<p class="admin-section-title">最近 50 次修改</p>' + table(['时间', '修改人', '渠道 / 模型', '修改前', '修改后', '来源'], audits, '暂无成本修改记录')
     }
     if (tab === 'prices') {
       const inputs = ['input', 'output', 'cache'].flatMap((name) => [field(name + 'CostYuanPerMillion', (name === 'input' ? '输入' : name === 'output' ? '输出' : '缓存') + '成本（元/百万 Token）', '0', 'text', 'data-price-cost="' + name + '"'), field(name + 'SellYuanPerMillion', (name === 'input' ? '输入' : name === 'output' ? '输出' : '缓存') + '售价（元/百万 Token）', '0')])
@@ -333,8 +351,8 @@
     }
     state.adminTab = tab
     $$('.admin-tabs .tab').forEach((node) => node.classList.toggle('active', node.dataset.adminTab === tab))
-    const endpoints = { overview: '/api/admin/overview', channels: '/api/admin/channels', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', settings: '/api/admin/settings' }
-    try { $('#admin-content').innerHTML = renderAdmin(tab, await api(endpoints[tab])) } catch (error) { toast(error.message, true) }
+    const endpoints = { overview: '/api/admin/overview', channels: '/api/admin/channels', 'channel-costs': '/api/admin/channel-costs', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', settings: '/api/admin/settings' }
+    try { $('#admin-content').innerHTML = renderAdmin(tab, await api(endpoints[tab])); if (tab === 'channel-costs') { const editor = $('[data-admin-form="channel-cost"]'); if (state.selectedCostChannel && (state.channelCostData.channels || []).some(c => c.id === state.selectedCostChannel)) setFormValue(editor, 'channelId', state.selectedCostChannel); refreshChannelCostEditor(true) } } catch (error) { toast(error.message, true) }
   }
   function setFormValue(editor, name, value) {
     const node = editor.elements.namedItem(name); if (!node) return
@@ -363,6 +381,35 @@
     if (kind === 'plan') Object.entries({ code: item.code, name: item.name, priceYuan: microsToYuan(item.price_micros), quotaYuan: microsToYuan(item.quota_micros), displayOrder: item.display_order, active: item.active && item.enabled }).forEach(([key, value]) => setFormValue(editor, key, value))
     editor.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
+  function refreshChannelCostEditor(changeChannel) {
+    const editor = $('[data-admin-form="channel-cost"]'); if (!editor) return
+    const data = state.channelCostData || {}; const channel = (data.channels || []).find(c => c.id === editor.elements.channelId.value)
+    state.selectedCostChannel = channel?.id || null
+    if (changeChannel) {
+      const models = [...new Set([...Object.keys(channel?.model_map || {}).filter(m => m !== '*'), ...(data.items || []).filter(c => c.channel_id === channel?.id).map(c => c.model_pattern), '*'])]
+      editor.elements.modelPattern.innerHTML = models.map(model => '<option value="' + esc(model) + '">' + esc(model === '*' ? '默认（所有已映射模型）' : model) + '</option>').join('')
+      if (models.includes(state.selectedCostModel)) setFormValue(editor, 'modelPattern', state.selectedCostModel)
+    }
+    const model = editor.elements.modelPattern.value; state.selectedCostModel = model
+    const row = (data.items || []).find(c => c.channel_id === channel?.id && c.model_pattern === model)
+    for (const part of ['input', 'output', 'cache']) setFormValue(editor, part + 'CostYuanPerMillion', row ? microsToYuan(row[part + '_cost_micros_per_million']) : '')
+    setFormValue(editor, 'priceSource', row?.price_source || '')
+    setFormValue(editor, 'highContextIncreasePercent', row ? (Number(row.high_context_multiplier_bps) - 10000) / 100 : 20)
+    editor.dataset.expectedUpdatedAt = row?.updated_at || ''
+    const upstream = channel?.model_map?.[model] || channel?.model_map?.['*']
+    $('#channel-cost-target').textContent = (upstream ? '实际上游模型：' + upstream + '。' : '默认成本适用于未单独配置成本的映射模型。') + (row ? '当前生效时间：' + date(row.price_effective_at) : '当前未配置专属成本，请按供应商账单填写。')
+    $('#channel-cost-error').textContent = ''; previewChannelCost(editor)
+  }
+  function previewChannelCost(editor) {
+    const target = $('#channel-cost-preview'); if (!target) return
+    try {
+      const increase = Number(editor.elements.highContextIncreasePercent.value)
+      if (!Number.isFinite(increase) || increase < 0 || increase > 1000) throw new Error('invalid')
+      const multiplier = BigInt(Math.round(10000 + increase * 100))
+      const values = ['input', 'output', 'cache'].map(part => microsToYuan((yuanToMicros(editor.elements[part + 'CostYuanPerMillion'].value) * multiplier + 9999n) / 10000n))
+      target.textContent = '272K+ 成本预览（输入 / 输出 / 缓存）：' + values.join(' / ') + ' 元 / 百万 Token。'
+    } catch { target.textContent = '请填写三个成本金额后查看 272K+ 成本预览。' }
+  }
   function calculateToken(editor) {
     const bps = editor.elements.namedItem('marginBps')?.value || '8000'
     for (const part of ['input', 'output', 'cache']) { const cost = editor.elements.namedItem(part + 'CostYuanPerMillion'); const sell = editor.elements.namedItem(part + 'SellYuanPerMillion'); if (cost && sell) { try { sell.value = sellAt(cost.value, bps) } catch { sell.value = '' } } }
@@ -375,10 +422,16 @@
     for (const checkbox of editor.querySelectorAll('input[type="checkbox"]')) payload[checkbox.name] = checkbox.checked
     if (kind === 'channel') { try { payload.modelMap = JSON.parse(payload.modelMap || '{}') } catch { throw new Error('模型映射必须是合法 JSON') } }
     if (kind === 'fixed-price' && editor.dataset.manualSell !== 'true') delete payload.sellYuan
-    const endpoints = { channel: '/api/admin/channels', price: '/api/admin/prices', 'fixed-price': '/api/admin/fixed-prices', plan: '/api/admin/plans', 'affiliate-settings': '/api/admin/affiliate/settings', 'site-settings': '/api/admin/settings/site', 'profit-settings': '/api/admin/settings/profit' }
+    const endpoints = { channel: '/api/admin/channels', 'channel-cost': '/api/admin/channel-costs', price: '/api/admin/prices', 'fixed-price': '/api/admin/fixed-prices', plan: '/api/admin/plans', 'affiliate-settings': '/api/admin/affiliate/settings', 'site-settings': '/api/admin/settings/site', 'profit-settings': '/api/admin/settings/profit' }
     const method = kind === 'affiliate-settings' || kind === 'profit-settings' ? 'PATCH' : kind === 'site-settings' ? 'PUT' : 'POST'
+    if (kind === 'channel-cost') {
+      payload.highContextMultiplierBps = Math.round(10000 + Number(payload.highContextIncreasePercent) * 100)
+      payload.expectedUpdatedAt = editor.dataset.expectedUpdatedAt || null
+      $('#channel-cost-error').textContent = ''
+      if (!confirm('确认保存该渠道的实际人民币成本？新请求立即使用，历史账单不变。')) return
+    }
     const button = editor.querySelector('[type="submit"]'); pending(button, true, '保存中…')
-    try { await api(endpoints[kind], { method, body: JSON.stringify(payload) }); toast('已保存'); if (kind === 'site-settings') await loadSite(); await loadAdmin(kind === 'affiliate-settings' ? 'affiliate-admin' : state.adminTab) } finally { pending(button, false) }
+    try { await api(endpoints[kind], { method, body: JSON.stringify(payload) }); toast('已保存'); if (kind === 'site-settings') await loadSite(); await loadAdmin(kind === 'affiliate-settings' ? 'affiliate-admin' : state.adminTab) } catch (error) { if (kind === 'channel-cost') $('#channel-cost-error').textContent = error.message; throw error } finally { pending(button, false) }
   }
   async function deleteAdmin(kind, id, button) {
     const endpoint = { channel: '/api/admin/channels/' + encodeURIComponent(id), price: '/api/admin/prices/' + encodeURIComponent(id), 'fixed-price': '/api/admin/fixed-prices/' + encodeURIComponent(id), plan: '/api/admin/plans/' + encodeURIComponent(id) }[kind]
@@ -488,9 +541,15 @@
   })
   $('#admin-content').addEventListener('input', (event) => {
     const editor = event.target.closest('[data-admin-form]'); if (!editor) return
+    if (editor.dataset.adminForm === 'channel-cost') previewChannelCost(editor)
     if (editor.dataset.adminForm === 'price' && (event.target.matches('[data-price-cost]') || event.target.matches('[data-margin]'))) calculateToken(editor)
     if (editor.dataset.adminForm === 'fixed-price' && (event.target.matches('[data-fixed-cost]') || event.target.matches('[data-fixed-margin]'))) { editor.dataset.manualSell = ''; calculateFixed(editor) }
     if (editor.dataset.adminForm === 'fixed-price' && event.target.matches('[data-fixed-sell]')) editor.dataset.manualSell = 'true'
+  })
+  $('#admin-content').addEventListener('change', (event) => {
+    if (!event.target.closest('[data-admin-form="channel-cost"]')) return
+    if (event.target.name === 'channelId') { state.selectedCostModel = null; refreshChannelCostEditor(true) }
+    else if (event.target.name === 'modelPattern') refreshChannelCostEditor(false)
   })
   $('#admin-content').addEventListener('submit', async (event) => {
     event.preventDefault()
@@ -507,6 +566,8 @@
   })
   $('#admin-content').addEventListener('click', async (event) => {
     const target = event.target; const bootstrap = target.closest('[data-bootstrap]'); const edit = target.closest('.admin-edit'); const remove = target.closest('.admin-delete'); const attempts = target.closest('.admin-attempts'); const resetPlan = target.closest('.admin-reset-plan'); const walletAdjust = target.closest('.wallet-adjust')
+    const costButton = target.closest('[data-channel-cost]')
+    if (costButton) { state.selectedCostChannel = costButton.dataset.channelCost; state.selectedCostModel = null; await loadAdmin('channel-costs'); return }
     if (walletAdjust) {
       state.walletAdjustUserId = walletAdjust.dataset.id
       $('#wallet-adjust-user').textContent = '正在调整用户：' + (walletAdjust.dataset.username || '')

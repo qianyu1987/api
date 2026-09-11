@@ -221,6 +221,7 @@ describe('relay HTTP integration and billing boundary', () => {
       for (const url of ['/api/admin/overview', '/api/admin/risk-alerts', '/api/admin/channel-costs', '/api/admin/channels', '/api/admin/usage', '/api/admin/profit/export']) {
         expect((await services.app.inject({ url, headers })).statusCode).toBe(403)
       }
+      expect((await services.app.inject({ method: 'POST', url: '/api/admin/channel-costs', headers, payload: {} })).statusCode).toBe(403)
     } else {
       const adminUsage = await services.app.inject({ url: '/api/admin/usage', headers })
       expect(adminUsage.json().items[0]).toMatchObject({ upstream_model: upstream, fallbackCostPending: true })

@@ -27,6 +27,7 @@ import { PublicModelSse, rewritePublicModel } from './lib/public-model.js'
 import { decodeResponseBuffer, decodeResponseStream } from './lib/response-compression.js'
 import { ProfitService } from './services/profit.js'
 import { fallbackCostAlerts, fallbackCostPending, pendingFallbackCostSql } from './lib/cost-status.js'
+import { ChannelCostService } from './services/channel-costs.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -693,26 +694,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   })
   app.get('/api/admin/channel-costs', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
-    return { items: await db.query<any>(`SELECT c.name AS channel_name,c.base_url,m.* FROM channel_model_costs m JOIN channels c ON c.id=m.channel_id ORDER BY c.priority,m.model_pattern`) }
+    return new ChannelCostService(db).list()
   })
   app.post('/api/admin/channel-costs', async (request, reply) => {
     const actor = await requireAdmin(request, reply); if (!actor) return
     try {
-      const b = (request.body || {}) as any
-      const channelId = cleanText(b.channelId, '渠道', 64)
-      const modelPattern = cleanText(b.modelPattern || '*', '模型匹配', 256)
-      const input = yuanInput(b.inputCostYuanPerMillion ?? 0, '输入成本')
-      const output = yuanInput(b.outputCostYuanPerMillion ?? 0, '输出成本')
-      const cache = yuanInput(b.cacheCostYuanPerMillion ?? 0, '缓存成本')
-      const source = String(b.priceSource || 'manual').slice(0, 512)
-      const effectiveAt = b.priceEffectiveAt ? new Date(String(b.priceEffectiveAt)) : new Date()
-      if (Number.isNaN(effectiveAt.getTime())) throw new Error('成本生效时间无效')
-      const row = await db.one<any>(`INSERT INTO channel_model_costs(channel_id,model_pattern,input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,price_source,price_effective_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7)
-        ON CONFLICT(channel_id,model_pattern) DO UPDATE SET input_cost_micros_per_million=excluded.input_cost_micros_per_million,output_cost_micros_per_million=excluded.output_cost_micros_per_million,cache_cost_micros_per_million=excluded.cache_cost_micros_per_million,price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,updated_at=now()
-        RETURNING *`, [channelId, modelPattern, input, output, cache, source, effectiveAt])
-      await db.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,after_value) VALUES($1,'channel_model_cost',concat($2,':',$3),$4)`, [actor.id, channelId, modelPattern, JSON.stringify(row)])
-      return row
+      return await new ChannelCostService(db).save(request.body || {}, actor.id)
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
   app.post('/api/admin/channels', async (request, reply) => { if (!await requireAdmin(request, reply)) return; try { return await channels.upsert(request.body as any) } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) } })
