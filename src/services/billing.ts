@@ -831,6 +831,7 @@ export class BillingService {
     const rows = await this.db.query<any>(
       `SELECT request_id FROM billing_reservations
        WHERE status = 'reserved' AND expires_at <= now()
+         AND NOT EXISTS (SELECT 1 FROM chat_turns t WHERE t.request_id=billing_reservations.request_id AND t.status='pending')
        ORDER BY expires_at ASC LIMIT $1`,
       [Math.min(5000, Math.max(1, Math.floor(limit)))],
     )

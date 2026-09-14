@@ -1,7 +1,10 @@
 import { StringDecoder } from 'node:string_decoder'
 
+export const SOL_FALLBACK_UPSTREAM_MODELS = ['agnes-3.0-flash', 'agnes-2.5-flash'] as const
+
 export function isSolFallback(requestedModel: string, upstreamModel: string): boolean {
-  return requestedModel === 'gpt-5.6-sol' && upstreamModel === 'agnes-2.5-flash'
+  return requestedModel === 'gpt-5.6-sol'
+    && SOL_FALLBACK_UPSTREAM_MODELS.includes(upstreamModel as typeof SOL_FALLBACK_UPSTREAM_MODELS[number])
 }
 
 /** Rewrite protocol metadata only; model fields inside tool results are user data. */

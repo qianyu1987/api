@@ -6,10 +6,10 @@ import rateLimit from '@fastify/rate-limit'
 import sensible from '@fastify/sensible'
 import fastifyStatic from '@fastify/static'
 import QRCode from 'qrcode'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, randomBytes } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { PassThrough } from 'node:stream'
+import { PassThrough, Readable } from 'node:stream'
 import { StringDecoder } from 'node:string_decoder'
 import { loadConfig, type AppConfig } from './config.js'
 import { Database } from './db/index.js'
@@ -27,6 +27,10 @@ import { PublicModelSse, rewritePublicModel } from './lib/public-model.js'
 import { decodeResponseBuffer, decodeResponseStream } from './lib/response-compression.js'
 import { ProfitService } from './services/profit.js'
 import { fallbackCostAlerts, fallbackCostPending, pendingFallbackCostSql } from './lib/cost-status.js'
+import { mediaUploadType } from './lib/media-upload.js'
+import { MediaService } from './services/media.js'
+import { mediaResultUrl, mediaPrice } from './lib/media.js'
+import { ChatService } from './services/chat.js'
 import { ChannelCostService } from './services/channel-costs.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -291,7 +295,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     return replacement
   })
 
-  const requireSession = async (request: any, reply: any): Promise<PublicUser | null> => {
+  const requireSession = async (request: any, reply: any, optional = false): Promise<PublicUser | null> => {
     try {
       await request.jwtVerify()
       const payload = request.user as any
@@ -300,7 +304,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       if (!user || user.disabled_at || user.status !== 'active') throw new Error('登录已失效')
       return { id: String(user.id), username: user.username, email: user.email || null, emailVerified: Boolean(user.email_verified_at), role: user.role === 'admin' ? 'admin' : 'user', inviteCode: user.invite_code, createdAt: new Date(user.created_at).toISOString() }
     } catch {
-      reply.code(401).send({ error: { message: '请先登录', type: 'authentication_error' } })
+      if (!optional) reply.code(401).send({ error: { message: '请先登录', type: 'authentication_error' } })
       return null
     }
   }
@@ -310,8 +314,169 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     return user
   }
 
+  const chat = new ChatService(db, config, billing)
+  app.get('/chat', async (_request, reply) => reply.sendFile('index.html'))
+  app.get('/api/me/chat/quota', async (request,reply) => { const u=await requireSession(request,reply);if(u)return chat.quota(u.id) })
+  app.get('/api/me/chat/conversations', async (request,reply) => { const u=await requireSession(request,reply);if(u)return chat.list(u.id) })
+  app.post('/api/me/chat/conversations', async (request,reply) => { const u=await requireSession(request,reply);if(u)return chat.create(u.id) })
+  app.get('/api/me/chat/conversations/:id/messages', async (request,reply) => { const u=await requireSession(request,reply);if(u)return chat.messages(u.id,String((request.params as any).id)) })
+  app.delete('/api/me/chat/conversations/:id', async (request,reply) => { const u=await requireSession(request,reply);if(u)return chat.archive(u.id,String((request.params as any).id)) })
+  app.post('/api/me/chat/conversations/:id/messages', {bodyLimit:64000}, async (request,reply) => {
+    const u=await requireSession(request,reply);if(!u)return
+    const controller=new AbortController()
+    const close=()=>{if(!reply.raw.writableEnded)controller.abort()}
+    reply.raw.once('close',close)
+    try {return await chat.send(u.id,String((request.params as any).id),request.body,controller.signal)} finally {reply.raw.removeListener('close',close)}
+  })
+  const media = new MediaService(db, config)
+  const mediaUser = async (request: any, reply: any) => {
+    const raw = bearer(request.headers.authorization)
+    if (!raw) return requireSession(request, reply)
+    try { return (await auth.authenticateApiKey(raw)).user } catch { reply.code(401).send({ error: { message: 'API Key 无效' } }); return null }
+  }
+  app.post('/api/me/media/uploads', {bodyLimit:20*1024*1024,config:{rateLimit:{max:12,timeWindow:'1 minute'}},preValidation:async(request,reply)=>{await mediaUser(request,reply)}}, async(request,reply)=>{
+    const user=await mediaUser(request,reply);if(!user)return
+    const data=request.body as Buffer, type=mediaUploadType(data), token=randomBytes(32).toString('hex')
+    await db.tx(async client=>{
+      await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[user.id])
+      await client.query('DELETE FROM media_uploads WHERE expires_at<now()')
+      const size=await client.query('SELECT COALESCE(sum(octet_length(content)),0) AS bytes FROM media_uploads WHERE user_id=$1',[user.id])
+      if(Number(size.rows[0].bytes)+data.length>100*1024*1024)throw Object.assign(new Error('临时素材已达 100 MB，请删除不需要的素材后重试'),{statusCode:413})
+      await client.query('INSERT INTO media_uploads(token,user_id,content_type,content) VALUES($1,$2,$3,$4)',[token,user.id,type,data])
+    })
+    return {url:config.publicBaseUrl.replace(/\/$/,'')+'/api/media/assets/'+token,token,contentType:type,expiresInDays:7}
+  })
+  app.get('/api/media/assets/:token',async(request,reply)=>{
+    const token=String((request.params as any).token)
+    if(!/^[a-f0-9]{64}$/.test(token))return reply.code(404).send()
+    const row=await db.one<any>('SELECT content_type,content FROM media_uploads WHERE token=$1 AND expires_at>now()',[token])
+    if(!row)return reply.code(404).send()
+    return reply.header('X-Content-Type-Options','nosniff').header('Cache-Control','private, max-age=300').type(row.content_type).send(row.content)
+  })
+  app.delete('/api/me/media/uploads/:token',async(request,reply)=>{
+    const user=await mediaUser(request,reply);if(!user)return
+    await db.query('DELETE FROM media_uploads WHERE token=$1 AND user_id=$2',[String((request.params as any).token),user.id]);return {ok:true}
+  })
+  app.get('/api/me/media/catalog', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;const catalog=await media.catalog();const gift=await db.one('SELECT images_remaining,video_seconds_remaining FROM media_welcome_gifts WHERE user_id=$1',[user.id]);return {...catalog,gift}})
+  app.post('/api/me/media/quote', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;const q=await media.quote(user.id,request.body);return {chargeMicros:q.chargeMicros,quoteToken:q.quoteToken,walletOnly:q.walletOnly,gift:q.gift}})
+  app.post('/api/me/media/expand-prompt', {config:{rateLimit:{max:5,timeWindow:'1 minute'}}}, async(request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;return media.expandPrompt(request.body)})
+  app.post('/api/me/media/tasks', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;reply.code(202);return media.create(user.id,request.body)})
+  app.get('/api/me/media/tasks', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;return media.list(user.id)})
+  app.get('/api/me/media/tasks/:id', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;return media.get(user.id,String((request.params as any).id))})
+  const sendStoredMedia = async (reply:any, taskId:string) => {
+    const asset=await db.one<any>('SELECT content_type,content FROM media_task_assets WHERE task_id=$1',[taskId])
+    if(!asset)return false
+    return reply.header('X-Content-Type-Options','nosniff').header('Cache-Control','private, no-store').type(asset.content_type).send(asset.content)
+  }
+  app.get('/api/me/media/tasks/:id/result',async(request,reply)=>{
+    const user=await mediaUser(request,reply);if(!user)return
+    const id=String((request.params as any).id)
+    if(!/^[0-9a-f-]{36}$/i.test(id))return reply.code(404).send()
+    const task=await db.one<any>("SELECT result_url,kind FROM media_tasks WHERE id=$1 AND user_id=$2 AND status='completed'",[id,user.id])
+    if(!task?.result_url)return reply.code(404).send({error:{message:'作品不存在或尚未完成'}})
+    if(task.result_url.startsWith('stored://'))return (await sendStoredMedia(reply,id))||reply.code(404).send({error:{message:'作品不存在或尚未完成'}})
+    const url=new URL(task.result_url)
+    if(url.protocol!=='https:'||url.hostname!=='platform-outputs.agnes-ai.space'||url.port||url.username||url.password)return reply.code(502).send({error:{message:'作品地址暂不可读取，请联系管理员'}})
+    try {
+      const headers:Record<string,string>={}
+      if(request.headers.range&&/^bytes=\d*-\d*$/.test(request.headers.range))headers.range=request.headers.range
+      const upstream=await fetch(url,{headers,redirect:'error',signal:AbortSignal.timeout(120000)})
+      if(!upstream.ok||!upstream.body)return reply.code(502).send({error:{message:'作品暂时无法读取，请稍后重试'}})
+      const type=upstream.headers.get('content-type')||''
+      if(!/^(image\/(png|jpeg|webp)|video\/mp4)(;|$)/i.test(type))return reply.code(502).send({error:{message:'作品格式异常'}})
+      for(const name of ['content-length','content-range','accept-ranges']){const value=upstream.headers.get(name);if(value)reply.header(name,value)}
+      reply.header('Cache-Control','private, no-store').header('X-Content-Type-Options','nosniff').type(type).code(upstream.status)
+      return reply.send(Readable.fromWeb(upstream.body as any))
+    } catch {return reply.code(502).send({error:{message:'作品读取失败，请稍后重试'}})}
+  })
+  const mediaProxy = async (reply:any, resultUrl:string, range?:string) => {
+    const url=new URL(resultUrl)
+    if(url.protocol!=='https:'||url.hostname!=='platform-outputs.agnes-ai.space'||url.port||url.username||url.password)return reply.code(502).send({error:{message:'作品地址暂不可读取'}})
+    try {
+      const headers:Record<string,string>={}
+      if(range&&/^bytes=\d*-\d*$/.test(range))headers.range=range
+      const upstream=await fetch(url,{headers,redirect:'error',signal:AbortSignal.timeout(120000)})
+      if(!upstream.ok||!upstream.body)return reply.code(502).send({error:{message:'作品暂时无法读取，请稍后重试'}})
+      const type=upstream.headers.get('content-type')||''
+      if(!/^(image\/(png|jpeg|webp)|video\/mp4)(;|$)/i.test(type))return reply.code(502).send({error:{message:'作品格式异常'}})
+      for(const name of ['content-length','content-range','accept-ranges']){const value=upstream.headers.get(name);if(value)reply.header(name,value)}
+      return reply.header('Cache-Control','private, no-store').header('X-Content-Type-Options','nosniff').type(type).code(upstream.status).send(Readable.fromWeb(upstream.body as any))
+    } catch {return reply.code(502).send({error:{message:'作品读取失败，请稍后重试'}})}
+  }
+  app.get('/api/gallery',async(request)=>{
+    const kind=String((request.query as any)?.kind||'')
+    if(kind&&!['image','video'].includes(kind))throw Object.assign(new Error('作品类型无效'),{statusCode:400})
+    const rows=await db.query<any>(`SELECT id,kind,gallery_title,gallery_featured,finished_at FROM media_tasks
+      WHERE gallery_status='published' AND status='completed' AND result_url IS NOT NULL AND ($1='' OR kind=$1)
+      ORDER BY gallery_featured DESC,finished_at DESC,id DESC LIMIT 60`,[kind])
+    return {items:rows.map(row=>({id:row.id,kind:row.kind,title:row.gallery_title|| (row.kind==='video'?'视频作品':'图片作品'),featured:row.gallery_featured,createdAt:row.finished_at,assetUrl:'/api/gallery/'+encodeURIComponent(row.id)+'/asset'}))}
+  })
+  app.get('/api/gallery/:id/asset',async(request,reply)=>{
+    const id=String((request.params as any).id)
+    if(!/^[0-9a-f-]{36}$/i.test(id))return reply.code(404).send()
+    const task=await db.one<any>("SELECT result_url FROM media_tasks WHERE id=$1 AND gallery_status='published' AND status='completed'",[id])
+    if(!task?.result_url)return reply.code(404).send()
+    if(task.result_url.startsWith('stored://'))return (await sendStoredMedia(reply,id))||reply.code(404).send()
+    return mediaProxy(reply,task.result_url,request.headers.range)
+  })
+  app.get('/api/admin/media/tasks/:id/result',async(request,reply)=>{
+    if(!await requireAdmin(request,reply))return
+    const id=String((request.params as any).id)
+    if(!/^[0-9a-f-]{36}$/i.test(id))return reply.code(404).send()
+    const task=await db.one<any>("SELECT result_url FROM media_tasks WHERE id=$1 AND status='completed'",[id])
+    if(!task?.result_url)return reply.code(404).send()
+    if(task.result_url.startsWith('stored://'))return (await sendStoredMedia(reply,id))||reply.code(404).send()
+    return mediaProxy(reply,task.result_url,request.headers.range)
+  })
+  app.get('/api/admin/media',async(request,reply)=>{
+    if(!await requireAdmin(request,reply))return
+    const [prices,tasks,channels]=await Promise.all([db.query('SELECT * FROM media_prices ORDER BY model,size'),db.query(`SELECT t.id,t.user_id,u.username,t.kind,t.model,t.status,t.result_url,t.gallery_status,t.gallery_featured,t.gallery_title,t.finished_at,t.charge_micros,t.actual_cost_micros,t.price_snapshot,t.error_message,t.created_at FROM media_tasks t JOIN users u ON u.id=t.user_id ORDER BY t.created_at DESC LIMIT 100`),db.query("SELECT id,name FROM channels WHERE deleted_at IS NULL AND base_url IN ('https://apihub.agnes-ai.com/v1','https://cdn.yyapi.cloud/v1','https://ripp.best/v1')")])
+    return {prices,tasks,channels}
+  })
+  app.patch('/api/admin/media/tasks/:id/gallery',async(request,reply)=>{
+    const actor=await requireAdmin(request,reply);if(!actor)return
+    const id=String((request.params as any).id), body=request.body as any
+    const status=String(body?.status||''), title=String(body?.title||'').trim()
+    if(!['private','published','hidden'].includes(status))throw Object.assign(new Error('广场状态无效'),{statusCode:400})
+    if(title.length>80)throw Object.assign(new Error('作品标题最多 80 字'),{statusCode:400})
+    return db.tx(async client=>{
+      const before=await client.query('SELECT id,status,result_url,gallery_status,gallery_featured,gallery_title FROM media_tasks WHERE id=$1 FOR UPDATE',[id])
+      if(!before.rows.length)throw Object.assign(new Error('作品不存在'),{statusCode:404})
+      if(status==='published'&&(before.rows[0].status!=='completed'||!before.rows[0].result_url))throw Object.assign(new Error('只有已完成作品可以发布'),{statusCode:400})
+      const after=await client.query('UPDATE media_tasks SET gallery_status=$2,gallery_featured=CASE WHEN $2=\'published\' THEN $3 ELSE false END,gallery_title=$4,gallery_moderated_at=now(),gallery_moderated_by=$5 WHERE id=$1 RETURNING id,gallery_status,gallery_featured,gallery_title',[id,status,body?.featured===true,title||null,actor.id])
+      await client.query("INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'media_gallery',$2,$3,$4)",[actor.id,id,JSON.stringify(before.rows[0]),JSON.stringify(after.rows[0])])
+      return {ok:true,item:after.rows[0]}
+    })
+  })
+  app.post('/api/admin/media/prices',async(request,reply)=>{
+    const actor=await requireAdmin(request,reply);if(!actor)return
+    const b=request.body as any
+    const normal=BigInt(yuanInput(b.normalCostYuan,'常规成本')),actual=BigInt(yuanInput(b.actualCostYuan,'实际成本'))
+    const source=cleanText(b.costSource,'成本来源',512)
+    if(!source)throw Object.assign(new Error('请填写已核实成本来源'),{statusCode:400})
+    const rules=await profit.overview();mediaPrice(normal>actual?normal:actual,config.walletTopupMultiplierBps,rules.paymentFeeRateBps,rules.affiliateRateBps)
+    return db.tx(async client=>{
+      const channel=await client.query("SELECT id,base_url FROM channels WHERE id=$1 AND deleted_at IS NULL AND base_url IN ('https://apihub.agnes-ai.com/v1','https://cdn.yyapi.cloud/v1','https://ripp.best/v1')",[b.channelId]);if(!channel.rows.length)throw Object.assign(new Error('请选择已允许的媒体渠道'),{statusCode:400})
+      const expected=b.model==='gpt-image-2'?'https://cdn.yyapi.cloud/v1':b.model==='gpt-image-2.5'?'https://ripp.best/v1':'https://apihub.agnes-ai.com/v1';if(channel.rows[0].base_url!==expected)throw Object.assign(new Error('该规格与所选媒体渠道不匹配'),{statusCode:400})
+      const before=await client.query('SELECT * FROM media_prices WHERE model=$1 AND size=$2 FOR UPDATE',[b.model,b.size]);if(!before.rows.length)throw Object.assign(new Error('模型规格无效'),{statusCode:400})
+      const after=await client.query('UPDATE media_prices SET channel_id=$1,normal_cost_micros=$2,actual_cost_micros=$3,cost_source=$4,enabled=$5,updated_at=now() WHERE model=$6 AND size=$7 RETURNING *',[b.channelId,normal.toString(),actual.toString(),source,b.enabled===true,b.model,b.size])
+      await client.query("INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'media_price',$2,$3,$4)",[actor.id,b.model+':'+b.size,JSON.stringify(before.rows[0]),JSON.stringify(after.rows[0])]);return {ok:true}
+    })
+  })
+  app.post('/api/admin/media/tasks/:id/resolve',async(request,reply)=>{
+    const actor=await requireAdmin(request,reply);if(!actor)return
+    const id=String((request.params as any).id),b=request.body as any
+    const task=await db.one<any>("SELECT * FROM media_tasks WHERE id=$1 AND status='unknown'",[id]);if(!task)throw Object.assign(new Error('仅可处理待核实任务'),{statusCode:400})
+    if(typeof b.reason!=='string'||b.reason.trim().length<5)throw Object.assign(new Error('请填写上游核实依据'),{statusCode:400})
+    if(task.kind==='video'&&typeof b.upstreamId==='string'&&/^[a-zA-Z0-9_-]{1,256}$/.test(b.upstreamId)) {
+      await db.query("UPDATE media_tasks SET upstream_id=$2,status='processing',next_poll_at=now(),lease_until=NULL WHERE id=$1 AND status='unknown'",[id,b.upstreamId])
+    }else if(b.resultUrl && mediaResultUrl({url:b.resultUrl})){await media.finish(id,true,mediaResultUrl({url:b.resultUrl}),null)}else if(b.confirmedFailed===true){await media.finish(id,false,null,'管理员核实上游失败，冻结额度已释放')}
+    else throw Object.assign(new Error('请提供视频任务编号或确认上游失败'),{statusCode:400})
+    await db.query("INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'media_resolution',$2,$3,$4)",[actor.id,id,JSON.stringify({status:task.status}),JSON.stringify({reason:b.reason.slice(0,512),confirmedFailed:b.confirmedFailed===true,upstreamId:b.upstreamId||null})]);return {ok:true}
+  })
   app.get('/healthz', async () => ({ ok: true, service: 'relay-station' }))
   app.get('/', async (_request, reply) => reply.sendFile('index.html'))
+  app.get('/login', async (_request, reply) => reply.sendFile('index.html'))
   app.get('/register', async (_request, reply) => reply.sendFile('index.html'))
   app.get('/terms', async (_request, reply) => reply.sendFile('terms.html'))
   app.get('/privacy', async (_request, reply) => reply.sendFile('privacy.html'))
@@ -322,6 +487,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       name: values.site_name || 'GPT TOKEN',
       title: values.site_title || 'GPT TOKEN | OpenAI 兼容 API 控制台',
       logoUrl: values.site_logo_url || '/assets/gpt-token-mark-192.png',
+      apiBaseUrl: `${config.publicBaseUrl.replace(/\/$/, '')}/v1`,
+      walletTopupMultiplierBps: config.walletTopupMultiplierBps,
     }
   })
 
@@ -375,6 +542,11 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       maxAge: 0,
     })
     return { ok: true }
+  })
+  app.get('/api/auth/session', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    const user = await requireSession(request, reply, true)
+    return { authenticated: Boolean(user), user }
   })
   app.get('/api/auth/me', async (request, reply) => { const user = await requireSession(request, reply); return user ? { user } : undefined })
 
@@ -482,7 +654,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const adminFinanceSelect = user.role === 'admin' ? ', u.cost_micros, u.profit_micros' : ''
       if (cursor) { values.push(new Date(cursor.t), cursor.id); where.push(`(u.started_at, u.request_id) < ($${values.length - 1}, $${values.length})`) }
       const rows = await db.query<any>(`SELECT
-          u.created_at, u.started_at, u.request_id, u.api_key_id, u.key_id,
+          u.created_at, u.started_at, u.request_id, u.request_path, u.api_key_id, u.key_id,
           u.api_key_name_snapshot, u.requested_model, u.upstream_model,
           u.final_channel_id, u.final_channel_name_snapshot,
           u.input_tokens, u.output_tokens, u.cache_tokens, u.reported_total_tokens,
@@ -498,7 +670,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         time: row.started_at || row.created_at, requestId: row.request_id,
         keyId: row.api_key_id || row.key_id, keyName: row.api_key_name_snapshot || row.current_key_name || '',
         model: row.requested_model, upstreamModel: user.role === 'admin' ? row.upstream_model : row.requested_model,
-        channel: row.final_channel_name_snapshot || row.current_channel_name || '',
+        channel: user.role !== 'admin' && row.request_path === '/v1/site-chat' ? 'AI 对话' : row.final_channel_name_snapshot || row.current_channel_name || '',
         inputTokens: String(row.input_tokens), outputTokens: String(row.output_tokens), cacheTokens: String(row.cache_tokens), totalTokens: String(row.reported_total_tokens),
         planCharge: publicMoney(row.plan_charge_micros), walletCharge: publicMoney(row.wallet_charge_micros), charge: publicMoney(row.charge_micros),
         statusCode: row.status_code, status: row.status, success: row.success,
@@ -635,8 +807,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
 
   app.get('/api/admin/channels', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
-    const [items, alerts] = await Promise.all([channels.allForAdmin(), fallbackCostAlerts(db)])
-    return { items: items.map(item => ({ ...item, fallbackCostPending: alerts.some(alert => alert.resource_id === item.id) })) }
+    const force = String((request.query as any)?.refreshBalance || '') === '1'
+    const [items, alerts, balances] = await Promise.all([channels.allForAdmin(), fallbackCostAlerts(db), channels.upstreamBalances(force)])
+    return { items: items.map(item => ({ ...item, upstreamBalance: balances[item.id], fallbackCostPending: alerts.some(alert => alert.resource_id === item.id) })) }
   })
 
   app.get('/api/admin/overview', async (request, reply) => {
@@ -657,7 +830,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       db.query<any>(`SELECT id,kind,severity,message,status,created_at FROM risk_alerts WHERE status <> 'resolved' ORDER BY severity DESC,created_at DESC LIMIT 50`),
       db.query<any>(`SELECT c.id,c.name,c.enabled,c.failure_count,c.last_success_at,c.last_failure_at,c.circuit_open_until,
         COALESCE(x.requests,0)::int AS requests,COALESCE(x.failures,0)::int AS failures
-        FROM channels c LEFT JOIN (SELECT final_channel_id,count(*) AS requests,count(*) FILTER(WHERE NOT success) AS failures FROM usage_logs WHERE started_at >= $1 AND started_at < $2 GROUP BY final_channel_id) x ON x.final_channel_id=c.id ORDER BY c.priority,c.name`, [from, to]),
+        FROM channels c LEFT JOIN (SELECT final_channel_id,count(*) AS requests,count(*) FILTER(WHERE NOT success) AS failures FROM usage_logs WHERE started_at >= $1 AND started_at < $2 GROUP BY final_channel_id) x ON x.final_channel_id=c.id WHERE c.deleted_at IS NULL ORDER BY c.priority,c.name`, [from, to]),
       fallbackCostAlerts(db),
     ])
     const revenue = BigInt(String(usage?.revenue || 0)); const cost = BigInt(String(usage?.cost || 0)); const rebates = BigInt(String(fees?.rebates || 0))
@@ -703,7 +876,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
   app.post('/api/admin/channels', async (request, reply) => { if (!await requireAdmin(request, reply)) return; try { return await channels.upsert(request.body as any) } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) } })
-  app.delete('/api/admin/channels/:id', async (request, reply) => { if (!await requireAdmin(request, reply)) return; await channels.remove(String((request.params as any).id)); return { ok: true } })
+  app.delete('/api/admin/channels/:id', async (request, reply) => { const actor = await requireAdmin(request, reply); if (!actor) return; await channels.remove(String((request.params as any).id), actor.id); return { ok: true } })
+  app.delete('/api/admin/channels/:id/archive', async (request, reply) => { const actor = await requireAdmin(request, reply); if (!actor) return; await channels.archive(String((request.params as any).id), actor.id); return { ok: true } })
   app.get('/api/admin/prices', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
     const items = await db.query<any>('SELECT * FROM model_prices ORDER BY model_pattern')
@@ -1145,6 +1319,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     let parsed: any = {}
     if (body && body.length) { try { parsed = JSON.parse(body.toString('utf8')) } catch { parsed = {} } }
     const model = String(parsed.model || request.headers['x-model'] || '').trim()
+    if (['agnes-image-2.5-flash','agnes-video-2.5-flash','gpt-image-2','gpt-image-2.5'].includes(model)) { reply.code(400).send({ error: { message: '媒体生成请使用 /api/me/media/quote 和 /api/me/media/tasks，支持 Bearer API Key；先报价再创建任务，查询进度不收费' } }); return }
     const isMetadata = request.method === 'GET' && (path === '/models' || path.startsWith('/models/'))
     const requestPath = `/v1${path}`
     let price: PriceSnapshot | null = null
@@ -1367,6 +1542,11 @@ export async function start(): Promise<void> {
     }
     services.app.log.warn({ err: error }, 'database bootstrap unavailable; serving health/static routes')
   }
+  const media = new MediaService(services.db, config)
+  let mediaBusy = false
+  const mediaTimer = setInterval(() => { if(mediaBusy)return;mediaBusy=true;void media.tick().catch(()=>services.app.log.error('Media worker tick failed')).finally(()=>{mediaBusy=false}) }, 3000)
+  mediaTimer.unref()
+  services.app.addHook('onClose',async()=>{clearInterval(mediaTimer)})
   await services.app.listen({ host: config.host, port: config.port })
 }
 

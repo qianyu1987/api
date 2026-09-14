@@ -13,8 +13,8 @@ export class ChannelCostService {
 
   async list() {
     const [items, channels, audits] = await Promise.all([
-      this.db.query(`SELECT c.name AS channel_name,c.base_url,m.* FROM channel_model_costs m JOIN channels c ON c.id=m.channel_id ORDER BY c.priority,m.model_pattern`),
-      this.db.query(`SELECT id,name,model_map,enabled FROM channels ORDER BY priority,name`),
+      this.db.query(`SELECT c.name AS channel_name,c.base_url,m.* FROM channel_model_costs m JOIN channels c ON c.id=m.channel_id WHERE c.deleted_at IS NULL ORDER BY c.priority,m.model_pattern`),
+      this.db.query(`SELECT id,name,model_map,enabled FROM channels WHERE deleted_at IS NULL ORDER BY priority,name`),
       this.db.query(`SELECT a.id,a.resource_id,a.before_value,a.after_value,a.created_at,u.username AS actor_name
         FROM config_audit_logs a LEFT JOIN users u ON u.id=a.actor_user_id
         WHERE a.resource_type='channel_model_cost' ORDER BY a.created_at DESC,a.id DESC LIMIT 50`),
@@ -44,7 +44,7 @@ export class ChannelCostService {
     if (body.priceEffectiveAt && Number.isNaN(new Date(body.priceEffectiveAt).getTime())) invalid('成本生效时间无效')
     return this.db.tx(async client => {
       // Serialize both first writes and subsequent edits for the channel.
-      const channel = await one<any>(client, 'SELECT id,name,model_map FROM channels WHERE id=$1 FOR UPDATE', [channelId])
+      const channel = await one<any>(client, 'SELECT id,name,model_map FROM channels WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [channelId])
       if (!channel) invalid('渠道不存在', 404)
       if (model !== '*' && !Object.hasOwn(channel.model_map || {}, model) && !Object.hasOwn(channel.model_map || {}, '*')) invalid('模型未配置在该渠道映射中，请选择公开模型名')
       const before = await one<any>(client, 'SELECT * FROM channel_model_costs WHERE channel_id=$1 AND model_pattern=$2 FOR UPDATE', [channelId, model])

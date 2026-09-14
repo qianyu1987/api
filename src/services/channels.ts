@@ -2,7 +2,7 @@ import { request, type Dispatcher } from 'undici'
 import { decryptSecret } from '../lib/crypto.js'
 import { isSolFallback } from '../lib/public-model.js'
 import type { AppConfig } from '../config.js'
-import { Database } from '../db/index.js'
+import { Database, one } from '../db/index.js'
 
 export type Channel = {
   id: string
@@ -33,6 +33,27 @@ export type RelayResult = {
   channel: Channel
   attempts: RelayAttempt[]
   upstreamModel: string
+}
+
+export type UpstreamBalance = {
+  status: 'available' | 'unsupported' | 'error'
+  remaining: number | null
+  quota: number | null
+  used: number | null
+  unit: string | null
+  checkedAt: string
+  message: string | null
+}
+
+export function parseUpstreamUsage(payload: unknown): Omit<UpstreamBalance, 'checkedAt'> | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const data = payload as Record<string, any>
+  const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+  const remaining = number(data.remaining ?? data.quota?.remaining)
+  const quota = number(data.quota?.limit ?? data.quota)
+  const used = number(data.quota?.used ?? data.usage?.total?.actual_cost)
+  if (remaining === null) return null
+  return { status: 'available', remaining, quota, used, unit: typeof data.unit === 'string' && data.unit.length <= 16 ? data.unit : null, message: null }
 }
 
 function jsonMap(value: unknown): Record<string, string> {
@@ -178,16 +199,61 @@ export function safeRelayError(kind: RelayAttempt['outcome']): Pick<RelayAttempt
 }
 
 export class ChannelService {
+  private readonly upstreamBalanceCache = new Map<string, { expiresAt: number; value: UpstreamBalance }>()
   constructor(private readonly db: Database, private readonly config: AppConfig) {}
 
   async list(): Promise<Channel[]> {
-    const rows = await this.db.query<any>(`SELECT id, name, base_url, encrypted_api_key, priority, model_map, timeout_ms FROM channels WHERE enabled = true AND (circuit_open_until IS NULL OR circuit_open_until < now()) ORDER BY priority ASC, created_at ASC`)
+    const rows = await this.db.query<any>(`SELECT id, name, base_url, encrypted_api_key, priority, model_map, timeout_ms FROM channels WHERE deleted_at IS NULL AND enabled = true AND (circuit_open_until IS NULL OR circuit_open_until < now()) ORDER BY priority ASC, created_at ASC`)
     return rows.map((row) => ({ id: String(row.id), name: row.name, baseUrl: row.base_url, encryptedApiKey: row.encrypted_api_key, priority: Number(row.priority), modelMap: jsonMap(row.model_map), timeoutMs: Number(row.timeout_ms) || 30_000 }))
   }
 
   async allForAdmin(): Promise<any[]> {
-    const rows = await this.db.query<any>(`SELECT id, name, base_url, priority, model_map, timeout_ms, enabled, failure_count, circuit_open_until, created_at, updated_at FROM channels ORDER BY priority ASC, created_at ASC`)
+    const rows = await this.db.query<any>(`SELECT id, name, base_url, priority, model_map, timeout_ms, enabled, failure_count, circuit_open_until, created_at, updated_at FROM channels WHERE deleted_at IS NULL ORDER BY priority ASC, created_at ASC`)
     return rows.map((row) => ({ id: String(row.id), name: row.name, baseUrl: row.base_url, priority: Number(row.priority), modelMap: row.model_map || {}, timeoutMs: Number(row.timeout_ms), enabled: row.enabled, failureCount: Number(row.failure_count), circuitOpenUntil: row.circuit_open_until, createdAt: row.created_at, updatedAt: row.updated_at }))
+  }
+
+  async upstreamBalances(force = false): Promise<Record<string, UpstreamBalance>> {
+    const rows = await this.db.query<any>(`SELECT id,name,base_url,encrypted_api_key FROM channels WHERE deleted_at IS NULL ORDER BY priority ASC,created_at ASC`)
+    const entries = await Promise.all(rows.map(async row => {
+      const checkedAt = new Date().toISOString()
+      const cached = this.upstreamBalanceCache.get(String(row.id))
+      if (!force && cached && cached.expiresAt > Date.now()) return [String(row.id), cached.value] as const
+      let value: UpstreamBalance
+      const origin = new URL(row.base_url).origin
+      if (origin === 'https://cdn.yyapi.cloud' || origin === 'https://ripp.best') {
+        try {
+          const headers = { authorization: 'Bearer ' + decryptSecret(row.encrypted_api_key, this.config.channelEncryptionKey) }
+          const [usageResponse,statusResponse] = await Promise.all([
+            fetch(origin + '/api/usage/token/', { headers, redirect: 'error', signal: AbortSignal.timeout(10_000) }),
+            fetch(origin + '/api/status', { redirect: 'error', signal: AbortSignal.timeout(10_000) }),
+          ])
+          if (!usageResponse.ok || !statusResponse.ok) throw new Error('invalid response')
+          const usage:any = await usageResponse.json(), status:any = await statusResponse.json()
+          const unit = Number(status?.data?.quota_per_unit)
+          const raw = usage?.data
+          if (!raw || !Number.isFinite(unit) || unit <= 0 || ![raw.total_available,raw.total_granted,raw.total_used].every(Number.isFinite)) throw new Error('invalid balance')
+          value = { status: 'available', remaining: raw.total_available / unit, quota: raw.total_granted / unit, used: raw.total_used / unit, unit: '¥', checkedAt, message: raw.total_available < 0 ? '上游额度已透支，请及时补充' : null }
+        } catch {
+          value = { status: 'error', remaining: null, quota: null, used: null, unit: null, checkedAt, message: '余额查询失败，请稍后刷新' }
+        }
+      } else if (origin !== 'https://x.ailzd.com') {
+        value = { status: 'unsupported', remaining: null, quota: null, used: null, unit: null, checkedAt, message: origin === 'https://apihub.agnes-ai.com' ? '供应商未开放余额查询接口' : '此渠道尚未配置余额查询' }
+      } else {
+        try {
+          const response = await fetch(origin + '/v1/usage', { headers: { authorization: 'Bearer ' + decryptSecret(row.encrypted_api_key, this.config.channelEncryptionKey) }, redirect: 'error', signal: AbortSignal.timeout(10_000) })
+          const contentType = response.headers.get('content-type') || ''
+          if (!response.ok || !contentType.includes('application/json')) throw new Error('invalid response')
+          const parsed = parseUpstreamUsage(await response.json())
+          if (!parsed) throw new Error('invalid balance')
+          value = { ...parsed, checkedAt }
+        } catch {
+          value = { status: 'error', remaining: null, quota: null, used: null, unit: null, checkedAt, message: '余额查询失败，请稍后刷新' }
+        }
+      }
+      this.upstreamBalanceCache.set(String(row.id), { expiresAt: Date.now() + 60_000, value })
+      return [String(row.id), value] as const
+    }))
+    return Object.fromEntries(entries)
   }
 
   async upsert(input: { id?: string; name: string; baseUrl: string; apiKey?: string; priority?: number; modelMap?: Record<string, string>; timeoutMs?: number; enabled?: boolean }): Promise<any> {
@@ -195,9 +261,11 @@ export class ChannelService {
     const url = new URL(input.baseUrl)
     if (!['http:', 'https:'].includes(url.protocol)) throw new Error('上游地址必须使用 HTTP(S)')
     if (input.id) {
-      const current = await this.db.one<any>('SELECT encrypted_api_key FROM channels WHERE id = $1', [input.id])
+      const current = await this.db.one<any>('SELECT encrypted_api_key FROM channels WHERE id = $1 AND deleted_at IS NULL', [input.id])
+      if (!current) throw Object.assign(new Error('渠道不存在或已删除，请刷新列表'), { statusCode: 404 })
       const encrypted = input.apiKey?.trim() ? encryptSecret(input.apiKey.trim(), this.config.channelEncryptionKey) : current?.encrypted_api_key
-      const row = await this.db.one<any>(`UPDATE channels SET name=$1, base_url=$2, encrypted_api_key=$3, priority=$4, model_map=$5, timeout_ms=$6, enabled=$7, updated_at=now() WHERE id=$8 RETURNING id, name, base_url, priority, model_map, timeout_ms, enabled`, [input.name.trim(), url.toString().replace(/\/$/, ''), encrypted, Number(input.priority ?? 100), JSON.stringify(input.modelMap || {}), Math.max(1000, Number(input.timeoutMs || 30000)), input.enabled !== false, input.id])
+      const row = await this.db.one<any>(`UPDATE channels SET name=$1, base_url=$2, encrypted_api_key=$3, priority=$4, model_map=$5, timeout_ms=$6, enabled=$7, updated_at=now() WHERE id=$8 AND deleted_at IS NULL RETURNING id, name, base_url, priority, model_map, timeout_ms, enabled`, [input.name.trim(), url.toString().replace(/\/$/, ''), encrypted, Number(input.priority ?? 100), JSON.stringify(input.modelMap || {}), Math.max(1000, Number(input.timeoutMs || 30000)), input.enabled !== false, input.id])
+      if (!row) throw Object.assign(new Error('渠道已删除，请刷新列表'), { statusCode: 404 })
       return row
     }
     if (!input.apiKey?.trim()) throw new Error('新增渠道必须填写上游 Key')
@@ -205,10 +273,32 @@ export class ChannelService {
     return row
   }
 
-  async remove(id: string): Promise<void> {
-    // Historical usage/attempt rows retain this channel. Deletion therefore
-    // means disable, which is also reversible for an operator.
-    await this.db.query('UPDATE channels SET enabled = false, updated_at = now() WHERE id = $1', [id])
+  // Keep the original DELETE endpoint's disable semantics for cached clients.
+  async remove(id: string, actorId: string): Promise<void> {
+    await this.changeAvailability(id, actorId, false)
+  }
+
+  async archive(id: string, actorId: string): Promise<void> {
+    await this.changeAvailability(id, actorId, true)
+  }
+
+  private async changeAvailability(id: string, actorId: string, archive: boolean): Promise<void> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      throw Object.assign(new Error('渠道编号无效，请刷新列表'), { statusCode: 400 })
+    }
+    await this.db.tx(async client => {
+      // Lock against edits/cost changes and audit only non-secret fields.
+      const before = await one<any>(client, 'SELECT id,name,base_url,model_map,enabled,deleted_at FROM channels WHERE id=$1 FOR UPDATE', [id])
+      if (!before) throw Object.assign(new Error('渠道不存在，请刷新列表'), { statusCode: 404 })
+      if (before.deleted_at || (!archive && !before.enabled)) return
+      const after = await one<any>(client, `UPDATE channels SET enabled=false,
+        deleted_at=CASE WHEN $2 THEN now() ELSE deleted_at END,updated_at=now()
+        WHERE id=$1 RETURNING id,name,base_url,model_map,enabled,deleted_at`, [id, archive])
+      // Preserve the channel row, costs and foreign keys for in-flight billing
+      // and historical reports. Deleted channels are hidden from all editors.
+      await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value)
+        VALUES($1,'channel',$2,$3,$4)`, [actorId, id, JSON.stringify(before), JSON.stringify(after)])
+    })
   }
 
   async relay(path: string, method: string, headers: Record<string, string>, body: Buffer | undefined, requestedModel: string): Promise<RelayResult> {

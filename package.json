@@ -1,6 +1,6 @@
 {
   "name": "relay-station",
-  "version": "1.0.31",
+  "version": "1.0.70",
   "private": true,
   "type": "module",
   "engines": {

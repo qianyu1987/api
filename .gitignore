@@ -10,3 +10,5 @@ secrets/
 *.cer
 *.p12
 coverage/
+
+.DS_Store

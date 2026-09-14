@@ -311,7 +311,9 @@ CREATE TABLE IF NOT EXISTS channels (
   CHECK (priority >= 0),
   CHECK (failure_count >= 0)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS channels_name_ci_unique ON channels (lower(name));
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS channels_active_name_ci_unique ON channels (lower(name)) WHERE deleted_at IS NULL;
+DROP INDEX IF EXISTS channels_name_ci_unique;
 CREATE INDEX IF NOT EXISTS channels_routing_idx ON channels (enabled, priority ASC, created_at ASC, id ASC);
 
 CREATE TABLE IF NOT EXISTS channel_model_mappings (
@@ -1028,3 +1030,104 @@ ALTER TABLE affiliate_ledger ADD CONSTRAINT affiliate_ledger_kind_check
 ALTER TABLE subscription_ledger DROP CONSTRAINT IF EXISTS subscription_ledger_kind_check;
 ALTER TABLE subscription_ledger ADD CONSTRAINT subscription_ledger_kind_check
   CHECK (kind IN ('purchase_credit', 'quota_reset', 'usage_reserve', 'usage_settle', 'usage_release', 'expiry_forfeit', 'admin_adjustment'));
+
+-- Media tasks own their wallet holds; generic reservation expiry must not
+-- release an asynchronous generation whose upstream outcome is unknown.
+CREATE TABLE IF NOT EXISTS media_prices (
+  model TEXT NOT NULL,
+  size TEXT NOT NULL,
+  channel_id UUID REFERENCES channels(id) ON DELETE RESTRICT,
+  normal_cost_micros BIGINT NOT NULL DEFAULT 0 CHECK(normal_cost_micros >= 0),
+  actual_cost_micros BIGINT NOT NULL DEFAULT 0 CHECK(actual_cost_micros >= 0),
+  cost_source TEXT NOT NULL DEFAULT '',
+  enabled BOOLEAN NOT NULL DEFAULT false,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(model,size)
+);
+INSERT INTO media_prices(model,size) VALUES
+ ('agnes-image-2.5-flash','1K'),('agnes-image-2.5-flash','2K'),
+ ('agnes-image-2.5-flash','3K'),('agnes-image-2.5-flash','4K'),
+ ('gpt-image-2','1K'),
+ ('gpt-image-2.5','1K'),
+ ('agnes-video-2.5-flash','720P') ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS media_tasks (
+ id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+ user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ api_key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL,
+ idempotency_key TEXT NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('image','video')),
+ model TEXT NOT NULL,
+ channel_id UUID NOT NULL REFERENCES channels(id) ON DELETE RESTRICT,
+ request_payload JSONB NOT NULL,
+ price_snapshot JSONB NOT NULL,
+ charge_micros BIGINT NOT NULL CHECK(charge_micros > 0),
+ actual_cost_micros BIGINT NOT NULL CHECK(actual_cost_micros >= 0),
+ status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','submitting','processing','unknown','completed','failed')),
+ upstream_id TEXT,
+ result_url TEXT,
+ error_message TEXT,
+ progress INTEGER NOT NULL DEFAULT 0,
+ next_poll_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ lease_until TIMESTAMPTZ,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ finished_at TIMESTAMPTZ,
+ UNIQUE(user_id,idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS media_tasks_user_idx ON media_tasks(user_id,created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS media_tasks_pending_idx ON media_tasks(next_poll_at) WHERE status IN ('queued','processing');
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS gallery_status TEXT NOT NULL DEFAULT 'private';
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS gallery_featured BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS gallery_title TEXT;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS gallery_moderated_at TIMESTAMPTZ;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS gallery_moderated_by UUID REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE media_tasks DROP CONSTRAINT IF EXISTS media_tasks_gallery_status_check;
+ALTER TABLE media_tasks ADD CONSTRAINT media_tasks_gallery_status_check CHECK(gallery_status IN ('private','published','hidden'));
+CREATE INDEX IF NOT EXISTS media_tasks_gallery_idx ON media_tasks(gallery_featured DESC,finished_at DESC,id DESC) WHERE gallery_status='published' AND status='completed';
+
+CREATE TABLE IF NOT EXISTS media_task_assets (
+ task_id UUID PRIMARY KEY REFERENCES media_tasks(id) ON DELETE CASCADE,
+ content_type TEXT NOT NULL CHECK(content_type IN ('image/png','image/jpeg','image/webp')),
+ content BYTEA NOT NULL CHECK(octet_length(content) BETWEEN 16 AND 15728640),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS media_uploads (
+ token TEXT PRIMARY KEY,
+ user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ content_type TEXT NOT NULL,
+ content BYTEA NOT NULL CHECK(octet_length(content) BETWEEN 1 AND 20971520),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ expires_at TIMESTAMPTZ NOT NULL DEFAULT now()+interval '7 days'
+);
+CREATE INDEX IF NOT EXISTS media_uploads_user_idx ON media_uploads(user_id);
+CREATE INDEX IF NOT EXISTS media_uploads_expiry_idx ON media_uploads(expires_at);
+
+-- Independent browser conversations; API and media calls do not consume these counters.
+CREATE TABLE IF NOT EXISTS chat_conversations (
+ id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID NOT NULL REFERENCES users(id),
+ title TEXT NOT NULL DEFAULT '新对话', created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), archived_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS chat_conversations_owner_idx ON chat_conversations(user_id,updated_at DESC);
+CREATE TABLE IF NOT EXISTS chat_turns (
+ request_id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id),
+ conversation_id UUID NOT NULL REFERENCES chat_conversations(id), content TEXT NOT NULL,
+ answer TEXT, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','completed','failed')),
+ error_message TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS chat_turns_history_idx ON chat_turns(conversation_id,created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS chat_turns_pending_user_idx ON chat_turns(user_id) WHERE status='pending';
+CREATE TABLE IF NOT EXISTS chat_daily_counts (
+ scope TEXT NOT NULL, day DATE NOT NULL, used INTEGER NOT NULL DEFAULT 0 CHECK(used>=0), PRIMARY KEY(scope,day)
+);
+
+ALTER TABLE chat_turns ADD COLUMN IF NOT EXISTS settlement JSONB;
+
+CREATE TABLE IF NOT EXISTS media_welcome_gifts (
+ user_id UUID PRIMARY KEY REFERENCES users(id),
+ images_remaining INTEGER NOT NULL DEFAULT 60 CHECK(images_remaining BETWEEN 0 AND 60),
+ video_seconds_remaining INTEGER NOT NULL DEFAULT 30 CHECK(video_seconds_remaining BETWEEN 0 AND 30),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE media_tasks DROP CONSTRAINT IF EXISTS media_tasks_charge_micros_check;
+ALTER TABLE media_tasks ADD CONSTRAINT media_tasks_charge_micros_check CHECK(charge_micros >= 0);

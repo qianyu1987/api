@@ -1,6 +1,7 @@
 import { loadConfig } from './config.js'
 import { Database } from './db/index.js'
 import { BillingService } from './services/billing.js'
+import { ChatService } from './services/chat.js'
 import { MailService } from './services/mail.js'
 
 /** Small, repeatable maintenance worker. Billing state lives in PostgreSQL; Redis is not used as a source of truth. */
@@ -21,6 +22,7 @@ export async function runWorker(): Promise<void> {
     await db.query(`DELETE FROM relay_attempts a WHERE NOT EXISTS (SELECT 1 FROM usage_logs u WHERE u.request_id = a.request_id)`)
     await billing.migrateLegacySubscriptions()
     await billing.resetDueSubscriptions()
+    await new ChatService(db, config, billing).recover()
     await billing.releaseExpiredReservations()
     await mail.deliverQueued(20)
   } finally {

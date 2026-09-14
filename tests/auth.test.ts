@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { AuthService } from '../src/services/auth.js'
 
 function fakeAuthDb() {
@@ -27,5 +27,23 @@ describe('registration email policy', () => {
   test('still validates an email when one is supplied', async () => {
     await expect(new AuthService(fakeAuthDb() as any, config).register('tester', 'password123', { email: 'invalid', termsAccepted: true }))
       .rejects.toThrow('邮箱格式无效')
+  })
+})
+
+describe('registration wallet gift', () => {
+  test('credits exactly three yuan and records a gift ledger in the registration transaction', async () => {
+    const query = vi.fn(async (sql: string) => ({ rows: sql.includes('INSERT INTO users') ? [{ id: 'new-user', username: 'new-user', role: 'user', invite_code: 'INVITE', created_at: new Date() }] : [] }))
+    const tx = vi.fn(async (action: any) => action({ query }))
+    await new AuthService({ tx } as any, config).register('new-user', 'password123', { termsAccepted: true })
+    expect(tx).toHaveBeenCalledTimes(1)
+    expect(query).toHaveBeenCalledWith('INSERT INTO wallets(user_id,balance_micros) VALUES ($1,$2)', ['new-user', '3000000'])
+    const credits = query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO wallet_ledger'))
+    expect(credits).toHaveLength(1)
+    expect((credits[0] as any)[1]).toEqual(['new-user', '3000000', '新用户注册赠送 3 元', JSON.stringify({ source: 'registration_gift', amountMicros: '3000000' })])
+  })
+  test('duplicate registration cannot insert a wallet or gift ledger', async () => {
+    const query = vi.fn(async () => { throw Object.assign(new Error('duplicate'), { code: '23505', constraint: 'users_username_unique' }) })
+    await expect(new AuthService({ tx: async (fn: any) => fn({ query }) } as any, config).register('tester', 'password123', { termsAccepted: true })).rejects.toThrow('账号已存在')
+    expect(query).toHaveBeenCalledTimes(1)
   })
 })

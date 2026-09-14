@@ -144,7 +144,13 @@ export class AuthService {
             [cleanUsername, email, emailVerified ? new Date() : null, passwordHash, code, inviter?.id ?? null],
           )
           if (!user) throw new Error('注册失败')
-          await client.query('INSERT INTO wallets(user_id) VALUES ($1)', [user.id])
+          // Signup and credit share one transaction; duplicate usernames cannot receive a second gift.
+          await client.query('INSERT INTO wallets(user_id,balance_micros) VALUES ($1,$2)', [user.id, '3000000'])
+          await client.query('INSERT INTO media_welcome_gifts(user_id) VALUES ($1)', [user.id])
+          await client.query(
+            "INSERT INTO wallet_ledger(user_id,kind,entry_kind,amount_micros,balance_after_micros,reference_note,metadata) VALUES($1,'admin_adjustment','credit',$2,$2,$3,$4)",
+            [user.id, '3000000', '新用户注册赠送 3 元', JSON.stringify({ source: 'registration_gift', amountMicros: '3000000' })],
+          )
           await client.query('INSERT INTO affiliate_wallets(user_id) VALUES ($1)', [user.id])
           if (inviter) await client.query('INSERT INTO invitation_bindings(invitee_user_id, inviter_user_id, invite_code) VALUES ($1, $2, $3)', [user.id, inviter.id, inviter.invite_code])
           await client.query(

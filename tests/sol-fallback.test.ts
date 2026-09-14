@@ -10,7 +10,7 @@ import { buildApp, type RelayApp } from '../src/server.js'
 import { loadConfig } from '../src/config.js'
 
 const model = 'gpt-5.6-sol'
-const upstream = 'agnes-2.5-flash'
+const upstream = 'agnes-3.0-flash'
 const key = Buffer.alloc(32, 4)
 const config = { channelEncryptionKey: key } as any
 let agent: MockAgent
@@ -90,7 +90,7 @@ describe('sol fallback routing', () => {
 
 describe('public response model', () => {
   test('rewrites response metadata and leaves tools, usage and text intact', () => {
-    const input = { model: upstream, response: { model: upstream, usage: { input_tokens: 3 } }, choices: [{ tool_calls: [{ function: { arguments: '{"model":"agnes-2.5-flash"}' } }], content: upstream }] }
+    const input = { model: upstream, response: { model: upstream, usage: { input_tokens: 3 } }, choices: [{ tool_calls: [{ function: { arguments: '{"model":"agnes-3.0-flash"}' } }], content: upstream }] }
     const output = JSON.parse(rewritePublicModel(JSON.stringify(input), model))
     expect(output.model).toBe(model); expect(output.response.model).toBe(model)
     expect(output.choices).toEqual(input.choices); expect(output.response.usage).toEqual(input.response.usage)
@@ -98,8 +98,8 @@ describe('public response model', () => {
     expect(rewritePublicModel('not json', model)).toBe('not json')
   })
   test('preserves UTF-8 and SSE event semantics across every possible byte boundary', () => {
-    const events = ': keepalive\r\nevent: response.created\r\nid: 42\r\ndata: {"response":\r\ndata: {"model":"agnes-2.5-flash","usage":{"input_tokens":7}}}\r\n\r\n'
-      + 'data: {"model":"agnes-2.5-flash","choices":[{"delta":{"content":"你好","tool_calls":[{"function":{"arguments":"{}"}}]}}]}\n\n'
+    const events = ': keepalive\r\nevent: response.created\r\nid: 42\r\ndata: {"response":\r\ndata: {"model":"agnes-3.0-flash","usage":{"input_tokens":7}}}\r\n\r\n'
+      + 'data: {"model":"agnes-3.0-flash","choices":[{"delta":{"content":"你好","tool_calls":[{"function":{"arguments":"{}"}}]}}]}\n\n'
       + 'data: [DONE]\n\n'
     const expected = ': keepalive\r\nevent: response.created\r\nid: 42\r\ndata: {"response":{"model":"gpt-5.6-sol","usage":{"input_tokens":7}}}\r\n\r\n'
       + 'data: {"model":"gpt-5.6-sol","choices":[{"delta":{"content":"你好","tool_calls":[{"function":{"arguments":"{}"}}]}}]}\n\n'
@@ -114,7 +114,7 @@ describe('public response model', () => {
   })
   test('handles a final event without a terminator and preserves malformed/provider data', () => {
     const stream = new PublicModelSse(model)
-    expect(stream.write(Buffer.from('data: not json\n\ndata: {"model":"agnes-2.5-flash"}')) + stream.end())
+    expect(stream.write(Buffer.from('data: not json\n\ndata: {"model":"agnes-3.0-flash"}')) + stream.end())
       .toBe('data: not json\n\ndata: {"model":"gpt-5.6-sol"}')
   })
 })

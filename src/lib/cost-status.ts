@@ -10,7 +10,7 @@ export function fallbackCostPending(row: any): boolean {
 }
 
 // The equivalent predicate for report aggregation over usage_logs.
-export const pendingFallbackCostSql = `(requested_model = 'gpt-5.6-sol' AND upstream_model = 'agnes-2.5-flash'
+export const pendingFallbackCostSql = `(requested_model = 'gpt-5.6-sol' AND upstream_model IN ('agnes-3.0-flash','agnes-2.5-flash')
   AND NOT COALESCE(
     pricing_snapshot->'appliedChannelCost'->>'channelId' = final_channel_id::text
     AND pricing_snapshot->'appliedChannelCost'->>'model' IN (requested_model, '*')
@@ -18,8 +18,8 @@ export const pendingFallbackCostSql = `(requested_model = 'gpt-5.6-sol' AND upst
 
 /** Live configuration alerts clear as soon as a sourced cost becomes effective. */
 export async function fallbackCostAlerts(db: Database) {
-  const rows = await db.query<any>(`SELECT c.id,c.name FROM channels c
-    WHERE c.enabled AND c.model_map->>'gpt-5.6-sol' = 'agnes-2.5-flash'
+  const rows = await db.query<any>(`SELECT c.id,c.name,c.model_map->>'gpt-5.6-sol' AS upstream_model FROM channels c
+    WHERE c.enabled AND c.model_map->>'gpt-5.6-sol' IN ('agnes-3.0-flash','agnes-2.5-flash')
     AND NOT COALESCE((SELECT length(trim(m.price_source)) > 0 FROM channel_model_costs m WHERE m.channel_id=c.id
       AND m.model_pattern IN ('gpt-5.6-sol','*')
       AND (m.price_effective_at IS NULL OR m.price_effective_at <= now())
@@ -27,6 +27,6 @@ export async function fallbackCostAlerts(db: Database) {
   return rows.map(row => ({
     id: `fallback-cost:${row.id}`, kind: 'cost_missing', severity: 'warning', status: 'open',
     resource_type: 'channel', resource_id: String(row.id),
-    message: `${row.name}：agnes-2.5-flash 成本待核实，当前按 gpt-5.6-sol 默认成本估算，利润仅供参考。请配置该渠道的输入、输出、缓存人民币成本及来源。`,
+    message: `${row.name}：${row.upstream_model} 成本待核实，当前按 gpt-5.6-sol 默认成本估算，利润仅供参考。请配置该渠道的输入、输出、缓存人民币成本及来源。`,
   }))
 }

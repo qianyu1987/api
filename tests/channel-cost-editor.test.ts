@@ -15,7 +15,7 @@ describe('channel cost editing', () => {
     await expect(new ChannelCostService(db as any).save({ ...input, ...patch }, 'actor')).rejects.toThrow()
     expect(db.tx).not.toHaveBeenCalled()
   })
-  const setup = (before: any = null, modelMap = { 'gpt-5.6-sol': 'agnes-2.5-flash' }) => {
+  const setup = (before: any = null, modelMap = { 'gpt-5.6-sol': 'agnes-3.0-flash' }) => {
     const query = vi.fn(async (sql: string, values: any[]) => {
       if (sql.startsWith('SELECT id,name')) return { rows: [{ id: input.channelId, model_map: modelMap }] }
       if (sql.startsWith('SELECT * FROM channel_model_costs')) return { rows: before ? [before] : [] }
@@ -39,7 +39,7 @@ describe('channel cost editing', () => {
   })
   test('requires the public model mapping', async () => {
     const { query, service } = setup()
-    await expect(service.save({ ...input, modelPattern: 'agnes-2.5-flash' }, 'actor')).rejects.toThrow('公开模型名')
+    await expect(service.save({ ...input, modelPattern: 'agnes-3.0-flash' }, 'actor')).rejects.toThrow('公开模型名')
     expect(query.mock.calls.some(([sql]) => sql.startsWith('INSERT'))).toBe(false)
   })
   test('records the before value together with the new cost', async () => {

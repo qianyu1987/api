@@ -3,12 +3,13 @@ import { fallbackCostPending } from '../src/lib/cost-status.js'
 import { applyChannelCost } from '../src/lib/channel-cost.js'
 import { calculatePrice, deserializePriceSnapshot, serializePriceSnapshot, type PriceSnapshot } from '../src/services/billing.js'
 
-const row = { requested_model: 'gpt-5.6-sol', upstream_model: 'agnes-2.5-flash', final_channel_id: 'fallback' }
+const row = { requested_model: 'gpt-5.6-sol', upstream_model: 'agnes-3.0-flash', final_channel_id: 'fallback' }
 const cost = { channelId: 'fallback', model: 'gpt-5.6-sol', inputMicros: '1000000', outputMicros: '2000000', cacheMicros: '1000000', highContextMultiplierBps: 12000, source: 'test invoice', effectiveAt: '2026-09-11T00:00:00.000Z' }
 
 describe('fallback cost provenance', () => {
   test('flags historical default estimates and rejects unrelated or unsourced snapshots', () => {
     expect(fallbackCostPending(row)).toBe(true)
+    expect(fallbackCostPending({ ...row, upstream_model: 'agnes-2.5-flash' })).toBe(true)
     for (const override of [{ channelId: 'different' }, { model: 'gpt-6-astra' }, { source: '' }]) {
       expect(fallbackCostPending({ ...row, pricing_snapshot: { appliedChannelCost: { ...cost, ...override } } })).toBe(true)
     }
