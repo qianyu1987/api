@@ -24,6 +24,7 @@ import { buildCcswitchImportLink } from './lib/ccswitch.js'
 import { calculateUsageMoney, estimatedRequestTokens, formatMicros, sellForGrossMargin, yuanToMicros } from './lib/money.js'
 import { parseSseUsage, usageFromPayload } from './lib/usage.js'
 import { PublicModelSse, rewritePublicModel } from './lib/public-model.js'
+import { AgnesResponsesSse, chatToResponses } from './lib/agnes-adapter.js'
 import { decodeResponseBuffer, decodeResponseStream } from './lib/response-compression.js'
 import { ProfitService } from './services/profit.js'
 import { fallbackCostAlerts, fallbackCostPending, pendingFallbackCostSql } from './lib/cost-status.js'
@@ -295,6 +296,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     return replacement
   })
 
+  const sessionLifetime = 400 * 86400
+  const issueSession = (reply: any, user: {id:string;role:string}) => {
+    const token = app.jwt.sign({ sub:user.id, role:user.role }, {expiresIn:sessionLifetime})
+    reply.setCookie('relay_session',token,{httpOnly:true,sameSite:'lax',secure:config.env==='production',path:'/',maxAge:sessionLifetime})
+    reply.header('Cache-Control','no-store')
+  }
   const requireSession = async (request: any, reply: any, optional = false): Promise<PublicUser | null> => {
     try {
       await request.jwtVerify()
@@ -302,6 +309,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const user = await db.one<any>(`SELECT id, username, email, email_verified_at, role, invite_code, created_at, disabled_at, status
         FROM users WHERE id = $1`, [payload.sub])
       if (!user || user.disabled_at || user.status !== 'active') throw new Error('登录已失效')
+      // Renew cookie-authenticated sessions daily; upgrade still-valid legacy 7-day tokens.
+      if (request.cookies?.relay_session && Number(payload.exp || 0) < Math.floor(Date.now()/1000) + sessionLifetime - 86400) issueSession(reply,user)
       return { id: String(user.id), username: user.username, email: user.email || null, emailVerified: Boolean(user.email_verified_at), role: user.role === 'admin' ? 'admin' : 'user', inviteCode: user.invite_code, createdAt: new Date(user.created_at).toISOString() }
     } catch {
       if (!optional) reply.code(401).send({ error: { message: '请先登录', type: 'authentication_error' } })
@@ -513,8 +522,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         email: String(body.email || ''), verificationCode: String(body.verificationCode || ''),
         inviteCode: body.inviteCode || body.invite, termsAccepted: body.termsAccepted === true,
       })
-      const token = app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: '7d' })
-      reply.setCookie('relay_session', token, { httpOnly: true, sameSite: 'lax', secure: config.env === 'production', path: '/', maxAge: 7 * 86400 })
+      issueSession(reply,user)
       return { user }
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
@@ -523,8 +531,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     try {
       const body = (request.body || {}) as any
       const user = await auth.login(String(body.username || ''), String(body.password || ''))
-      const token = app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: '7d' })
-      reply.setCookie('relay_session', token, { httpOnly: true, sameSite: 'lax', secure: config.env === 'production', path: '/', maxAge: 7 * 86400 })
+      issueSession(reply,user)
       return { user }
     } catch (error) { reply.code(401).send({ error: { message: '账号或密码错误' } }) }
   })
@@ -1374,14 +1381,16 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const upstreamRequestId = responseHeader(responseHeaders, ['x-request-id', 'openai-request-id', 'request-id'])
     const isSse = String(responseHeaders['content-type'] || '').includes('text/event-stream')
     const contentEncoding = responseHeaders['content-encoding']
-    const rewriteModel = model === 'gpt-5.6-sol' && relay.upstreamModel !== model
+    const rewriteModel = ['gpt-5.6-sol', 'gpt-5.6-terra'].includes(model) && relay.upstreamModel !== model
     if (isSse) {
       reply.hijack()
       reply.raw.statusCode = response.statusCode
       reply.raw.setHeader('X-Request-Id', requestId)
       for (const [key, value] of Object.entries(responseHeaders)) if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.raw.setHeader(key, value as any)
       const decoder = new StringDecoder('utf8')
-      const publicStream = rewriteModel ? new PublicModelSse(model) : null
+      const publicStream = relay.protocolAdapter === 'agnes-responses'
+        ? new AgnesResponsesSse(model)
+        : rewriteModel ? new PublicModelSse(model) : null
       let pending = ''
       let usage = null as ReturnType<typeof parseSseUsage>
       const consumeUsage = (value: string) => {
@@ -1489,7 +1498,10 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     reply.code(response.statusCode)
     for (const [key, value] of Object.entries(responseHeaders)) if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.header(key, value as any)
     // Billing above always receives the unmodified upstream metadata.
-    reply.send(rewriteModel ? Buffer.from(rewritePublicModel(data.toString('utf8'), model)) : data)
+    if (relay.protocolAdapter === 'agnes-responses' && parsedResponse && typeof parsedResponse === 'object') {
+      reply.header('content-type', 'application/json')
+      reply.send(Buffer.from(JSON.stringify(chatToResponses(parsedResponse, model))))
+    } else reply.send(rewriteModel ? Buffer.from(rewritePublicModel(data.toString('utf8'), model)) : data)
   }
 
   // CC Switch installations created before v1.0.6 sometimes retain the host

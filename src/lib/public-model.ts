@@ -1,9 +1,10 @@
 import { StringDecoder } from 'node:string_decoder'
 
 export const SOL_FALLBACK_UPSTREAM_MODELS = ['agnes-3.0-flash', 'agnes-2.5-flash'] as const
+export const PUBLIC_FALLBACK_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra'] as const
 
 export function isSolFallback(requestedModel: string, upstreamModel: string): boolean {
-  return requestedModel === 'gpt-5.6-sol'
+  return PUBLIC_FALLBACK_MODELS.includes(requestedModel as typeof PUBLIC_FALLBACK_MODELS[number])
     && SOL_FALLBACK_UPSTREAM_MODELS.includes(upstreamModel as typeof SOL_FALLBACK_UPSTREAM_MODELS[number])
 }
 

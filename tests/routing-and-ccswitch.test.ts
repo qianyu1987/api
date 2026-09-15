@@ -1,10 +1,27 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { buildCcswitchImportLink, ccswitchModel } from '../src/lib/ccswitch.js'
 import { isInvalidApiResponse, normalizeResponsesTools, responseFailure, rewriteRequestBody, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
+import { chatToResponses, isAgnesResponsesAdapter, responsesToChat } from '../src/lib/agnes-adapter.js'
 
 afterEach(() => vi.restoreAllMocks())
 
 describe('channel failover policy', () => {
+  test('adapts Agnes Responses requests to Chat Completions', () => {
+    expect(isAgnesResponsesAdapter('https://apihub.agnes-ai.com/v1', '/responses')).toBe(true)
+    const result = responsesToChat({ model: 'agnes-3.0-flash', instructions: 'be concise', input: [{ role: 'user', content: [{ type: 'input_text', text: '你好' }] }], max_output_tokens: 20 })
+    expect(result).toMatchObject({ model: 'agnes-3.0-flash', messages: [{ role: 'system', content: 'be concise' }, { role: 'user', content: '你好' }], max_tokens: 20 })
+    expect(result).not.toHaveProperty('input')
+  })
+
+  test('wraps Agnes Chat response in a Responses envelope', () => {
+    const result = chatToResponses({ id: 'chatcmpl_1', choices: [{ message: { role: 'assistant', content: '你好' } }], usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 } }, 'gpt-5.6-sol')
+    expect(result).toMatchObject({ object: 'response', model: 'gpt-5.6-sol', status: 'completed', output: [{ role: 'assistant', content: [{ type: 'output_text', text: '你好' }] }], usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 } })
+  })
+
+  test('uses the same adapter for the terra public model', () => {
+    const result = responsesToChat({ model: 'gpt-5.6-terra', input: 'hello' })
+    expect(result).toMatchObject({ model: 'gpt-5.6-terra', messages: [{ role: 'user', content: 'hello' }] })
+  })
   test('converts Responses custom tools to function tools accepted by upstream gateways', () => {
     const payload: any = { tools: [{ type: 'custom', name: 'lookup', description: 'Look up data', format: { type: 'text' } }] }
     normalizeResponsesTools(payload)
