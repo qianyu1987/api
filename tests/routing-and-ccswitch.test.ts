@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { buildCcswitchImportLink, ccswitchModel } from '../src/lib/ccswitch.js'
 import { isInvalidApiResponse, normalizeResponsesTools, responseFailure, rewriteRequestBody, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
-import { chatToResponses, isAgnesResponsesAdapter, responsesToChat } from '../src/lib/agnes-adapter.js'
+import { AgnesResponsesSse, chatToResponses, isAgnesResponsesAdapter, responsesToChat } from '../src/lib/agnes-adapter.js'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -16,6 +16,23 @@ describe('channel failover policy', () => {
   test('wraps Agnes Chat response in a Responses envelope', () => {
     const result = chatToResponses({ id: 'chatcmpl_1', choices: [{ message: { role: 'assistant', content: '你好' } }], usage: { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 } }, 'gpt-5.6-sol')
     expect(result).toMatchObject({ object: 'response', model: 'gpt-5.6-sol', status: 'completed', output: [{ role: 'assistant', content: [{ type: 'output_text', text: '你好' }] }], usage: { input_tokens: 2, output_tokens: 3, total_tokens: 5 } })
+  })
+
+  test('preserves native Responses output and normalizes array content', () => {
+    const native = chatToResponses({ object: 'response', id: 'resp_native', status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '你好' }] }] }, 'gpt-5.6-terra')
+    expect(native.output).toHaveLength(1)
+    expect(native.model).toBe('gpt-5.6-terra')
+    const array = chatToResponses({ id: 'chatcmpl_2', choices: [{ message: { role: 'assistant', content: [{ type: 'text', text: '你' }, { type: 'text', text: '好' }] } }] }, 'gpt-5.6-sol')
+    expect(array.output[0].content[0].text).toBe('你好')
+  })
+
+  test('includes output item in completed SSE event', () => {
+    const stream = new AgnesResponsesSse('gpt-5.6-sol')
+    const result = stream.write(Buffer.from('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n')) + stream.end()
+    expect(result).toContain('response.output_text.delta')
+    expect(result).toContain('response.output_text.done')
+    expect(result).toContain('"text":"hi"')
+    expect(result).toContain('"output":[{"id":')
   })
 
   test('uses the same adapter for the terra public model', () => {
