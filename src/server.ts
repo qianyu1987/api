@@ -24,7 +24,6 @@ import { buildCcswitchImportLink } from './lib/ccswitch.js'
 import { calculateUsageMoney, estimatedRequestTokens, formatMicros, sellForGrossMargin, yuanToMicros } from './lib/money.js'
 import { parseSseUsage, usageFromPayload } from './lib/usage.js'
 import { PublicModelSse, rewritePublicModel } from './lib/public-model.js'
-import { AgnesResponsesSse, chatToResponses } from './lib/agnes-adapter.js'
 import { decodeResponseBuffer, decodeResponseStream } from './lib/response-compression.js'
 import { ProfitService } from './services/profit.js'
 import { fallbackCostAlerts, fallbackCostPending, pendingFallbackCostSql } from './lib/cost-status.js'
@@ -1388,9 +1387,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       reply.raw.setHeader('X-Request-Id', requestId)
       for (const [key, value] of Object.entries(responseHeaders)) if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.raw.setHeader(key, value as any)
       const decoder = new StringDecoder('utf8')
-      const publicStream = relay.protocolAdapter === 'agnes-responses'
-        ? new AgnesResponsesSse(model)
-        : rewriteModel ? new PublicModelSse(model) : null
+      const publicStream = rewriteModel ? new PublicModelSse(model) : null
       let pending = ''
       let usage = null as ReturnType<typeof parseSseUsage>
       const consumeUsage = (value: string) => {
@@ -1498,10 +1495,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     reply.code(response.statusCode)
     for (const [key, value] of Object.entries(responseHeaders)) if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.header(key, value as any)
     // Billing above always receives the unmodified upstream metadata.
-    if (relay.protocolAdapter === 'agnes-responses' && parsedResponse && typeof parsedResponse === 'object') {
-      reply.header('content-type', 'application/json')
-      reply.send(Buffer.from(JSON.stringify(chatToResponses(parsedResponse, model))))
-    } else reply.send(rewriteModel ? Buffer.from(rewritePublicModel(data.toString('utf8'), model)) : data)
+    reply.send(rewriteModel ? Buffer.from(rewritePublicModel(data.toString('utf8'), model)) : data)
   }
 
   // CC Switch installations created before v1.0.6 sometimes retain the host
