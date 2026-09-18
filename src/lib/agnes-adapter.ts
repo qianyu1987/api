@@ -66,6 +66,10 @@ export function chatToResponses(input: AnyRecord, requestedModel: string): AnyRe
     const native: AnyRecord = { ...input, model: requestedModel }
     if (!native.id) native.id = `resp_${Date.now().toString(36)}`
     if (!native.created_at) native.created_at = Math.floor(Date.now() / 1000)
+    if (native.output.length === 0) {
+      const fallbackText = outputText(native.output_text) || outputText(native.text)
+      native.output = [{ id: `${native.id}_msg`, type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: fallbackText, annotations: [] }] }]
+    }
     return native
   }
   const id = String(input.id || `resp_${Date.now().toString(36)}`)
@@ -89,7 +93,17 @@ export class AgnesResponsesSse {
   private toolItems = new Map<number, { id: string; callId: string; name: string }>()
   constructor(private readonly model: string) {}
   write(chunk: Buffer | string): string { this.buffer += Buffer.from(chunk).toString('utf8'); return this.flush(false) }
-  end(): string { return this.flush(true) }
+  end(): string {
+    const out = this.flush(true)
+    // A few gateways close the stream without emitting [DONE] or a finish
+    // reason. Complete the Responses state machine on EOF so clients never
+    // receive an in-progress response with no output item.
+    if (this.started && !this.completed) {
+      this.completed = true
+      return out + this.completedEvent()
+    }
+    return out
+  }
   private flush(final: boolean): string {
     const parts = this.buffer.split(/\r?\n\r?\n/); if (!final) this.buffer = parts.pop() || ''
     else this.buffer = ''

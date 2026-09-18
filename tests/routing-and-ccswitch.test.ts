@@ -24,6 +24,9 @@ describe('channel failover policy', () => {
     expect(native.model).toBe('gpt-5.6-terra')
     const array = chatToResponses({ id: 'chatcmpl_2', choices: [{ message: { role: 'assistant', content: [{ type: 'text', text: '你' }, { type: 'text', text: '好' }] } }] }, 'gpt-5.6-sol')
     expect(array.output[0].content[0].text).toBe('你好')
+    const empty = chatToResponses({ id: 'chatcmpl_empty', choices: [], usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 } }, 'gpt-5.6-terra')
+    expect(empty.output).toHaveLength(1)
+    expect(empty.output[0].type).toBe('message')
   })
 
   test('includes output item in completed SSE event', () => {

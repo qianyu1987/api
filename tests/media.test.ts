@@ -15,6 +15,11 @@ describe('media pricing and input',()=>{
  test('maps the enhanced image engine to its separate provider model',()=>{
   expect(validateMedia({kind:'image',engine:'enhanced',prompt:'test',size:'1K'})).toMatchObject({engine:'enhanced',model:'gpt-image-2.5',payload:{model:'gpt-image-2.5',size:'1536x1024'}})
  })
+ test('keeps standard images free while preserving their upstream cost snapshot',async()=>{
+  const s=new MediaService({one:vi.fn(async(sql:string)=>sql.includes('media_prices')?{enabled:true,channel_enabled:true,cost_source:'Agnes',normal_cost_micros:'100',actual_cost_micros:'80',channel_id:'channel'}:null),query:vi.fn(async()=>[])} as any,{walletTopupMultiplierBps:30000} as any)
+  const q=await s.quote('user',{kind:'image',engine:'standard',prompt:'test',size:'1K'})
+  expect(q.chargeMicros).toBe('0');expect(q.snapshot).toMatchObject({freeStandard:true,actualCostMicros:'80'})
+ })
  test.each([{kind:'video',size:'1080P'},{kind:'video',seconds:13},{kind:'video',mode:'reference'},{kind:'video',mode:'text',images:['https://example.com/a']},{kind:'video',mode:'keyframe'},{kind:'image',size:'100K'},{kind:'image',n:2},{kind:'image',images:['http://localhost/a']}])('rejects unsupported request %j',p=>{expect(()=>validateMedia({prompt:'test',...p})).toThrow()})
  test('only accepts HTTPS result links',()=>{expect(mediaResultUrl({data:[{url:'https://example.com/x.png'}]})).toBe('https://example.com/x.png');expect(mediaResultUrl({url:'javascript:alert(1)'})).toBeNull();expect(mediaResultUrl({metadata:{url:'https://example.com/video.mp4'}})).toBe('https://example.com/video.mp4')})
 })
@@ -96,6 +101,22 @@ describe('media idempotency conflicts',()=>{
 })
 
 describe('media wallet availability',()=>{
+ test('API auto quote still validates wallet and persists API key audit',async()=>{
+  const query=vi.fn(async(sql:string,p:any[])=>{
+   if(sql.startsWith('SELECT count'))return {rows:[{n:0}]}
+   if(sql.startsWith('SELECT balance_micros'))return {rows:[{balance_micros:'100000',reserved_micros:'0'}]}
+   if(sql.startsWith('INSERT INTO media_tasks'))return {rows:[{id:p[0],status:'queued',api_key_id:p[2]}]}
+   return {rows:[]}
+  })
+  const s=new MediaService({one:async()=>null,tx:async(fn:any)=>fn({query})} as any,{} as any)
+  vi.spyOn(s,'quote').mockResolvedValue({chargeMicros:'50000',quoteToken:'current',price:{channel_id:'channel'},snapshot:{actualCostMicros:'10000'}} as any)
+  const body={kind:'image',prompt:'test',idempotencyKey:'auto_quote_123456'}
+  await expect(s.create('user',body,'api-key-id')).rejects.toThrow('报价已变化')
+  expect(await s.create('user',body,'api-key-id',true)).toMatchObject({status:'queued'})
+  const insert=query.mock.calls.find(([sql])=>sql.startsWith('INSERT INTO media_tasks'))
+  expect(insert?.[1][2]).toBe('api-key-id')
+  expect(query.mock.calls.filter(([sql])=>sql.startsWith('UPDATE wallets'))).toHaveLength(1)
+ })
  test.each([['100000','0',true],['100000','90000',false]])('uses wallet balance %s reserved %s',async(balance,reserved,allowed)=>{
  const query=vi.fn(async(sql:string,p:any[])=>{
  if(sql.startsWith('SELECT count'))return {rows:[{n:0}]}
@@ -118,11 +139,11 @@ describe('media wallet availability',()=>{
 })
 
 describe('public media identity',()=>{
- test('catalog exposes types instead of upstream models',async()=>{
+ test('catalog exposes user-facing tiers and labels',async()=>{
   const svc=new MediaService({query:async()=>[{model:'agnes-image-2.5-flash',size:'4K',enabled:true,normal_cost_micros:'10',channel_enabled:true},{model:'gpt-image-2',size:'1K',enabled:true,normal_cost_micros:'10',channel_enabled:true},{model:'gpt-image-2.5',size:'1K',enabled:true,normal_cost_micros:'10',channel_enabled:true}]} as any,{} as any)
   const catalog=await svc.catalog()
-  expect(catalog).toEqual({items:[{kind:'image',size:'4K',engine:'standard',label:'标准图片',available:true},{kind:'image',size:'1K',engine:'pro',label:'专业图片',available:true},{kind:'image',size:'1K',engine:'enhanced',label:'增强图片',available:true}],walletOnly:true})
- expect(JSON.stringify(catalog)).not.toMatch(/gpt|agnes/)
+  expect(catalog).toEqual({items:[{kind:'image',size:'4K',engine:'standard',label:'标准图片 · 免费',available:true},{kind:'image',size:'1K',engine:'pro',label:'专业图片 · gpt-image-2.0',available:true},{kind:'image',size:'1K',engine:'enhanced',label:'增强图片 · gpt-image-2.5（顶级画质）',available:true}],walletOnly:true})
+ expect(JSON.stringify(catalog)).not.toMatch(/agnes/)
  })
  test('task hides model and upstream result address',()=>{
  const svc=new MediaService({} as any,{} as any)

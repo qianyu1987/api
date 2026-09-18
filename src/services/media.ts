@@ -18,7 +18,7 @@ export class MediaService {
   constructor(private db: Database, private config: AppConfig) {}
   async catalog() {
     const rows = await this.db.query<any>('SELECT p.model,p.size,p.enabled,p.normal_cost_micros,p.channel_id,c.enabled AS channel_enabled,c.deleted_at FROM media_prices p LEFT JOIN channels c ON c.id=p.channel_id ORDER BY p.model,p.size')
-    return { items: rows.map(p => { const kind = p.model === 'agnes-video-2.5-flash' ? 'video' : 'image'; const item: any = { kind, size: p.size, available: Boolean(p.enabled && p.normal_cost_micros > 0 && p.channel_enabled && !p.deleted_at) }; if (kind === 'image') { item.engine = p.model === 'gpt-image-2' ? 'pro' : p.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'; item.label = p.model === 'gpt-image-2' ? '专业图片' : p.model === 'gpt-image-2.5' ? '增强图片' : '标准图片' } return item }), walletOnly: true }
+    return { items: rows.map(p => { const kind = p.model === 'agnes-video-2.5-flash' ? 'video' : 'image'; const freeStandard = p.model === 'agnes-image-2.5-flash'; const item: any = { kind, size: p.size, available: Boolean(p.enabled && (freeStandard || p.normal_cost_micros > 0) && p.channel_enabled && !p.deleted_at) }; if (kind === 'image') { item.engine = p.model === 'gpt-image-2' ? 'pro' : p.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'; item.label = p.model === 'gpt-image-2' ? '专业图片 · gpt-image-2.0' : p.model === 'gpt-image-2.5' ? '增强图片 · gpt-image-2.5（顶级画质）' : '标准图片 · 免费' } return item }), walletOnly: true }
   }
   async quote(userId: string, body: any, db: Pick<Database, 'query' | 'one'> = this.db) {
     const input = validateMedia(body)
@@ -30,20 +30,21 @@ export class MediaService {
     const ratio = await db.one<any>(`SELECT COALESCE(max(topup_multiplier_bps),10000)::int AS bps FROM orders WHERE user_id=$1 AND kind='wallet_topup' AND status='paid'`,[userId])
     const multiplier = Math.max(this.config.walletTopupMultiplierBps,Number(ratio?.bps || 10000))
     const normal = BigInt(price.normal_cost_micros)*BigInt(input.units), actual = BigInt(price.actual_cost_micros)*BigInt(input.units)
-    let charge = mediaPrice(normal > actual ? normal : actual,multiplier,rules.paymentFeeRateBps,rules.affiliateRateBps)
+    const freeStandard = input.model === 'agnes-image-2.5-flash'
+    let charge = freeStandard ? 0n : mediaPrice(normal > actual ? normal : actual,multiplier,rules.paymentFeeRateBps,rules.affiliateRateBps)
     const snapshot = { normalCostMicros:normal.toString(),actualCostMicros:actual.toString(),multiplierBps:multiplier,feeBps:rules.paymentFeeRateBps,rebateBps:rules.affiliateRateBps,marginBps:3000,costSource:price.cost_source,priceUpdatedAt:price.updated_at,chargeMicros:charge.toString() }
     const cash = charge * 10000n / BigInt(multiplier)
     Object.assign(snapshot,{estimatedRevenueMicros:cash.toString(),estimatedFeesMicros:(cash*BigInt(rules.paymentFeeRateBps)/10000n).toString(),estimatedRebateMicros:(cash*BigInt(rules.affiliateRateBps)/10000n).toString(),estimatedProfitMicros:(cash-cash*BigInt(rules.paymentFeeRateBps+rules.affiliateRateBps)/10000n-actual).toString()})
     const giftRow = await db.one<any>('SELECT images_remaining,video_seconds_remaining FROM media_welcome_gifts WHERE user_id=$1',[userId])
     const gift = welcomeGift(input,giftRow)
-    if(gift){charge=0n;Object.assign(snapshot,{chargeMicros:'0',welcomeGift:gift,estimatedRevenueMicros:'0',estimatedFeesMicros:'0',estimatedRebateMicros:'0',estimatedProfitMicros:(-actual).toString()})}
+    if(freeStandard || gift){charge=0n;Object.assign(snapshot,{chargeMicros:'0',...(freeStandard ? {freeStandard:true} : {}),...(gift ? {welcomeGift:gift} : {}),estimatedRevenueMicros:'0',estimatedFeesMicros:'0',estimatedRebateMicros:'0',estimatedProfitMicros:(-actual).toString()})}
     const token = createHash('sha256').update(JSON.stringify({input,snapshot})).digest('hex')
     return {input,price,snapshot,chargeMicros:charge.toString(),quoteToken:token,walletOnly:!gift,gift}
   }
   publicTask(r: any) { return { id:r.id,kind:r.kind,status:r.status,progress:r.progress,chargeMicros:r.charge_micros,gift:r.price_snapshot?.welcomeGift||null,charged:r.status==='completed'&&BigInt(r.charge_micros||0)>0n,reserved:!['completed','failed'].includes(r.status),resultUrl:r.result_url ? '/api/me/media/tasks/'+encodeURIComponent(r.id)+'/result' : null,error:r.error_message,createdAt:r.created_at,finishedAt:r.finished_at } }
   async list(userId:string) { return {items:(await this.db.query<any>('SELECT * FROM media_tasks WHERE user_id=$1 ORDER BY created_at DESC,id DESC LIMIT 50',[userId])).map(r=>this.publicTask(r))} }
   async get(userId:string,id:string) { const r=await this.db.one<any>('SELECT * FROM media_tasks WHERE user_id=$1 AND id=$2',[userId,id]);if(!r)mediaError('任务不存在',404);return this.publicTask(r) }
-  async create(userId:string,body:any,keyId:string|null=null) {
+  async create(userId:string,body:any,keyId:string|null=null,autoQuote=false) {
     const nonce=String(body.idempotencyKey||'');if(!/^[a-zA-Z0-9_-]{16,100}$/.test(nonce))mediaError('缺少有效的幂等请求编号')
     const input=validateMedia(body)
     const old=await this.db.one<any>('SELECT * FROM media_tasks WHERE user_id=$1 AND idempotency_key=$2',[userId,nonce])
@@ -57,7 +58,7 @@ export class MediaService {
       await client.query('SELECT c.id FROM channels c JOIN media_prices p ON p.channel_id=c.id WHERE p.model=$1 AND p.size=$2 FOR SHARE OF c',[input.model,input.size])
       await client.query('SELECT key FROM app_settings FOR SHARE')
       const q=await this.quote(userId,body,{query:async(text:string,values:unknown[]=[]) => (await client.query(text,values)).rows,one:async(text:string,values:unknown[]=[]) => one<any>(client,text,values)})
-      if(body.quoteToken!==q.quoteToken)mediaError('报价已变化，请重新查看价格并确认生成',409)
+      if(!autoQuote&&body.quoteToken!==q.quoteToken)mediaError('报价已变化，请重新查看价格并确认生成',409)
       const count=await one<any>(client,"SELECT count(*)::int AS n FROM media_tasks WHERE user_id=$1 AND status NOT IN ('completed','failed')",[userId]);if(count.n>=2)mediaError('已有两项生成任务，请等待完成后再试',429)
       const wallet=await one<any>(client,'SELECT balance_micros,reserved_micros FROM wallets WHERE user_id=$1 FOR UPDATE',[userId]);
       if(!wallet||BigInt(wallet.balance_micros)-BigInt(wallet.reserved_micros)<BigInt(q.chargeMicros))mediaError('钱包可用余额不足，尚未扣费；媒体生成不使用月套餐，请先充值')

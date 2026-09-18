@@ -129,8 +129,8 @@ export function loadConfig(): AppConfig {
     // A wallet top-up is a promotional credit: paying ¥1 currently adds ¥3
     // to the API wallet. The payment order still records the amount paid.
     walletTopupMultiplierBps: nonNegativeInt('WALLET_TOPUP_MULTIPLIER_BPS', 30000),
-    chatgptDownloadUrl: text('CHATGPT_DOWNLOAD_URL', 'https://chatgpt.com/download/'),
-    ccswitchDownloadUrl: text('CCSWITCH_DOWNLOAD_URL', 'https://github.com/farion1231/cc-switch/releases/latest'),
+    chatgptDownloadUrl: text('CHATGPT_DOWNLOAD_URL', 'https://openai.com/zh-Hans-CN/codex/'),
+    ccswitchDownloadUrl: text('CCSWITCH_DOWNLOAD_URL', 'https://ccswitch.io/zh/'),
     smtp: {
       host: text('SMTP_HOST'),
       port: positiveInt('SMTP_PORT', 465),

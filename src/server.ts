@@ -29,6 +29,7 @@ import { ProfitService } from './services/profit.js'
 import { fallbackCostAlerts, fallbackCostPending, pendingFallbackCostSql } from './lib/cost-status.js'
 import { mediaUploadType } from './lib/media-upload.js'
 import { MediaService } from './services/media.js'
+import { registerMediaApi } from './lib/media-api.js'
 import { mediaResultUrl, mediaPrice } from './lib/media.js'
 import { ChatService } from './services/chat.js'
 import { ChannelCostService } from './services/channel-costs.js'
@@ -337,6 +338,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     try {return await chat.send(u.id,String((request.params as any).id),request.body,controller.signal)} finally {reply.raw.removeListener('close',close)}
   })
   const media = new MediaService(db, config)
+  registerMediaApi(app, auth, media)
   const mediaUser = async (request: any, reply: any) => {
     const raw = bearer(request.headers.authorization)
     if (!raw) return requireSession(request, reply)
@@ -374,15 +376,19 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   const sendStoredMedia = async (reply:any, taskId:string) => {
     const asset=await db.one<any>('SELECT content_type,content FROM media_task_assets WHERE task_id=$1',[taskId])
     if(!asset)return false
-    return reply.header('X-Content-Type-Options','nosniff').header('Cache-Control','private, no-store').type(asset.content_type).send(asset.content)
+    reply.header('X-Content-Type-Options','nosniff').header('Cache-Control','private, no-store').type(asset.content_type).send(asset.content)
+    return true
   }
-  app.get('/api/me/media/tasks/:id/result',async(request,reply)=>{
+  const mediaTaskResult = async(request:any,reply:any)=>{
     const user=await mediaUser(request,reply);if(!user)return
     const id=String((request.params as any).id)
     if(!/^[0-9a-f-]{36}$/i.test(id))return reply.code(404).send()
     const task=await db.one<any>("SELECT result_url,kind FROM media_tasks WHERE id=$1 AND user_id=$2 AND status='completed'",[id,user.id])
     if(!task?.result_url)return reply.code(404).send({error:{message:'作品不存在或尚未完成'}})
-    if(task.result_url.startsWith('stored://'))return (await sendStoredMedia(reply,id))||reply.code(404).send({error:{message:'作品不存在或尚未完成'}})
+    if(task.result_url.startsWith('stored://')) {
+      if(await sendStoredMedia(reply,id)) return
+      return reply.code(404).send({error:{message:'作品不存在或尚未完成'}})
+    }
     const url=new URL(task.result_url)
     if(url.protocol!=='https:'||url.hostname!=='platform-outputs.agnes-ai.space'||url.port||url.username||url.password)return reply.code(502).send({error:{message:'作品地址暂不可读取，请联系管理员'}})
     try {
@@ -396,7 +402,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       reply.header('Cache-Control','private, no-store').header('X-Content-Type-Options','nosniff').type(type).code(upstream.status)
       return reply.send(Readable.fromWeb(upstream.body as any))
     } catch {return reply.code(502).send({error:{message:'作品读取失败，请稍后重试'}})}
-  })
+  }
+  app.get('/api/me/media/tasks/:id/result',mediaTaskResult)
+  app.get('/v1/media/tasks/:id/result',mediaTaskResult)
   const mediaProxy = async (reply:any, resultUrl:string, range?:string) => {
     const url=new URL(resultUrl)
     if(url.protocol!=='https:'||url.hostname!=='platform-outputs.agnes-ai.space'||url.port||url.username||url.password)return reply.code(502).send({error:{message:'作品地址暂不可读取'}})
@@ -424,8 +432,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if(!/^[0-9a-f-]{36}$/i.test(id))return reply.code(404).send()
     const task=await db.one<any>("SELECT result_url FROM media_tasks WHERE id=$1 AND gallery_status='published' AND status='completed'",[id])
     if(!task?.result_url)return reply.code(404).send()
-    if(task.result_url.startsWith('stored://'))return (await sendStoredMedia(reply,id))||reply.code(404).send()
-    return mediaProxy(reply,task.result_url,request.headers.range)
+    if(task.result_url.startsWith('stored://')) {
+      if(await sendStoredMedia(reply,id)) return
+      return reply.code(404).send()
+    }
+    await mediaProxy(reply,task.result_url,request.headers.range)
+    return
   })
   app.get('/api/admin/media/tasks/:id/result',async(request,reply)=>{
     if(!await requireAdmin(request,reply))return
@@ -433,8 +445,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if(!/^[0-9a-f-]{36}$/i.test(id))return reply.code(404).send()
     const task=await db.one<any>("SELECT result_url FROM media_tasks WHERE id=$1 AND status='completed'",[id])
     if(!task?.result_url)return reply.code(404).send()
-    if(task.result_url.startsWith('stored://'))return (await sendStoredMedia(reply,id))||reply.code(404).send()
-    return mediaProxy(reply,task.result_url,request.headers.range)
+    if(task.result_url.startsWith('stored://')) {
+      if(await sendStoredMedia(reply,id)) return
+      return reply.code(404).send()
+    }
+    await mediaProxy(reply,task.result_url,request.headers.range)
+    return
   })
   app.get('/api/admin/media',async(request,reply)=>{
     if(!await requireAdmin(request,reply))return
@@ -1280,7 +1296,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     } catch (error) { reply.code(401).send({ error: { message: (error as Error).message, type: 'authentication_error' } }) }
   }
   const modelCatalog = async (request: any, reply: any) => {
-    reply.header('Cache-Control', 'public, max-age=300')
+    reply.header('Cache-Control', 'private, no-store')
     const raw = bearer((request.headers as any).authorization)
     if (!raw) { reply.code(401).header('WWW-Authenticate', 'Bearer').send({ error: { message: '需要 Bearer API Key', type: 'authentication_error' } }); return }
     try {
@@ -1299,6 +1315,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           FROM fixed_route_prices f
           JOIN channels c ON c.enabled = true AND c.model_map ? f.requested_model
           WHERE f.enabled = true AND f.requested_model IS NOT NULL
+          UNION
+          SELECT p.model
+          FROM media_prices p
+          JOIN channels c ON c.id=p.channel_id
+          WHERE p.enabled AND c.enabled AND c.deleted_at IS NULL
+            AND p.normal_cost_micros>0 AND p.cost_source IS NOT NULL
         ) catalog
         WHERE trim(model) <> ''
         ORDER BY model`)

@@ -524,17 +524,17 @@
     return p
   }
   function updateMediaControls() {
-    const f=$('#media-form'),video=f.elements.kind.value==='video',pro=!video&&(f.elements.engine?.value==='pro'||f.elements.engine?.value==='enhanced')
+    const f=$('#media-form'),video=f.elements.kind.value==='video',engine=f.elements.engine?.value||'standard',singleResolution=!video&&engine!=='standard'
     $('#media-video-fields').classList.toggle('hidden',!video)
     $('#media-engine-field')?.classList.toggle('hidden',video)
-    const sizes=video?['720P']:pro?['1K']:['1K','2K','3K','4K']
+    const sizes=video?['720P']:singleResolution?['1K']:['1K','2K','3K','4K']
     const selected=f.elements.size.value
     const activeSize=sizes.includes(selected)?selected:sizes[0]
     $('#media-size-options').innerHTML=sizes.map(size=>'<label><input type="radio" name="size" value="'+size+'" '+(size===activeSize?'checked':'')+'><span>'+size+'</span></label>').join('')
     const referenceUpload=$('#media-form [data-upload="images"]'),referenceLinks=$('#media-form [name="images"]')?.closest('label')
-    referenceUpload?.classList.toggle('hidden',pro)
-    referenceLinks?.classList.toggle('hidden',pro)
-    if(pro&&f.elements.images)f.elements.images.value=''
+    referenceUpload?.classList.toggle('hidden',singleResolution)
+    referenceLinks?.classList.toggle('hidden',singleResolution)
+    if(singleResolution&&f.elements.images)f.elements.images.value=''
   }
   async function loadMedia() {
     if(mediaTimer)clearTimeout(mediaTimer)
@@ -542,8 +542,8 @@
       const [catalog,tasks] = await Promise.all([api('/api/me/media/catalog'),api('/api/me/media/tasks')])
       const f=$('#media-form'); const kind=f.elements.kind.value,engine=kind==='image'?(f.elements.engine?.value||'standard'):undefined
       const available=catalog.items.some(p=>p.kind===kind&&p.size===f.elements.size.value&&(kind!=='image'||(p.engine||'standard')===engine)&&p.available)
-      $('#media-availability').textContent=available?'输入描述后自动显示价格，成功生成后扣费。':'此规格暂未开放，正在核实上游成本。'
-      if(catalog.gift)$('#media-availability').textContent+=' 免费福利可用：标准 1K 图片 '+catalog.gift.images_remaining+' 张，720P 视频 '+catalog.gift.video_seconds_remaining+' 秒。'
+      $('#media-availability').textContent=available?(kind==='image'&&engine==='standard'?'标准图片免费生成，不冻结、不扣除钱包余额。':'输入描述后自动显示价格，成功生成后扣费。'):'此规格暂未开放，正在核实上游成本。'
+      if(catalog.gift&&Number(catalog.gift.video_seconds_remaining)>0)$('#media-availability').textContent+=' 免费视频福利可用：720P 视频 '+catalog.gift.video_seconds_remaining+' 秒。'
       if(!mediaQuote && !mediaBusy) scheduleMediaQuote()
       const labels={queued:'排队中',submitting:'提交中',processing:'生成中',unknown:'待人工核实',completed:'已完成',failed:'失败，额度已释放'}
       $('#media-tasks').innerHTML=table(['类型 / 时间','进度','钱包额度','结果'],tasks.items.map(t=>'<tr><td>'+(t.kind==='video'?'视频生成':'图片生成')+'<small class="subline">'+date(t.createdAt)+'</small></td><td>'+esc(labels[t.status])+' '+Number(t.progress)+'%</td><td>'+money({micros:t.chargeMicros})+' · '+(t.gift?'免费福利 · '+(t.reserved?'使用中':t.status==='completed'?'已使用':'已退回'):t.charged?'已扣费':t.reserved?'冻结中':'已释放')+'</td><td>'+(t.resultUrl?'<a href="'+esc(t.resultUrl)+'" target="_blank" rel="noopener noreferrer">查看 / 下载作品</a>':esc(t.error||'等待生成'))+'</td></tr>'))
