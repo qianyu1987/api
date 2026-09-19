@@ -24,6 +24,12 @@ describe('media pricing and input',()=>{
  test('only accepts HTTPS result links',()=>{expect(mediaResultUrl({data:[{url:'https://example.com/x.png'}]})).toBe('https://example.com/x.png');expect(mediaResultUrl({url:'javascript:alert(1)'})).toBeNull();expect(mediaResultUrl({metadata:{url:'https://example.com/video.mp4'}})).toBe('https://example.com/video.mp4')})
 })
 describe('media submission lifecycle',()=>{
+ test('legacy unknown task starts its automatic confirmation window',async()=>{
+  const query=vi.fn(async()=>[])
+  const db:any={query,tx:async(fn:any)=>fn({query:vi.fn(async()=>({rows:[]}))})}
+  await new MediaService(db,{} as any).tick()
+  expect(query.mock.calls.some(([sql])=>sql.includes("status='unknown' AND uncertain_since IS NULL"))).toBe(true)
+ })
  test('ambiguous submit is not resent or released',async()=>{
  const task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'queued',channel_id:'channel',request_payload:{}}
  const query=vi.fn(async()=>[]);const db:any={query,one:vi.fn(async()=>({base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:'bad',enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}

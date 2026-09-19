@@ -1078,6 +1078,9 @@ CREATE TABLE IF NOT EXISTS media_tasks (
 CREATE INDEX IF NOT EXISTS media_tasks_user_idx ON media_tasks(user_id,created_at DESC,id DESC);
 ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS user_input JSONB;
 ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS uncertain_since TIMESTAMPTZ;
+UPDATE media_tasks
+SET uncertain_since=now(),next_poll_at=LEAST(next_poll_at,now())
+WHERE status='unknown' AND uncertain_since IS NULL;
 DROP INDEX IF EXISTS media_tasks_pending_idx;
 CREATE INDEX media_tasks_pending_idx ON media_tasks(next_poll_at) WHERE status IN ('queued','processing','unknown');
 UPDATE media_tasks

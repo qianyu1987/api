@@ -173,6 +173,7 @@ export class MediaService {
     })
   }
   async tick() {
+    await this.db.query("UPDATE media_tasks SET uncertain_since=now(),next_poll_at=LEAST(next_poll_at,now()) WHERE status='unknown' AND uncertain_since IS NULL")
     const expired = await this.db.query<any>("SELECT id FROM media_tasks WHERE status='unknown' AND uncertain_since<=now()-interval '1 minute' AND (lease_until IS NULL OR lease_until<now()) ORDER BY uncertain_since LIMIT 20")
     for (const row of expired) await this.finish(String(row.id),false,null,'生成结果未确认，额度已自动退回，可重新生成')
     // A crashed submission may have reached upstream. Never automatically resend.
