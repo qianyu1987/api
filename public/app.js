@@ -250,7 +250,7 @@
     if (data.orderId) {
       const started = Date.now(); const timer = setInterval(async () => {
         if (Date.now() - started > 31 * 60 * 1000) return clearInterval(timer)
-        try { const order = await api('/api/me/orders/' + encodeURIComponent(data.orderId)); if (order.status === 'paid') { clearInterval(timer); $('#payment-status').textContent = '支付成功'; $('#payment-status-note').textContent = order.walletCreditAmount ? '钱包已到账 ' + money(order.walletCreditAmount) + '，正在刷新账户信息。' : '余额已入账，正在刷新账户信息。'; await Promise.all([loadOverview(), loadRecharge()]) } else if (['failed', 'expired', 'closed'].includes(order.status)) { clearInterval(timer); const labels = { failed: '失败', expired: '已过期', closed: '已关闭' }; $('#payment-status').textContent = '订单' + (labels[order.status] || order.status); $('#payment-status-note').textContent = '请重新创建订单或联系管理员处理。' } } catch { /* keep polling while the session is valid */ }
+        try { const order = await api('/api/me/orders/' + encodeURIComponent(data.orderId)); if (order.creditStatus === 'credited') { clearInterval(timer); $('#payment-status').textContent = '到账成功'; $('#payment-status-note').textContent = order.creditMessage + (order.creditedAmountMicros ? ' ' + money({ micros: order.creditedAmountMicros }) : '') + '，正在刷新账户信息。'; await Promise.all([loadOverview(), loadRecharge()]) } else if (order.status === 'paid') { $('#payment-status').textContent = '支付成功'; $('#payment-status-note').textContent = order.creditMessage || '正在自动核对到账，请稍候。' } else if (['failed', 'expired', 'closed'].includes(order.status)) { clearInterval(timer); const labels = { failed: '失败', expired: '已过期', closed: '已关闭' }; $('#payment-status').textContent = '订单' + (labels[order.status] || order.status); $('#payment-status-note').textContent = '请重新创建订单。' } } catch { /* keep polling while the session is valid */ }
       }, 5000)
     }
   }
@@ -300,7 +300,7 @@
     }
     if (tab === 'media-admin') {
       const prices = data.prices || []; const channels = data.channels || []
-      const mediaRows=(data.tasks||[]).map(t=>'<tr><td><div class="admin-media-preview">'+(t.result_url?(t.kind==='video'?'<video src="/api/admin/media/tasks/'+esc(t.id)+'/result" muted preload="metadata"></video>':'<img src="/api/admin/media/tasks/'+esc(t.id)+'/result" alt="作品预览" loading="lazy">'):'<span>无结果</span>')+'</div></td><td>'+esc(t.username)+'<small class="subline">'+date(t.created_at)+'</small></td><td>'+(t.kind==='video'?'视频':'图片')+'<small class="subline">'+esc(t.status)+'</small></td><td><input class="gallery-title-input" data-gallery-title="'+esc(t.id)+'" maxlength="80" value="'+esc(t.gallery_title||'')+'" placeholder="公开标题"></td><td><span class="state '+(t.gallery_status==='published'?'good':'bad')+'">'+({published:'已发布',hidden:'已隐藏',private:'未发布'}[t.gallery_status]||'未发布')+'</span>'+(t.gallery_featured?'<small class="subline">精选作品</small>':'')+'</td><td><div class="row-actions">'+(t.status==='completed'?'<button class="small-button" type="button" data-gallery-action="publish" data-featured="'+String(t.gallery_featured===true)+'" data-id="'+esc(t.id)+'">发布</button><button class="small-button" type="button" data-gallery-action="feature" data-featured="'+String(t.gallery_featured===true)+'" data-id="'+esc(t.id)+'">'+(t.gallery_featured?'取消精选':'设为精选')+'</button><button class="small-button" type="button" data-gallery-action="hide" data-id="'+esc(t.id)+'">隐藏</button><button class="small-button danger-button" type="button" data-gallery-action="private" data-id="'+esc(t.id)+'">移出广场</button>':'—')+(t.status==='unknown'?'<button type="button" class="small-button" data-media-resolve="'+esc(t.id)+'">核实处理</button>':'')+'</div></td></tr>')
+      const mediaRows=(data.tasks||[]).map(t=>'<tr><td><div class="admin-media-preview">'+(t.result_url?(t.kind==='video'?'<video src="/api/admin/media/tasks/'+esc(t.id)+'/result" muted preload="metadata"></video>':'<img src="/api/admin/media/tasks/'+esc(t.id)+'/result" alt="作品预览" loading="lazy">'):'<span>无结果</span>')+'</div></td><td>'+esc(t.username)+'<small class="subline">'+date(t.created_at)+'</small></td><td>'+(t.kind==='video'?'视频':'图片')+'<small class="subline">'+esc(t.status)+'</small></td><td><input class="gallery-title-input" data-gallery-title="'+esc(t.id)+'" maxlength="80" value="'+esc(t.gallery_title||'')+'" placeholder="公开标题"></td><td><span class="state '+(t.gallery_status==='published'?'good':'bad')+'">'+({published:'已发布',hidden:'已隐藏',private:'未发布'}[t.gallery_status]||'未发布')+'</span>'+(t.gallery_featured?'<small class="subline">精选作品</small>':'')+'</td><td><div class="row-actions">'+(t.status==='completed'?'<button class="small-button" type="button" data-gallery-action="publish" data-featured="'+String(t.gallery_featured===true)+'" data-id="'+esc(t.id)+'">发布</button><button class="small-button" type="button" data-gallery-action="feature" data-featured="'+String(t.gallery_featured===true)+'" data-id="'+esc(t.id)+'">'+(t.gallery_featured?'取消精选':'设为精选')+'</button><button class="small-button" type="button" data-gallery-action="hide" data-id="'+esc(t.id)+'">隐藏</button><button class="small-button danger-button" type="button" data-gallery-action="private" data-id="'+esc(t.id)+'">移出广场</button>':'—')+'</div></td></tr>')
       return '<p class="notice">目标利润率 30%，已考虑充值倍率、支付费用和返利。常规成本决定售价，实际成本单独记录。金额单位：人民币元 / 张；视频为元 / 秒。成本未核实请勿启用。</p>' + prices.map(p => form('media-price', [
         field('model','模型',p.model,'text','readonly'),field('size','规格',p.size,'text','readonly'),
         '<label>媒体专用渠道<select name="channelId" required>' + channels.map(c=>'<option value="'+esc(c.id)+'" '+(c.id===p.channel_id?'selected':'')+'>'+esc(c.name)+'</option>').join('') + '</select></label>',
@@ -365,7 +365,14 @@
       const conversion = (data.conversions || []).map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>已完成</td></tr>')
       return editor + '<div><p class="admin-section-title">佣金流水</p>' + table(['时间', '邀请人', '被邀请人', '充值', '比例', '返利'], commission, '暂无佣金流水') + '</div><div><p class="admin-section-title">兑换流水</p>' + table(['时间', '用户', '兑换金额', '状态'], conversion, '暂无兑换流水') + '</div>'
     }
-    if (tab === 'orders') return table(['时间', '用户', '类型', '金额', '方式', '状态', '订单号'], items.map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + esc(item.kind) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>' + esc(item.payment_method) + '</td><td><span class="state ' + (item.status === 'paid' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td><code>' + esc(item.order_no) + '</code></td></tr>'))
+    if (tab === 'orders') return table(['时间', '用户', '类型', '金额', '方式', '支付状态', '到账状态', '订单号', '操作'], items.map((item) => {
+      const creditLabel = item.creditStatus === 'credited' ? (item.kind === 'wallet_topup' ? '已到账' : '套餐已生效') : item.creditStatus === 'pending' ? '待支付' : item.creditStatus === 'inconsistent' ? '到账异常' : '不适用'
+      const creditClass = item.creditStatus === 'credited' ? 'good' : item.creditStatus === 'inconsistent' ? 'bad' : ''
+      const creditAmount = item.creditedAmountMicros ? '<small class="subline">' + money({ micros: item.creditedAmountMicros }) + ' · ' + date(item.creditedAt) + '</small>' : ''
+      const creditAudit = item.credit_reconciled_at ? '<small class="subline">补账审计：' + date(item.credit_reconciled_at) + ' · ' + esc(item.credit_reconciled_by || '系统自动') + '</small>' : ''
+      const action = item.creditStatus === 'inconsistent' ? '<button class="small-button" type="button" data-order-reconcile="' + esc(item.id) + '">重新核对</button>' : '—'
+      return '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + esc(item.kind) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>' + esc(item.payment_method) + '</td><td><span class="state ' + (item.status === 'paid' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td><span class="state ' + creditClass + '">' + creditLabel + '</span><small class="subline">' + esc(item.creditMessage || '') + '</small>' + creditAmount + creditAudit + '</td><td><code>' + esc(item.order_no) + '</code></td><td>' + action + '</td></tr>'
+    }))
     if (tab === 'admin-usage') {
       const rows = items.map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td><code>' + esc(item.request_id) + '</code></td><td>' + esc(item.requested_model) + (item.upstream_model && item.upstream_model !== item.requested_model ? '<small class="subline">上游 ' + esc(item.upstream_model) + '</small>' : '') + '</td><td>' + esc(item.final_channel_name_snapshot || '—') + '</td><td>' + money({ micros: item.charge_micros }) + '</td><td>' + money({ micros: item.cost_micros }) + ' / ' + money({ micros: item.profit_micros }) + (item.fallbackCostPending ? '<small class="subline">兜底成本待核实 · 利润为估算</small>' : '') + '</td><td><button class="small-button admin-attempts" type="button" data-id="' + esc(item.request_id) + '">链路</button></td></tr>')
       return table(['时间', '用户', '请求 ID', '模型', '最终渠道', '收费', '成本 / 利润', '操作'], rows) + '<div id="attempt-detail"></div>'
@@ -515,6 +522,7 @@
 
   const mediaForm = $('#media-form')
   let mediaQuote = null, mediaNonce = null, mediaTimer = null, quoteTimer = null, quoteVersion = 0, mediaBusy = false, originalPrompt = null
+  const mediaTaskInputs = new Map()
   function mediaPayload() {
     const f = $('#media-form'); const p = Object.fromEntries(new FormData(f).entries())
     p.images = p.images.split(/\n/).map(s=>s.trim()).filter(Boolean)
@@ -545,8 +553,9 @@
       $('#media-availability').textContent=available?(kind==='image'&&engine==='standard'?'标准图片免费生成，不冻结、不扣除钱包余额。':'输入描述后自动显示价格，成功生成后扣费。'):'此规格暂未开放，正在核实上游成本。'
       if(catalog.gift&&Number(catalog.gift.video_seconds_remaining)>0)$('#media-availability').textContent+=' 免费视频福利可用：720P 视频 '+catalog.gift.video_seconds_remaining+' 秒。'
       if(!mediaQuote && !mediaBusy) scheduleMediaQuote()
-      const labels={queued:'排队中',submitting:'提交中',processing:'生成中',unknown:'待人工核实',completed:'已完成',failed:'失败，额度已释放'}
-      $('#media-tasks').innerHTML=table(['类型 / 时间','进度','钱包额度','结果'],tasks.items.map(t=>'<tr><td>'+(t.kind==='video'?'视频生成':'图片生成')+'<small class="subline">'+date(t.createdAt)+'</small></td><td>'+esc(labels[t.status])+' '+Number(t.progress)+'%</td><td>'+money({micros:t.chargeMicros})+' · '+(t.gift?'免费福利 · '+(t.reserved?'使用中':t.status==='completed'?'已使用':'已退回'):t.charged?'已扣费':t.reserved?'冻结中':'已释放')+'</td><td>'+(t.resultUrl?'<a href="'+esc(t.resultUrl)+'" target="_blank" rel="noopener noreferrer">查看 / 下载作品</a>':esc(t.error||'等待生成'))+'</td></tr>'))
+      mediaTaskInputs.clear(); tasks.items.forEach(t=>mediaTaskInputs.set(t.id,t))
+      const labels={queued:'排队中',submitting:'提交中',processing:'生成中',unknown:'自动确认中',completed:'已完成',failed:'失败，额度已自动退回'}
+      $('#media-tasks').innerHTML=table(['类型 / 时间','进度','钱包额度','结果','操作'],tasks.items.map(t=>'<tr><td>'+(t.kind==='video'?'视频生成':'图片生成')+'<small class="subline">'+date(t.createdAt)+'</small></td><td>'+esc(labels[t.status])+' '+Number(t.progress)+'%</td><td>'+money({micros:t.chargeMicros})+' · '+(t.gift?'免费福利 · '+(t.reserved?'使用中':t.status==='completed'?'已使用':'已退回'):t.charged?'已扣费':t.reserved?'冻结中':t.refundStatus==='returned'?'已自动退回':'已释放')+'</td><td>'+(t.resultUrl?'<a href="'+esc(t.resultUrl)+'" target="_blank" rel="noopener noreferrer">查看 / 下载作品</a>':esc(t.error||'等待生成'))+'</td><td>'+(t.canRetry?'<button class="small-button" type="button" data-media-retry="'+esc(t.id)+'">'+(t.status==='completed'?'再次创作':'重新生成')+'</button>':'—')+'</td></tr>'))
       if(tasks.items.some(t=>t.reserved)&&!document.hidden&&$('#view-media').classList.contains('active-view'))mediaTimer=setTimeout(loadMedia,5000)
     } catch(error){$('#media-error').textContent=error.message}
   }
@@ -602,6 +611,21 @@
     else if(event.target.name==='size')loadMedia()
   })
   $('#media-refresh').addEventListener('click',loadMedia)
+  $('#media-tasks').addEventListener('click',event=>{
+    const button=event.target.closest('[data-media-retry]');if(!button||mediaBusy||mediaUploading)return
+    const task=mediaTaskInputs.get(button.dataset.mediaRetry);if(!task?.input)return
+    const input=task.input,f=$('#media-form')
+    const setRadio=(name,value)=>{const node=[...f.elements[name]].find(item=>item.value===String(value));if(node)node.checked=true}
+    setRadio('kind',input.kind||task.kind);if(input.engine)setRadio('engine',input.engine);updateMediaControls()
+    setRadio('size',input.size||'1K');setRadio('ratio',input.ratio||'16:9');if(input.mode)setRadio('mode',input.mode)
+    f.elements.prompt.value=input.prompt||'';if(f.elements.seconds&&input.seconds)f.elements.seconds.value=input.seconds
+    for(const name of ['images','audios'])if(f.elements[name])f.elements[name].value=Array.isArray(input[name])?input[name].join('\n'):''
+    for(const name of ['first_frame','last_frame'])if(f.elements[name])f.elements[name].value=input[name]||''
+    $$('[data-upload-list]').forEach(node=>{node.innerHTML=''})
+    originalPrompt=null;$('#media-restore').classList.add('hidden');$('#media-expand-status').textContent=''
+    show('media');f.scrollIntoView({behavior:'smooth',block:'start'});f.elements.prompt.focus();scheduleMediaQuote()
+    toast(task.assetsMayHaveExpired?'原素材地址可能已失效，请重新上传后再生成':'已填入原参数，请确认新报价后提交')
+  })
   $('#media-form').addEventListener('submit',event=>event.preventDefault())
   $('#media-create').addEventListener('click',async()=>{
     if(!mediaQuote||mediaBusy||mediaUploading)return
@@ -817,13 +841,8 @@
       const key = editor.elements.namedItem('apiKey'); key.required = true; key.placeholder = ''
       editor.querySelector('[type="submit"]').textContent = '新增渠道'; cancelChannelEdit.remove(); editor.elements.namedItem('name').focus(); return
     }
-    const mediaResolve=target.closest('[data-media-resolve]')
-    if(mediaResolve){
-      const reason=prompt('请填写在上游核实任务的依据（至少 5 字）；未核实请取消。');if(!reason)return
-      const upstreamId=prompt('如已找到视频任务，填写 video_id 以恢复查询；留空则申请按失败释放。');if(upstreamId===null)return
-      if(!upstreamId&&!confirm('确认已经在上游核实生成失败？这会释放用户冻结额度。'))return
-      try{await api('/api/admin/media/tasks/'+encodeURIComponent(mediaResolve.dataset.mediaResolve)+'/resolve',{method:'POST',body:JSON.stringify({reason,upstreamId:upstreamId||undefined,confirmedFailed:!upstreamId})});await loadAdmin('media-admin')}catch(e){toast(e.message,true)}return
-    }
+    const orderReconcile=target.closest('[data-order-reconcile]')
+    if(orderReconcile){pending(orderReconcile,true,'核对中…');try{const result=await api('/api/admin/orders/'+encodeURIComponent(orderReconcile.dataset.orderReconcile)+'/reconcile',{method:'POST'});toast(result.creditRepaired?'补账完成，审计记录已保存':result.creditMessage||'到账核对完成');await loadAdmin('orders')}catch(e){toast(e.message,true);pending(orderReconcile,false)}return}
     const galleryAction=target.closest('[data-gallery-action]')
     if(galleryAction){
       const id=galleryAction.dataset.id, action=galleryAction.dataset.galleryAction

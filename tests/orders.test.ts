@@ -106,3 +106,107 @@ describe('new order payment method', () => {
     expect(() => normalizeNewOrderPaymentMethod('card')).toThrow('目前仅支持微信支付')
   })
 })
+
+function reconciliationHarness(overrides: Record<string, unknown> = {}) {
+  const order: any = {
+    id: 'order-1', order_no: 'RSORDER1', user_id: 'user-1', kind: 'wallet_topup',
+    status: 'paid', paid_amount_micros: '10000', amount_micros: '10000',
+    topup_multiplier_bps: 30000, payment_provider: 'wechat_native', payment_method: 'wechat',
+    provider_trade_id: 'trade-1', paid_at: new Date('2026-09-20T00:00:00Z'), wallet_credit_micros: null,
+    ...overrides,
+  }
+  let walletBalance = '1000'
+  let ledger: any = null
+  let purchase: any = null
+  const audits: unknown[][] = []
+  const purchaseInserts: unknown[][] = []
+  const client = {
+    query: vi.fn(async (sql: string, values: any[] = []) => {
+      const normalized = sql.replace(/\s+/g, ' ').trim()
+      if (normalized.startsWith('SELECT * FROM orders')) return result([order])
+      if (normalized.startsWith('SELECT id,amount_micros FROM wallet_ledger')) return result(ledger ? [ledger] : [])
+      if (normalized.startsWith('SELECT id FROM users')) return result([{ id: order.user_id }])
+      if (normalized.startsWith('SELECT balance_micros FROM wallets')) return result([{ balance_micros: walletBalance }])
+      if (normalized.startsWith('UPDATE wallets')) { walletBalance = String(values[0]); return result() }
+      if (normalized.startsWith('INSERT INTO wallet_ledger')) {
+        ledger = { id: 'ledger-1', amount_micros: String(values[1]), created_at: new Date('2026-09-20T00:01:00Z') }
+        return result()
+      }
+      if (normalized.startsWith('UPDATE orders SET wallet_credit_micros')) { order.wallet_credit_micros = values[0]; return result() }
+      if (normalized.startsWith('SELECT id FROM subscription_purchases')) return result(purchase ? [{ id: purchase.id }] : [])
+      if (normalized.startsWith('SELECT id FROM plans')) return result([{ id: order.plan_id }])
+      if (normalized.startsWith('SELECT * FROM subscriptions')) return result()
+      if (normalized.startsWith('INSERT INTO subscriptions')) return result([{ id: 'subscription-1' }])
+      if (normalized.startsWith('INSERT INTO subscription_purchases')) {
+        purchaseInserts.push(values)
+        purchase = { id: 'purchase-1', quota_added_micros: String(values[4]), amount_paid_micros: String(values[5]), created_at: new Date('2026-09-20T00:01:00Z') }
+        return result()
+      }
+      if (normalized.startsWith('INSERT INTO subscription_ledger')) return result()
+      if (normalized.startsWith('INSERT INTO admin_audit_events')) { audits.push(values); return result() }
+      throw new Error(`unexpected SQL: ${normalized}`)
+    }),
+  }
+  const db = {
+    tx: async (action: (transaction: typeof client) => Promise<unknown>) => action(client),
+    one: vi.fn(async () => ({
+      ...order,
+      credit_record_id: order.kind === 'wallet_topup' ? ledger?.id : purchase?.id,
+      credited_amount_micros: order.kind === 'wallet_topup' ? ledger?.amount_micros : purchase?.quota_added_micros,
+      credited_at: order.kind === 'wallet_topup' ? ledger?.created_at : purchase?.created_at,
+      credited_paid_amount_micros: purchase?.amount_paid_micros,
+    })),
+    query: vi.fn(async () => []),
+  }
+  const affiliate = { creditForTopup: vi.fn().mockResolvedValue(undefined) }
+  const service = new OrderService(db as any, affiliate as any, { defaultAffiliateRateBps: 1000 } as any)
+  return { service, order, client, affiliate, audits, purchaseInserts, walletBalance: () => walletBalance, setLedger: (value: any) => { ledger = value } }
+}
+
+describe('paid order credit reconciliation', () => {
+  test('repairs a missing wallet ledger once using the order multiplier snapshot', async () => {
+    const h = reconciliationHarness()
+    await expect(h.service.reconcileCredit('order-1', 'admin-1')).resolves.toMatchObject({ creditStatus: 'credited', creditedAmountMicros: '30000' })
+    await expect(h.service.reconcileCredit('order-1', 'admin-1')).resolves.toMatchObject({ creditStatus: 'credited', creditedAmountMicros: '30000' })
+    expect(h.walletBalance()).toBe('31000')
+    expect(h.client.query.mock.calls.filter(([sql]) => String(sql).includes('INSERT INTO wallet_ledger'))).toHaveLength(1)
+    expect(h.affiliate.creditForTopup).toHaveBeenCalledTimes(1)
+    expect(h.audits).toHaveLength(1)
+  })
+
+  test('does not repair an unpaid order or one missing verified payment metadata', async () => {
+    for (const overrides of [{ status: 'pending' }, { provider_trade_id: null }, { paid_amount_micros: null }]) {
+      const h = reconciliationHarness(overrides)
+      await h.service.reconcileCredit('order-1')
+      expect(h.client.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO wallet_ledger'))).toBe(false)
+      expect(h.affiliate.creditForTopup).not.toHaveBeenCalled()
+    }
+  })
+
+  test('keeps a mismatched wallet ledger inconsistent without adding credit', async () => {
+    const h = reconciliationHarness({ wallet_credit_micros: '25000' })
+    h.setLedger({ id: 'ledger-1', amount_micros: '25000', created_at: new Date() })
+    await expect(h.service.reconcileCredit('order-1')).resolves.toMatchObject({ creditStatus: 'inconsistent', creditedAmountMicros: '25000' })
+    expect(h.walletBalance()).toBe('1000')
+    expect(h.audits).toHaveLength(0)
+  })
+
+  test('repairs a subscription from immutable order snapshots and remains idempotent', async () => {
+    const h = reconciliationHarness({
+      kind: 'subscription', plan_id: 'plan-1', plan_name_snapshot: '专业套餐',
+      plan_quota_micros: '880000', plan_duration_days: 30,
+    })
+    await h.service.reconcileCredit('order-1')
+    await expect(h.service.reconcileCredit('order-1')).resolves.toMatchObject({ creditStatus: 'credited', creditedAmountMicros: '880000' })
+    expect(h.purchaseInserts).toHaveLength(1)
+    expect(h.purchaseInserts[0]?.slice(2, 6)).toEqual(['plan-1', '专业套餐', '880000', '10000'])
+    expect(h.audits).toHaveLength(1)
+  })
+
+  test('maps pending, credited and malformed paid states for the API', () => {
+    const h = reconciliationHarness()
+    expect(h.service.creditState({ status: 'pending' })).toMatchObject({ creditStatus: 'pending', creditMessage: '等待支付' })
+    expect(h.service.creditState({ status: 'paid', kind: 'wallet_topup', paid_amount_micros: '10000', provider_trade_id: null })).toMatchObject({ creditStatus: 'inconsistent' })
+    expect(h.service.creditState({ status: 'paid', kind: 'wallet_topup', paid_amount_micros: '10000', provider_trade_id: 'trade', topup_multiplier_bps: 30000, credit_record_id: 'ledger', credited_amount_micros: '30000', credited_at: new Date() })).toMatchObject({ creditStatus: 'credited', creditedAmountMicros: '30000' })
+  })
+})

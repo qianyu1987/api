@@ -30,7 +30,7 @@ import { fallbackCostAlerts, fallbackCostPending, pendingFallbackCostSql } from 
 import { mediaUploadType } from './lib/media-upload.js'
 import { MediaService } from './services/media.js'
 import { registerMediaApi } from './lib/media-api.js'
-import { mediaResultUrl, mediaPrice } from './lib/media.js'
+import { mediaPrice } from './lib/media.js'
 import { ChatService } from './services/chat.js'
 import { ChannelCostService } from './services/channel-costs.js'
 
@@ -487,17 +487,6 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       await client.query("INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'media_price',$2,$3,$4)",[actor.id,b.model+':'+b.size,JSON.stringify(before.rows[0]),JSON.stringify(after.rows[0])]);return {ok:true}
     })
   })
-  app.post('/api/admin/media/tasks/:id/resolve',async(request,reply)=>{
-    const actor=await requireAdmin(request,reply);if(!actor)return
-    const id=String((request.params as any).id),b=request.body as any
-    const task=await db.one<any>("SELECT * FROM media_tasks WHERE id=$1 AND status='unknown'",[id]);if(!task)throw Object.assign(new Error('仅可处理待核实任务'),{statusCode:400})
-    if(typeof b.reason!=='string'||b.reason.trim().length<5)throw Object.assign(new Error('请填写上游核实依据'),{statusCode:400})
-    if(task.kind==='video'&&typeof b.upstreamId==='string'&&/^[a-zA-Z0-9_-]{1,256}$/.test(b.upstreamId)) {
-      await db.query("UPDATE media_tasks SET upstream_id=$2,status='processing',next_poll_at=now(),lease_until=NULL WHERE id=$1 AND status='unknown'",[id,b.upstreamId])
-    }else if(b.resultUrl && mediaResultUrl({url:b.resultUrl})){await media.finish(id,true,mediaResultUrl({url:b.resultUrl}),null)}else if(b.confirmedFailed===true){await media.finish(id,false,null,'管理员核实上游失败，冻结额度已释放')}
-    else throw Object.assign(new Error('请提供视频任务编号或确认上游失败'),{statusCode:400})
-    await db.query("INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'media_resolution',$2,$3,$4)",[actor.id,id,JSON.stringify({status:task.status}),JSON.stringify({reason:b.reason.slice(0,512),confirmedFailed:b.confirmedFailed===true,upstreamId:b.upstreamId||null})]);return {ok:true}
-  })
   app.get('/healthz', async () => ({ ok: true, service: 'relay-station' }))
   app.get('/', async (_request, reply) => reply.sendFile('index.html'))
   app.get('/login', async (_request, reply) => reply.sendFile('index.html'))
@@ -810,9 +799,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.get('/api/me/orders/:id', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
     const id = String((request.params as any).id || '')
-    const row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,wallet_credit_micros,topup_multiplier_bps,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
+    let row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,wallet_credit_micros,topup_multiplier_bps,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
     if (!row) { reply.code(404).send({ error: { message: '订单不存在' } }); return }
-    return { ...row, amount: publicMoney(row.amount_micros), paidAmount: row.paid_amount_micros ? publicMoney(row.paid_amount_micros) : null, walletCreditAmount: row.wallet_credit_micros ? publicMoney(row.wallet_credit_micros) : null }
+    await orders.reconcileCredit(id)
+    row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,wallet_credit_micros,topup_multiplier_bps,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
+    const credit = await orders.getCreditState(id, user.id)
+    return { ...row, ...credit, amount: publicMoney(row.amount_micros), paidAmount: row.paid_amount_micros ? publicMoney(row.paid_amount_micros) : null, walletCreditAmount: row.wallet_credit_micros ? publicMoney(row.wallet_credit_micros) : null }
   })
   app.get('/api/me/billing/:requestId', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
@@ -1170,7 +1162,29 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if (q.kind) { values.push(String(q.kind)); where.push(`o.kind=$${values.length}`) }
     if (q.from) { values.push(dateFilter(q.from)); where.push(`o.created_at >= $${values.length}`) }
     if (q.to) { values.push(dateFilter(q.to, true)); where.push(`o.created_at < $${values.length}`) }
-    return { items: await db.query<any>(`SELECT o.*,u.username,p.name AS plan_name FROM orders o JOIN users u ON u.id=o.user_id LEFT JOIN plans p ON p.id=o.plan_id ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY o.created_at DESC LIMIT ${boundedLimit(q.limit, 100, 500)}`, values) }
+    const rows = await db.query<any>(`SELECT o.*,u.username,p.name AS plan_name,
+      CASE WHEN o.kind='wallet_topup' THEN wl.id::text ELSE sp.id::text END AS credit_record_id,
+      CASE WHEN o.kind='wallet_topup' THEN wl.amount_micros ELSE sp.quota_added_micros END AS credited_amount_micros,
+      CASE WHEN o.kind='wallet_topup' THEN wl.created_at ELSE sp.created_at END AS credited_at,
+      sp.amount_paid_micros AS credited_paid_amount_micros,
+      credit_audit.created_at AS credit_reconciled_at,
+      credit_audit.actor_username AS credit_reconciled_by
+      FROM orders o JOIN users u ON u.id=o.user_id LEFT JOIN plans p ON p.id=o.plan_id
+      LEFT JOIN wallet_ledger wl ON wl.order_id=o.id AND wl.kind='wallet_topup'
+      LEFT JOIN subscription_purchases sp ON sp.order_id=o.id
+      LEFT JOIN LATERAL (
+        SELECT e.created_at,a.username AS actor_username
+        FROM admin_audit_events e LEFT JOIN users a ON a.id=e.actor_user_id
+        WHERE e.action='order_credit_reconciled' AND e.target_type='order' AND e.target_id=o.id::text
+        ORDER BY e.created_at DESC,e.id DESC LIMIT 1
+      ) credit_audit ON true
+      ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY o.created_at DESC LIMIT ${boundedLimit(q.limit, 100, 500)}`, values)
+    return { items: rows.map(row => ({ ...row, ...orders.creditState(row) })) }
+  })
+  app.post('/api/admin/orders/:id/reconcile', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    const id = String((request.params as any).id || '')
+    return { ok: true, ...(await orders.reconcileCredit(id, actor.id)) }
   })
 
   app.get('/api/admin/usage', async (request, reply) => {
@@ -1574,7 +1588,10 @@ export async function start(): Promise<void> {
   let mediaBusy = false
   const mediaTimer = setInterval(() => { if(mediaBusy)return;mediaBusy=true;void media.tick().catch(()=>services.app.log.error('Media worker tick failed')).finally(()=>{mediaBusy=false}) }, 3000)
   mediaTimer.unref()
-  services.app.addHook('onClose',async()=>{clearInterval(mediaTimer)})
+  let creditBusy = false
+  const creditTimer = setInterval(() => { if(creditBusy)return;creditBusy=true;void services.orders.reconcilePending(25).catch(()=>services.app.log.error('Order credit reconciliation failed')).finally(()=>{creditBusy=false}) }, 30000)
+  creditTimer.unref()
+  services.app.addHook('onClose',async()=>{clearInterval(mediaTimer);clearInterval(creditTimer)})
   await services.app.listen({ host: config.host, port: config.port })
 }
 

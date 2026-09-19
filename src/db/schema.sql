@@ -1059,6 +1059,7 @@ CREATE TABLE IF NOT EXISTS media_tasks (
  model TEXT NOT NULL,
  channel_id UUID NOT NULL REFERENCES channels(id) ON DELETE RESTRICT,
  request_payload JSONB NOT NULL,
+ user_input JSONB,
  price_snapshot JSONB NOT NULL,
  charge_micros BIGINT NOT NULL CHECK(charge_micros > 0),
  actual_cost_micros BIGINT NOT NULL CHECK(actual_cost_micros >= 0),
@@ -1069,12 +1070,31 @@ CREATE TABLE IF NOT EXISTS media_tasks (
  progress INTEGER NOT NULL DEFAULT 0,
  next_poll_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  lease_until TIMESTAMPTZ,
+ uncertain_since TIMESTAMPTZ,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  finished_at TIMESTAMPTZ,
  UNIQUE(user_id,idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS media_tasks_user_idx ON media_tasks(user_id,created_at DESC,id DESC);
-CREATE INDEX IF NOT EXISTS media_tasks_pending_idx ON media_tasks(next_poll_at) WHERE status IN ('queued','processing');
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS user_input JSONB;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS uncertain_since TIMESTAMPTZ;
+DROP INDEX IF EXISTS media_tasks_pending_idx;
+CREATE INDEX media_tasks_pending_idx ON media_tasks(next_poll_at) WHERE status IN ('queued','processing','unknown');
+UPDATE media_tasks
+SET user_input = jsonb_strip_nulls(jsonb_build_object(
+  'kind', kind,
+  'engine', CASE model WHEN 'gpt-image-2' THEN 'pro' WHEN 'gpt-image-2.5' THEN 'enhanced' WHEN 'agnes-image-2.5-flash' THEN 'standard' END,
+  'prompt', request_payload->>'prompt',
+  'size', CASE WHEN kind='video' THEN '720P' WHEN model IN ('gpt-image-2','gpt-image-2.5') THEN '1K' ELSE COALESCE(request_payload->>'size','1K') END,
+  'ratio', COALESCE(request_payload->>'ratio',request_payload->>'aspect_ratio','16:9'),
+  'seconds', CASE WHEN kind='video' THEN request_payload->'seconds' END,
+  'mode', CASE WHEN kind='video' THEN request_payload->'mode' END,
+  'images', CASE WHEN kind='image' THEN request_payload#>'{extra_body,image}' ELSE request_payload->'images' END,
+  'audios', CASE WHEN kind='video' THEN request_payload->'audios' END,
+  'first_frame', CASE WHEN kind='video' THEN request_payload->'first_frame' END,
+  'last_frame', CASE WHEN kind='video' THEN request_payload->'last_frame' END
+))
+WHERE user_input IS NULL;
 ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS gallery_status TEXT NOT NULL DEFAULT 'private';
 ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS gallery_featured BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS gallery_title TEXT;

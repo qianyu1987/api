@@ -27,9 +27,33 @@ describe('media submission lifecycle',()=>{
  test('ambiguous submit is not resent or released',async()=>{
  const task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'queued',channel_id:'channel',request_payload:{}}
  const query=vi.fn(async()=>[]);const db:any={query,one:vi.fn(async()=>({base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:'bad',enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
- const s=new MediaService(db,{channelEncryptionKey:Buffer.alloc(32)} as any);const finish=vi.spyOn(s,'finish');await s.tick();expect(finish).not.toHaveBeenCalled();expect(query.mock.calls.at(-1)?.[1]).toContain('unknown')
+ const s=new MediaService(db,{channelEncryptionKey:Buffer.alloc(32)} as any);const finish=vi.spyOn(s,'finish');await s.tick();expect(finish).not.toHaveBeenCalled()
+ expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='unknown'")&&params?.[0]==='task')).toBe(true)
  })
- test('public task has no cost, internal payload, upstream id or snapshots',()=>{const s=new MediaService({} as any,{} as any);const t=s.publicTask({id:'test',status:'processing',price_snapshot:{secret:true},actual_cost_micros:'10',request_payload:{},upstream_id:'private'});expect(t.reserved).toBe(true);expect(JSON.stringify(t)).not.toMatch(/secret|private|cost|snapshot|payload/);expect(s.publicTask({status:'failed'}).reserved).toBe(false)})
+ test('unknown task without upstream id is never submitted again',async()=>{
+  const task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'unknown',channel_id:'channel',request_payload:{},upstream_id:null}
+  const query=vi.fn(async(sql:string)=>sql.startsWith('SELECT id FROM media_tasks')?[]:[])
+  const db:any={query,one:vi.fn(),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const fetchMock=vi.fn();vi.stubGlobal('fetch',fetchMock)
+  try{await new MediaService(db,{} as any).tick()}finally{vi.unstubAllGlobals()}
+  expect(fetchMock).not.toHaveBeenCalled();expect(db.one).not.toHaveBeenCalled()
+  expect(query.mock.calls.some(([sql])=>sql.includes("WHERE id=$1 AND status='unknown'"))).toBe(true)
+ })
+ test('unknown task expires after one minute and is refunded',async()=>{
+  const query=vi.fn(async(sql:string)=>sql.startsWith('SELECT id FROM media_tasks')?[{id:'expired'}]:[])
+  const s=new MediaService({query,tx:vi.fn()} as any,{} as any),finish=vi.spyOn(s,'finish').mockResolvedValue()
+  await s.tick()
+  expect(finish).toHaveBeenCalledWith('expired',false,null,'生成结果未确认，额度已自动退回，可重新生成')
+ })
+ test('unknown task with upstream id recovers within the confirmation window',async()=>{
+  const key=Buffer.alloc(32,6),task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'unknown',channel_id:'channel',request_payload:{},upstream_id:'upstream',uncertain_since:new Date()}
+  const query=vi.fn(async()=>[]);const db:any={query,one:vi.fn(async()=>({base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({status:'processing',progress:42}),{status:200})))
+  try{await new MediaService(db,{channelEncryptionKey:key} as any).tick()}finally{vi.unstubAllGlobals()}
+  expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='processing'")&&params?.[0]==='task'&&params?.[1]===42)).toBe(true)
+  expect(query.mock.calls.some(([sql])=>sql.includes('uncertain_since=NULL'))).toBe(true)
+ })
+ test('public task has safe retry input and no cost, internal payload, upstream id or snapshots',()=>{const s=new MediaService({} as any,{} as any);const t=s.publicTask({id:'test',kind:'video',status:'processing',created_at:new Date(),charge_micros:'10',user_input:{kind:'video',engine:'standard',prompt:'retry me',size:'720P',ratio:'9:16',seconds:5,mode:'text'},price_snapshot:{secret:true},actual_cost_micros:'10',request_payload:{privatePayload:true},upstream_id:'private',channel_id:'channel'});expect(t.reserved).toBe(true);expect(t.input).toMatchObject({prompt:'retry me',engine:'standard',ratio:'9:16'});expect(t.canRetry).toBe(false);expect(JSON.stringify(t)).not.toMatch(/secret|privatePayload|upstream|channel|actual_cost|snapshot|request_payload/);expect(s.publicTask({status:'failed'})).toMatchObject({reserved:false,canRetry:true,refundStatus:'returned'})})
  test('professional image worker accepts base64 without exposing an upstream URL',async()=>{
   const key=Buffer.alloc(32,7),task={id:'task',kind:'image',model:'gpt-image-2',status:'queued',channel_id:'channel',request_payload:{model:'gpt-image-2'}}
   const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>({base_url:'https://cdn.yyapi.cloud/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}

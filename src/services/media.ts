@@ -9,6 +9,47 @@ const canonical = (v: any): string => JSON.stringify(v, (_key, value) => value &
 const sensitiveVisualTerms = ['前凸后翘','胸部挺拔','胸部丰满','丰满胸部','饱满胸部','臀部圆润','丰满臀部','极少服饰','衣着暴露','衣着清凉','挑逗姿势','挑逗性','露骨性感','性感身材','透视服装','裸露身体','裸体','内衣写真','色情']
 const introducedSensitiveVisualTerms = (source: string, result: string): boolean => sensitiveVisualTerms.some(term => result.includes(term) && !source.includes(term))
 
+function safeUserInput(body: any, input: ReturnType<typeof validateMedia>) {
+  const payload = input.payload as any
+  const result: any = {
+    kind: input.kind,
+    engine: input.engine,
+    prompt: String(body?.prompt || payload.prompt || '').trim(),
+    size: input.size,
+    ratio: String(body?.ratio || body?.aspect_ratio || payload.ratio || payload.aspect_ratio || '16:9'),
+  }
+  if (input.kind === 'image') {
+    const images = payload.extra_body?.image
+    if (Array.isArray(images) && images.length) result.images = images
+  } else {
+    result.seconds = Number(payload.seconds)
+    result.mode = payload.mode
+    if (Array.isArray(payload.images) && payload.images.length) result.images = payload.images
+    if (Array.isArray(payload.audios) && payload.audios.length) result.audios = payload.audios
+    if (payload.first_frame) result.first_frame = payload.first_frame
+    if (payload.last_frame) result.last_frame = payload.last_frame
+  }
+  return result
+}
+
+function legacyUserInput(task: any): any {
+  const payload = task.request_payload || {}
+  const kind = task.kind === 'video' ? 'video' : 'image'
+  const engine = task.model === 'gpt-image-2' ? 'pro' : task.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'
+  const ratio = payload.ratio || payload.aspect_ratio || (payload.size === '1024x1024' ? '1:1' : payload.size === '1024x1536' ? '9:16' : '16:9')
+  const input: any = { kind, engine, prompt: String(payload.prompt || ''), size: engine === 'standard' ? String(payload.size || (kind === 'video' ? '720P' : '1K')) : '1K', ratio }
+  const images = kind === 'image' ? payload.extra_body?.image : payload.images
+  if (Array.isArray(images) && images.length) input.images = images
+  if (kind === 'video') {
+    input.seconds = Number(payload.seconds || 5)
+    input.mode = payload.mode || 'text'
+    if (Array.isArray(payload.audios) && payload.audios.length) input.audios = payload.audios
+    if (payload.first_frame) input.first_frame = payload.first_frame
+    if (payload.last_frame) input.last_frame = payload.last_frame
+  }
+  return input
+}
+
 export function welcomeGift(input: {model:string;size:string;units:number}, balance: any) {
   if(input.model==='agnes-image-2.5-flash'&&input.size==='1K'&&Number(balance?.images_remaining)>=input.units)return {kind:'image',units:input.units}
   if(input.model==='agnes-video-2.5-flash'&&input.size==='720P'&&Number(balance?.video_seconds_remaining)>=input.units)return {kind:'video',units:input.units}
@@ -41,7 +82,22 @@ export class MediaService {
     const token = createHash('sha256').update(JSON.stringify({input,snapshot})).digest('hex')
     return {input,price,snapshot,chargeMicros:charge.toString(),quoteToken:token,walletOnly:!gift,gift}
   }
-  publicTask(r: any) { return { id:r.id,kind:r.kind,status:r.status,progress:r.progress,chargeMicros:r.charge_micros,gift:r.price_snapshot?.welcomeGift||null,charged:r.status==='completed'&&BigInt(r.charge_micros||0)>0n,reserved:!['completed','failed'].includes(r.status),resultUrl:r.result_url ? '/api/me/media/tasks/'+encodeURIComponent(r.id)+'/result' : null,error:r.error_message,createdAt:r.created_at,finishedAt:r.finished_at } }
+  publicTask(r: any) {
+    const input = r.user_input && typeof r.user_input === 'object' ? r.user_input : legacyUserInput(r)
+    const assets = [input.first_frame,input.last_frame,...(Array.isArray(input.images)?input.images:[]),...(Array.isArray(input.audios)?input.audios:[])].filter(Boolean)
+    const terminal = ['completed','failed'].includes(r.status)
+    const gift = r.price_snapshot?.welcomeGift || null
+    const charge = BigInt(r.charge_micros || 0)
+    return {
+      id:r.id,kind:r.kind,status:r.status,progress:r.progress,chargeMicros:r.charge_micros,gift,
+      charged:r.status==='completed'&&charge>0n,reserved:!terminal,
+      refundStatus:r.status==='failed'?'returned':terminal?'settled':charge===0n&&!gift?'not_applicable':'reserved',
+      resultUrl:r.result_url ? '/api/me/media/tasks/'+encodeURIComponent(r.id)+'/result' : null,
+      error:r.error_message,input,canRetry:terminal,
+      assetsMayHaveExpired:assets.length>0&&Date.now()-new Date(r.created_at||0).getTime()>7*24*60*60*1000,
+      createdAt:r.created_at,finishedAt:r.finished_at,
+    }
+  }
   async list(userId:string) { return {items:(await this.db.query<any>('SELECT * FROM media_tasks WHERE user_id=$1 ORDER BY created_at DESC,id DESC LIMIT 50',[userId])).map(r=>this.publicTask(r))} }
   async get(userId:string,id:string) { const r=await this.db.one<any>('SELECT * FROM media_tasks WHERE user_id=$1 AND id=$2',[userId,id]);if(!r)mediaError('任务不存在',404);return this.publicTask(r) }
   async create(userId:string,body:any,keyId:string|null=null,autoQuote=false) {
@@ -70,7 +126,7 @@ export class MediaService {
       }
       await client.query('UPDATE wallets SET reserved_micros=reserved_micros+$1,version=version+1,updated_at=now() WHERE user_id=$2',[q.chargeMicros,userId])
       if(BigInt(q.chargeMicros)>0n)await client.query("INSERT INTO wallet_ledger(user_id,kind,amount_micros,balance_after_micros,reserved_delta_micros,request_id,metadata) VALUES($1,'usage_reserve',0,$2,$3,$4,$5)",[userId,wallet.balance_micros,q.chargeMicros,id,JSON.stringify({media:true})])
-      return one<any>(client,'INSERT INTO media_tasks(id,user_id,api_key_id,idempotency_key,kind,model,channel_id,request_payload,price_snapshot,charge_micros,actual_cost_micros) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *',[id,userId,keyId,nonce,input.kind,input.model,q.price.channel_id,JSON.stringify(input.payload),JSON.stringify(q.snapshot),q.chargeMicros,q.snapshot.actualCostMicros])
+      return one<any>(client,'INSERT INTO media_tasks(id,user_id,api_key_id,idempotency_key,kind,model,channel_id,request_payload,user_input,price_snapshot,charge_micros,actual_cost_micros) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *',[id,userId,keyId,nonce,input.kind,input.model,q.price.channel_id,JSON.stringify(input.payload),JSON.stringify(safeUserInput(body,input)),JSON.stringify(q.snapshot),q.chargeMicros,q.snapshot.actualCostMicros])
     });return this.publicTask(row)
   }
   async expandPrompt(body: any) {
@@ -113,18 +169,20 @@ export class MediaService {
         await client.query(`UPDATE media_welcome_gifts SET ${column}=${column}+$2 WHERE user_id=$1`,[task.user_id,gift.units])
       }
       if(success&&content&&contentType)await client.query('INSERT INTO media_task_assets(task_id,content_type,content) VALUES($1,$2,$3) ON CONFLICT(task_id) DO NOTHING',[id,contentType,content])
-      await client.query('UPDATE media_tasks SET status=$2,result_url=$3,error_message=$4,progress=100,finished_at=now(),lease_until=NULL WHERE id=$1',[id,success?'completed':'failed',success&&content?'stored://media/'+id:url,message])
+      await client.query('UPDATE media_tasks SET status=$2,result_url=$3,error_message=$4,progress=100,finished_at=now(),lease_until=NULL,uncertain_since=NULL WHERE id=$1',[id,success?'completed':'failed',success&&content?'stored://media/'+id:url,message])
     })
   }
   async tick() {
-    await this.db.query("UPDATE media_tasks SET status='unknown',error_message='超过 24 小时未获得最终结果，额度仍冻结，请管理员核实' WHERE status='processing' AND created_at<now()-interval '24 hours' AND (lease_until IS NULL OR lease_until<now())")
+    const expired = await this.db.query<any>("SELECT id FROM media_tasks WHERE status='unknown' AND uncertain_since<=now()-interval '1 minute' AND (lease_until IS NULL OR lease_until<now()) ORDER BY uncertain_since LIMIT 20")
+    for (const row of expired) await this.finish(String(row.id),false,null,'生成结果未确认，额度已自动退回，可重新生成')
     // A crashed submission may have reached upstream. Never automatically resend.
-    await this.db.query("UPDATE media_tasks SET status='unknown',error_message='上游提交结果待确认，额度仍冻结，请联系管理员核查' WHERE status='submitting' AND lease_until<now()")
+    await this.db.query("UPDATE media_tasks SET status='unknown',uncertain_since=COALESCE(uncertain_since,now()),error_message='正在自动确认上游接单结果，超过 1 分钟将自动退回额度',lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE status='submitting' AND lease_until<now()")
     const task=await this.db.tx(async client=>{
-      const r=await one<any>(client,"SELECT * FROM media_tasks WHERE status IN ('queued','processing') AND next_poll_at<=now() AND (lease_until IS NULL OR lease_until<now()) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED");if(!r)return null
+      const r=await one<any>(client,"SELECT * FROM media_tasks WHERE status IN ('queued','processing','unknown') AND next_poll_at<=now() AND (lease_until IS NULL OR lease_until<now()) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED");if(!r)return null
       await client.query("UPDATE media_tasks SET lease_until=now()+interval '7 minutes',status=CASE WHEN status='queued' THEN 'submitting' ELSE status END WHERE id=$1",[r.id]);return r
     });if(!task)return
     try {
+      if(task.status==='unknown'&&!task.upstream_id){await this.db.query("UPDATE media_tasks SET lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE id=$1 AND status='unknown'",[task.id]);return}
       const channel=await this.db.one<any>('SELECT * FROM channels WHERE id=$1',[task.channel_id]);if(!channel?.encrypted_api_key)throw new Error('channel missing')
       if(task.status==='queued'&&(!channel.enabled||channel.deleted_at)){await this.finish(task.id,false,null,'渠道已停用，冻结额度已释放');return}
       const origin=new URL(channel.base_url);if(!['https://apihub.agnes-ai.com','https://cdn.yyapi.cloud','https://ripp.best'].includes(origin.origin))throw new Error('unsupported provider')
@@ -146,14 +204,14 @@ export class MediaService {
         }
         throw new Error('missing image')
       }
-      if(task.status==='queued') {if(typeof data.video_id!=='string'||data.video_id.length>256)throw new Error('missing video id');await this.db.query("UPDATE media_tasks SET upstream_id=$2,status='processing',lease_until=NULL,next_poll_at=now()+interval '5 seconds' WHERE id=$1",[task.id,data.video_id]);return}
+      if(task.status==='queued') {if(typeof data.video_id!=='string'||data.video_id.length>256)throw new Error('missing video id');await this.db.query("UPDATE media_tasks SET upstream_id=$2,status='processing',uncertain_since=NULL,error_message=NULL,lease_until=NULL,next_poll_at=now()+interval '5 seconds' WHERE id=$1",[task.id,data.video_id]);return}
       if(data.status==='failed'){await this.finish(task.id,false,null,'视频生成失败，冻结额度已释放');return}
       if(data.status==='completed'){const result=mediaResultUrl(data);if(!result)throw new Error('missing result');await this.finish(task.id,true,result,null);return}
-      await this.db.query("UPDATE media_tasks SET progress=$2,lease_until=NULL,next_poll_at=now()+interval '5 seconds' WHERE id=$1",[task.id,Math.max(0,Math.min(99,Math.floor(Number(data.progress))||0))])
+      await this.db.query("UPDATE media_tasks SET status='processing',progress=$2,uncertain_since=NULL,error_message=NULL,lease_until=NULL,next_poll_at=now()+interval '5 seconds' WHERE id=$1",[task.id,Math.max(0,Math.min(99,Math.floor(Number(data.progress))||0))])
     }catch(error){
       const reason=error instanceof Error ? error.message : ''
       const detail=error instanceof Error && ['TimeoutError','AbortError'].includes(error.name)?'等待上游接单超时':reason==='missing video id'?'上游响应缺少视频任务编号':reason==='invalid upstream response'?'上游返回格式异常':reason==='uncertain response'?'上游服务异常':'上游连接或处理异常'
-      await this.db.query("UPDATE media_tasks SET status=$2,error_message=$3,lease_until=NULL,next_poll_at=now()+interval '30 seconds' WHERE id=$1 AND status IN ('submitting','processing')",[task.id,task.status==='queued'?'unknown':'processing',task.status==='queued'?detail+'，接单结果待确认；未最终扣费，额度仍冻结，请管理员核查':'正在重新查询上游结果，额度仍冻结'])
+      await this.db.query("UPDATE media_tasks SET status='unknown',uncertain_since=COALESCE(uncertain_since,now()),error_message=$2,lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE id=$1 AND status IN ('submitting','processing','unknown')",[task.id,detail+'，正在自动确认结果；超过 1 分钟将自动退回额度'])
     }
   }
 }

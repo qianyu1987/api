@@ -187,6 +187,15 @@ function callbackMetadata(payment: NormalizedPayment): string {
 
 type CallbackResult = { accepted: boolean; alreadyProcessed: boolean; orderId: string | null }
 
+export type OrderCreditStatus = 'pending' | 'credited' | 'inconsistent' | 'not_applicable'
+export type OrderCreditState = {
+  creditStatus: OrderCreditStatus
+  creditedAmountMicros: string | null
+  creditedAt: string | Date | null
+  creditMessage: string
+  creditRepaired?: boolean
+}
+
 function alreadyProcessed(orderId: unknown, accepted = true): CallbackResult {
   return { accepted, alreadyProcessed: true, orderId: orderId ? String(orderId) : null }
 }
@@ -257,6 +266,130 @@ export class OrderService {
 
   async markCreationFailure(orderId: string, code: string): Promise<void> {
     await this.db.query(`UPDATE orders SET status = 'failed', failure_code = $1 WHERE id = $2 AND status = 'pending'`, [code.slice(0, 120), orderId])
+  }
+
+  creditState(row: any): OrderCreditState {
+    if (row.status !== 'paid') {
+      return row.status === 'pending'
+        ? { creditStatus: 'pending', creditedAmountMicros: null, creditedAt: null, creditMessage: '等待支付' }
+        : { creditStatus: 'not_applicable', creditedAmountMicros: null, creditedAt: null, creditMessage: '订单未支付' }
+    }
+    const paidAmount = bigintValue(row.paid_amount_micros)
+    if (paidAmount <= 0n || !row.provider_trade_id) {
+      return { creditStatus: 'inconsistent', creditedAmountMicros: null, creditedAt: null, creditMessage: '支付记录不完整，未自动补账' }
+    }
+    if (row.kind === 'wallet_topup') {
+      const expected = topupCreditAmount(paidAmount, Number(row.topup_multiplier_bps ?? 10000))
+      if (row.credit_record_id && bigintValue(row.credited_amount_micros) === expected) {
+        return { creditStatus: 'credited', creditedAmountMicros: expected.toString(), creditedAt: row.credited_at, creditMessage: '钱包已到账' }
+      }
+      return {
+        creditStatus: 'inconsistent',
+        creditedAmountMicros: row.credited_amount_micros == null ? null : bigintValue(row.credited_amount_micros).toString(),
+        creditedAt: row.credited_at || null,
+        creditMessage: row.credit_record_id ? '到账流水金额与订单不一致' : '支付成功，正在自动核对到账',
+      }
+    }
+    const expectedQuota = bigintValue(row.plan_quota_micros)
+    if (row.credit_record_id && bigintValue(row.credited_amount_micros) === expectedQuota && bigintValue(row.credited_paid_amount_micros) === paidAmount) {
+      return { creditStatus: 'credited', creditedAmountMicros: expectedQuota.toString(), creditedAt: row.credited_at, creditMessage: '套餐已生效' }
+    }
+    return {
+      creditStatus: 'inconsistent',
+      creditedAmountMicros: row.credited_amount_micros == null ? null : bigintValue(row.credited_amount_micros).toString(),
+      creditedAt: row.credited_at || null,
+      creditMessage: row.credit_record_id ? '套餐到账记录与订单不一致' : '支付成功，正在自动核对到账',
+    }
+  }
+
+  private creditStateSql(where: string): string {
+    return `SELECT o.*,
+      CASE WHEN o.kind='wallet_topup' THEN wl.id::text ELSE sp.id::text END AS credit_record_id,
+      CASE WHEN o.kind='wallet_topup' THEN wl.amount_micros ELSE sp.quota_added_micros END AS credited_amount_micros,
+      CASE WHEN o.kind='wallet_topup' THEN wl.created_at ELSE sp.created_at END AS credited_at,
+      sp.amount_paid_micros AS credited_paid_amount_micros
+      FROM orders o
+      LEFT JOIN wallet_ledger wl ON wl.order_id=o.id AND wl.kind='wallet_topup'
+      LEFT JOIN subscription_purchases sp ON sp.order_id=o.id
+      WHERE ${where}`
+  }
+
+  async getCreditState(orderId: string, userId?: string): Promise<OrderCreditState | null> {
+    const row = await this.db.one<any>(this.creditStateSql(`o.id=$1${userId ? ' AND o.user_id=$2' : ''}`), userId ? [orderId, userId] : [orderId])
+    return row ? this.creditState(row) : null
+  }
+
+  async reconcileCredit(orderId: string, actorUserId: string | null = null): Promise<OrderCreditState> {
+    let creditRepaired = false
+    await this.db.tx(async (client) => {
+      const order = await one<any>(client, 'SELECT * FROM orders WHERE id=$1 FOR UPDATE', [orderId])
+      if (!order) throw Object.assign(new Error('订单不存在'), { statusCode: 404 })
+      if (order.status !== 'paid') return
+      const paidAmount = bigintValue(order.paid_amount_micros)
+      if (paidAmount <= 0n || !order.provider_trade_id) return
+
+      let repaired = false
+      if (order.kind === 'wallet_topup') {
+        const expected = topupCreditAmount(paidAmount, Number(order.topup_multiplier_bps ?? 10000))
+        const ledger = await one<any>(client, `SELECT id,amount_micros FROM wallet_ledger WHERE order_id=$1 AND kind='wallet_topup' FOR UPDATE`, [orderId])
+        if (!ledger) {
+          const provider = normalizeProvider(order.payment_provider) || normalizeProvider(order.payment_method)
+          if (!provider) throw new Error('订单支付渠道无效')
+          await this.creditWallet(client, order, {
+            provider,
+            eventId: `reconcile:${orderId}`,
+            orderNo: String(order.order_no),
+            transactionId: String(order.provider_trade_id),
+            status: 'paid',
+            amountMicros: paidAmount,
+            amountFen: paidAmount / MICROS_PER_CENT,
+            currency: 'CNY',
+            paidAt: order.paid_at ? new Date(order.paid_at).toISOString() : null,
+            providerStatus: 'reconciled',
+            buyerId: null,
+          })
+          await this.affiliate.creditForTopup(client, orderId, String(order.user_id), paidAmount, this.config.defaultAffiliateRateBps)
+          repaired = true
+        } else if (bigintValue(ledger.amount_micros) === expected && bigintValue(order.wallet_credit_micros) !== expected) {
+          await client.query('UPDATE orders SET wallet_credit_micros=$1,updated_at=now() WHERE id=$2', [expected.toString(), orderId])
+          repaired = true
+        }
+      } else if (order.kind === 'subscription' || order.kind === 'subscription_purchase') {
+        const purchase = await one<any>(client, 'SELECT id FROM subscription_purchases WHERE order_id=$1 FOR UPDATE', [orderId])
+        if (!purchase) {
+          await this.creditSubscription(client, order, paidAmount)
+          repaired = true
+        }
+      }
+      if (repaired) {
+        creditRepaired = true
+        await client.query(
+          `INSERT INTO admin_audit_events(actor_user_id,action,target_type,target_id,metadata)
+           VALUES($1,'order_credit_reconciled','order',$2,$3)`,
+          [actorUserId, orderId, JSON.stringify({ kind: order.kind, automatic: actorUserId === null })],
+        )
+      }
+    }, { isolationLevel: 'serializable' })
+    const state = await this.getCreditState(orderId)
+    if (!state) throw Object.assign(new Error('订单不存在'), { statusCode: 404 })
+    return { ...state, creditRepaired }
+  }
+
+  async reconcilePending(limit = 25): Promise<number> {
+    const rows = await this.db.query<any>(
+      `SELECT o.id FROM orders o
+       WHERE o.status='paid' AND o.paid_amount_micros IS NOT NULL AND o.provider_trade_id IS NOT NULL
+         AND ((o.kind='wallet_topup' AND NOT EXISTS(SELECT 1 FROM wallet_ledger wl WHERE wl.order_id=o.id AND wl.kind='wallet_topup'))
+           OR (o.kind IN ('subscription','subscription_purchase') AND NOT EXISTS(SELECT 1 FROM subscription_purchases sp WHERE sp.order_id=o.id)))
+       ORDER BY o.paid_at NULLS LAST,o.created_at LIMIT $1`,
+      [Math.max(1, Math.min(100, Math.floor(limit)))],
+    )
+    let repaired = 0
+    for (const row of rows) {
+      const state = await this.reconcileCredit(String(row.id))
+      if (state.creditStatus === 'credited') repaired += 1
+    }
+    return repaired
   }
 
   async applyVerifiedCallback(payment: VerifiedPayment): Promise<CallbackResult> {
