@@ -109,6 +109,11 @@ describe('browser request headers regression', () => {
 })
 
 describe('public homepage', () => {
+  test.each(['/healthz', '/api/v1/health'])('serves the public health check at %s', async url => {
+    const response = await services.app.inject({ url })
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({ ok: true, service: 'relay-station' })
+  })
   test.each(['/', '/login', '/register'])('serves the public entry at %s', async url => {
     const response = await services.app.inject({ url })
     expect(response.statusCode).toBe(200)

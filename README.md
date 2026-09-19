@@ -66,7 +66,7 @@ systemctl reload nginx
 - 使用足够长的上游读取超时，不在代理层自动重放生成请求
 - 对两个健康 API 副本做服务发现和负载均衡
 
-健康端点是 `GET /healthz`。它是进程存活检查；数据库与 Redis 的健康状态由 Compose 分别检查。公网确认命令：
+健康端点是 `GET /healthz`，并兼容 `GET /api/v1/health`。它们是进程存活检查；数据库与 Redis 的健康状态由 Compose 分别检查。公网确认命令：
 
 ```bash
 curl -fsS https://api.hhtc.top/healthz

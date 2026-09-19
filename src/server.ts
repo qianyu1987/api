@@ -487,7 +487,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       await client.query("INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'media_price',$2,$3,$4)",[actor.id,b.model+':'+b.size,JSON.stringify(before.rows[0]),JSON.stringify(after.rows[0])]);return {ok:true}
     })
   })
-  app.get('/healthz', async () => ({ ok: true, service: 'relay-station' }))
+  const health = async () => ({ ok: true, service: 'relay-station' })
+  app.get('/healthz', health)
+  app.get('/api/v1/health', health)
   app.get('/', async (_request, reply) => reply.sendFile('index.html'))
   app.get('/login', async (_request, reply) => reply.sendFile('index.html'))
   app.get('/register', async (_request, reply) => reply.sendFile('index.html'))
