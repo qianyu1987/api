@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { Database, one } from '../db/index.js'
 import type { AppConfig } from '../config.js'
 import { decryptSecret } from '../lib/crypto.js'
-import { mediaError, mediaPrice, validateMedia, mediaResultUrl } from '../lib/media.js'
+import { mediaError, mediaPrice, validateMedia, mediaResultUrl, agnesVideoQueueFull } from '../lib/media.js'
 import { profitRules } from './profit.js'
 
 const canonical = (v: any): string => JSON.stringify(v, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.keys(value).sort().map(k => [k, value[k]])) : value)
@@ -187,10 +187,15 @@ export class MediaService {
       const channel=await this.db.one<any>('SELECT * FROM channels WHERE id=$1',[task.channel_id]);if(!channel?.encrypted_api_key)throw new Error('channel missing')
       if(task.status==='queued'&&(!channel.enabled||channel.deleted_at)){await this.finish(task.id,false,null,'渠道已停用，冻结额度已释放');return}
       const origin=new URL(channel.base_url);if(!['https://apihub.agnes-ai.com','https://cdn.yyapi.cloud','https://ripp.best'].includes(origin.origin))throw new Error('unsupported provider')
-      if ((origin.origin === 'https://cdn.yyapi.cloud' && task.model !== 'gpt-image-2') || (origin.origin === 'https://ripp.best' && task.model !== 'gpt-image-2.5')) throw new Error('provider/model mismatch')
+      const expectedProvider = task.model === 'gpt-image-2' ? 'https://cdn.yyapi.cloud' : task.model === 'gpt-image-2.5' ? 'https://ripp.best' : task.model === 'agnes-video-2.5-flash' ? 'https://apihub.agnes-ai.com' : null
+      if (expectedProvider && origin.origin !== expectedProvider) { await this.finish(task.id,false,null,'媒体渠道与模型不匹配，冻结额度已释放'); return }
       const url=task.status==='queued'?origin.origin+'/v1/'+(task.kind==='image'?'images/generations':'videos'):origin.origin+'/agnesapi?video_id='+encodeURIComponent(task.upstream_id)+'&model_name='+encodeURIComponent(task.model)
       const response=await fetch(url,{method:task.status==='queued'?'POST':'GET',headers:{authorization:'Bearer '+decryptSecret(channel.encrypted_api_key,this.config.channelEncryptionKey),'content-type':'application/json'},...(task.status==='queued'?{body:JSON.stringify(task.request_payload)}:{}),signal:AbortSignal.timeout(task.status==='queued'?360000:30000),redirect:'error'})
       const responseText=await response.text()
+      if(task.status==='queued'&&task.kind==='video'&&origin.origin==='https://apihub.agnes-ai.com'&&response.status===503){
+        let rejection:any;try{rejection=JSON.parse(responseText)}catch{ /* Unknown responses keep the confirmation window. */ }
+        if(agnesVideoQueueFull(response.status,rejection)){await this.finish(task.id,false,null,'视频服务繁忙，生成队列已满，本次未接单，额度已退回，请稍后重新生成');return}
+      }
       if(!response.ok){if(task.status==='queued'&&[400,401,403,404,422,429].includes(response.status)){await this.finish(task.id,false,null,response.status===400||response.status===422?'提示词未通过上游审核，尚未扣费，冻结额度已释放；请减少敏感或容易误解的人物描写后重试':`上游拒绝生成（${response.status}），尚未扣费，冻结额度已释放`);return}throw new Error('uncertain response')}
       let data:any;try{data=JSON.parse(responseText)}catch{throw new Error('invalid upstream response')}
       if(task.kind==='image'){

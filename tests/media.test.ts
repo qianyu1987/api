@@ -1,5 +1,5 @@
 import {describe,test,expect,vi} from 'vitest'
-import {mediaPrice,validateMedia,mediaResultUrl} from '../src/lib/media.js'
+import {mediaPrice,validateMedia,mediaResultUrl,agnesVideoQueueFull} from '../src/lib/media.js'
 import {MediaService} from '../src/services/media.js'
 import {encryptSecret} from '../src/lib/crypto.js'
 describe('media pricing and input',()=>{
@@ -24,6 +24,42 @@ describe('media pricing and input',()=>{
  test('only accepts HTTPS result links',()=>{expect(mediaResultUrl({data:[{url:'https://example.com/x.png'}]})).toBe('https://example.com/x.png');expect(mediaResultUrl({url:'javascript:alert(1)'})).toBeNull();expect(mediaResultUrl({metadata:{url:'https://example.com/video.mp4'}})).toBe('https://example.com/video.mp4')})
 })
 describe('media submission lifecycle',()=>{
+ test.each([
+  [503,{code:503,message:'video queue is full, please retry later (request id: diagnostic)',data:null},true],
+  [503,{message:'video queue is full, please retry later',data:null,video_id:'accepted-task'},false],
+  [503,{message:'video queue is full, please retry later',data:{id:'accepted-task'}},false],
+  [503,{message:'service unavailable'},false],
+  [200,{message:'video queue is full, please retry later'},false],
+ ])('only recognizes explicit queue admission rejection (%s)',(status,payload,expected)=>{
+  expect(agnesVideoQueueFull(status as number,payload)).toBe(expected)
+ })
+ test.each(['queued','processing'])('queue-full response while %s only releases an unaccepted submission',async(status)=>{
+  const key=Buffer.alloc(32,12),task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status,channel_id:'channel',request_payload:{},upstream_id:status==='processing'?'accepted-task':null}
+  const query=vi.fn(async()=>[])
+  const db:any={query,one:vi.fn(async()=>({base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
+  const fetchMock=vi.fn(async()=>new Response(JSON.stringify({code:503,message:'video queue is full, please retry later (request id: diagnostic)',data:null}),{status:503}))
+  vi.stubGlobal('fetch',fetchMock)
+  try{await svc.tick()}finally{vi.unstubAllGlobals()}
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  if(status==='queued'){
+   expect(finish).toHaveBeenCalledWith('task',false,null,'视频服务繁忙，生成队列已满，本次未接单，额度已退回，请稍后重新生成')
+   expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='unknown'")&&params?.[0]==='task')).toBe(false)
+  }else{
+   expect(finish).not.toHaveBeenCalled()
+   expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='unknown'")&&params?.[0]==='task')).toBe(true)
+  }
+ })
+ test('generic submit 503 remains uncertain and is never resubmitted',async()=>{
+  const key=Buffer.alloc(32,13),task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'queued',channel_id:'channel',request_payload:{}}
+  const query=vi.fn(async()=>[])
+  const db:any={query,one:vi.fn(async()=>({base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
+  const fetchMock=vi.fn(async()=>new Response('Service unavailable',{status:503}));vi.stubGlobal('fetch',fetchMock)
+  try{await svc.tick()}finally{vi.unstubAllGlobals()}
+  expect(fetchMock).toHaveBeenCalledTimes(1);expect(finish).not.toHaveBeenCalled()
+  expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='unknown'")&&params?.[0]==='task')).toBe(true)
+ })
  test('legacy unknown task starts its automatic confirmation window',async()=>{
   const query=vi.fn(async()=>[])
   const db:any={query,tx:async(fn:any)=>fn({query:vi.fn(async()=>({rows:[]}))})}
@@ -58,6 +94,15 @@ describe('media submission lifecycle',()=>{
   try{await new MediaService(db,{channelEncryptionKey:key} as any).tick()}finally{vi.unstubAllGlobals()}
   expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='processing'")&&params?.[0]==='task'&&params?.[1]===42)).toBe(true)
   expect(query.mock.calls.some(([sql])=>sql.includes('uncertain_since=NULL'))).toBe(true)
+ })
+ test('video tasks reject non-Agnes channel mappings before contacting the provider',async()=>{
+  const key=Buffer.alloc(32,10),task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'queued',channel_id:'channel',request_payload:{}}
+  const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>({base_url:'https://ripp.best/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
+  const fetchMock=vi.fn();vi.stubGlobal('fetch',fetchMock)
+  try{await svc.tick()}finally{vi.unstubAllGlobals()}
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(finish).toHaveBeenCalledWith('task',false,null,'媒体渠道与模型不匹配，冻结额度已释放')
  })
  test('public task has safe retry input and no cost, internal payload, upstream id or snapshots',()=>{const s=new MediaService({} as any,{} as any);const t=s.publicTask({id:'test',kind:'video',status:'processing',created_at:new Date(),charge_micros:'10',user_input:{kind:'video',engine:'standard',prompt:'retry me',size:'720P',ratio:'9:16',seconds:5,mode:'text'},price_snapshot:{secret:true},actual_cost_micros:'10',request_payload:{privatePayload:true},upstream_id:'private',channel_id:'channel'});expect(t.reserved).toBe(true);expect(t.input).toMatchObject({prompt:'retry me',engine:'standard',ratio:'9:16'});expect(t.canRetry).toBe(false);expect(JSON.stringify(t)).not.toMatch(/secret|privatePayload|upstream|channel|actual_cost|snapshot|request_payload/);expect(s.publicTask({status:'failed'})).toMatchObject({reserved:false,canRetry:true,refundStatus:'returned'})})
  test('professional image worker accepts base64 without exposing an upstream URL',async()=>{

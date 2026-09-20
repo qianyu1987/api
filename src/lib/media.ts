@@ -51,3 +51,12 @@ export function mediaResultUrl(payload: any): string | null {
   if (typeof value !== 'string') return null
   try { const u = new URL(value); return u.protocol === 'https:' && !u.username && !u.password ? u.toString() : null } catch { return null }
 }
+
+// Agnes explicitly rejects admission when its video queue is full. Match only
+// this observed response; a generic 503 can still hide an accepted submission.
+export function agnesVideoQueueFull(status: number, payload: any): boolean {
+  return status === 503 && payload != null && typeof payload === 'object'
+    && typeof payload.message === 'string'
+    && /^video queue is full, please retry later(?: \(request id: [^)]+\))?$/i.test(payload.message.trim())
+    && payload.data == null && !payload.video_id && !payload.id && !payload.task_id
+}
