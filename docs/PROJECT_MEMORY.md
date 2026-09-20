@@ -77,6 +77,10 @@ Node.js 22+、TypeScript、Fastify，PostgreSQL 是账务唯一事实来源，Re
 
 RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游账户钱包余额；单位换算依赖 `/api/status` 的 `quota_per_unit`。代码已标记 `scope='api_key'`，负配额显示为超额使用而非账户欠款。用户上游后台有钱与 Key 配额不足可以同时成立。不能用这次标签修复声称账户钱包余额已对齐；必要时核对官方账户余额接口，不索要或暴露凭据。Agnes 余额接口目前未支持。
 
+## 最近上游运行事件
+
+- 2026-09-20 曾短时观察到 `molifangapi.com` 对 `gpt-5.6-sol`、`gpt-6-astra` 返回 403，应用因此对请求返回 503；该异常在后续十分钟复查时已停止。将来再次发生时先记录精确时间、模型和日志计数，复查近期 `usage_logs` 与本地日志；不要自行更换渠道、修改密钥、映射、价格或用户账务。
+
 ## 验证与部署
 
 1. 查当前 Git 状态、差异及线上两副本实际版本，保留无关修改。修改先做对应测试，并执行 `npm test`、`npm run typecheck`、`npm run build`、`git diff --check`。
