@@ -1,3 +1,10 @@
+# Project memory — read before working
+
+- Read `docs/PROJECT_MEMORY.md` for architecture, business constraints and operating procedures, then `docs/OPERATIONS_LOG.md` for the last verified release and outstanding work.
+- These records persist across sessions. Recheck live facts before acting; an old blocker is not evidence of a current blocker, and a code change is not evidence of a deployment.
+- After meaningful changes, releases or diagnosis, update the relevant memory with date, evidence, validation, deployed version and unresolved items. Record no secret values or user payment details.
+- If current user instructions or live evidence supersede a record, correct that record instead of repeating the outdated assumption.
+
 # Production access
 
 - Production host: `101.35.223.148`, SSH user: `root`.
