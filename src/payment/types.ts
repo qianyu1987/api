@@ -84,6 +84,9 @@ export type VerifiedPaymentCallback = {
   buyerId: string | null
 }
 
+/** Minimal, trusted fields returned by a provider order query. */
+export type PaymentOrderQuery = VerifiedPaymentCallback
+
 export type PaymentGatewayOptions = PaymentRequestOptions & {
   /** Override key material in tests; production callers should use config paths. */
   wechatPlatformCertificate?: string

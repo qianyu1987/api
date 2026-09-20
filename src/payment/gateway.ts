@@ -35,6 +35,11 @@ export class PaymentGateway {
     return this.select(input).createNativeOrder(input)
   }
 
+  queryNativeOrder(orderId: string, provider: PaymentProvider = 'wechat') {
+    if (provider === 'wechat') return this.wechat.queryNativeOrder(orderId)
+    throw new PaymentConfigurationError(provider, ['provider'], '该支付渠道暂不支持订单查询')
+  }
+
   /** Provider can be supplied explicitly, or inferred from `headers.provider`. */
   verifyCallback(provider: PaymentProvider, headers: PaymentHeaders, rawBody: string | Buffer, options?: Partial<PaymentGatewayOptions>): Promise<VerifiedPaymentCallback>
   verifyCallback(headers: PaymentHeaders, rawBody: string | Buffer, options?: Partial<PaymentGatewayOptions>): Promise<VerifiedPaymentCallback>

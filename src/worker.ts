@@ -5,6 +5,7 @@ import { ChatService } from './services/chat.js'
 import { MailService } from './services/mail.js'
 import { AffiliateService } from './services/affiliate.js'
 import { OrderService } from './services/orders.js'
+import { PaymentGateway } from './payment/gateway.js'
 
 /** Small, repeatable maintenance worker. Billing state lives in PostgreSQL; Redis is not used as a source of truth. */
 export async function runWorker(): Promise<void> {
@@ -24,7 +25,14 @@ export async function runWorker(): Promise<void> {
     await db.query(`DELETE FROM relay_attempts a WHERE NOT EXISTS (SELECT 1 FROM usage_logs u WHERE u.request_id = a.request_id)`)
     await billing.migrateLegacySubscriptions()
     await billing.resetDueSubscriptions()
-    await new OrderService(db, new AffiliateService(db), config).reconcilePending(100)
+    const orders = new OrderService(db, new AffiliateService(db), config)
+    await orders.reconcilePending(100)
+    try {
+      const gateway = new PaymentGateway(config)
+      await orders.reconcilePendingProviderPayments((orderNo) => gateway.queryNativeOrder(orderNo, 'wechat'), 20)
+    } catch {
+      // Payment polling is best effort; callback settlement remains authoritative.
+    }
     await new ChatService(db, config, billing).recover()
     await billing.releaseExpiredReservations()
     await mail.deliverQueued(20)

@@ -1188,6 +1188,22 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const id = String((request.params as any).id || '')
     return { ok: true, ...(await orders.reconcileCredit(id, actor.id)) }
   })
+  app.post('/api/admin/orders/:id/query-payment', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    const id = String((request.params as any).id || '')
+    try {
+      const gateway = await optionalPaymentGateway(config)
+      if (!gateway) throw Object.assign(new Error('支付渠道尚未配置'), { statusCode: 503 })
+      const order = await db.one<any>('SELECT order_no,payment_provider,payment_method FROM orders WHERE id=$1', [id])
+      if (!order) { reply.code(404).send({ error: { message: '订单不存在' } }); return }
+      const provider = String(order.payment_provider || order.payment_method || '').toLowerCase()
+      if (!provider.includes('wechat')) throw new Error('该订单不是微信支付订单')
+      const queried = await gateway.queryNativeOrder(String(order.order_no), 'wechat')
+      const result = await orders.applyQueriedPayment(id, queried)
+      const state = await orders.getCreditState(id)
+      return { ok: true, queried: queried.status, settled: Boolean(result), ...(state || {}) }
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
 
   app.get('/api/admin/usage', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
@@ -1593,7 +1609,17 @@ export async function start(): Promise<void> {
   let creditBusy = false
   const creditTimer = setInterval(() => { if(creditBusy)return;creditBusy=true;void services.orders.reconcilePending(25).catch(()=>services.app.log.error('Order credit reconciliation failed')).finally(()=>{creditBusy=false}) }, 30000)
   creditTimer.unref()
-  services.app.addHook('onClose',async()=>{clearInterval(mediaTimer);clearInterval(creditTimer)})
+  let paymentQueryBusy = false
+  const paymentQueryTimer = setInterval(() => {
+    if (paymentQueryBusy) return
+    paymentQueryBusy = true
+    void optionalPaymentGateway(config)
+      .then((gateway) => gateway ? services.orders.reconcilePendingProviderPayments((orderNo) => gateway.queryNativeOrder(orderNo, 'wechat'), 20) : undefined)
+      .catch(() => services.app.log.warn('WeChat payment reconciliation failed'))
+      .finally(() => { paymentQueryBusy = false })
+  }, 60_000)
+  paymentQueryTimer.unref()
+  services.app.addHook('onClose',async()=>{clearInterval(mediaTimer);clearInterval(creditTimer);clearInterval(paymentQueryTimer)})
   await services.app.listen({ host: config.host, port: config.port })
 }
 

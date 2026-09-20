@@ -36,6 +36,7 @@ import type {
   NativeOrderResult,
   PaymentGatewayOptions,
   PaymentHeaders,
+  PaymentOrderQuery,
   PaymentRequestOptions,
   VerifiedPaymentCallback,
 } from './types.js'
@@ -43,6 +44,7 @@ import type {
 const PROVIDER = 'wechat' as const
 const API_BASE = 'https://api.mch.weixin.qq.com'
 const NATIVE_PATH = '/v3/pay/transactions/native'
+const ORDER_QUERY_PATH = '/v3/pay/transactions/out-trade-no/'
 
 type WechatSettings = PaymentConfig['wechat'] & Record<string, unknown>
 
@@ -223,6 +225,59 @@ export class WechatPaymentGateway {
       providerOrderId: typeof data.prepay_id === 'string' ? data.prepay_id : null,
       amountFen,
       currency: 'CNY',
+    }
+  }
+
+  /** Query a merchant order when the asynchronous notification was missed. */
+  async queryNativeOrder(orderId: string): Promise<PaymentOrderQuery> {
+    const merchantOrder = cleanOrderId(orderId)
+    const { mchId } = this.createSettings()
+    if (!mchId) throw new PaymentConfigurationError(PROVIDER, ['mchId'])
+    const path = `${ORDER_QUERY_PATH}${encodeURIComponent(merchantOrder)}?mchid=${encodeURIComponent(mchId)}`
+    const fetchImpl = this.fetchImpl()
+    let response: Response
+    try {
+      const authorization = await this.authHeader('GET', path, '')
+      response = await fetchImpl(`${API_BASE}${path}`, {
+        method: 'GET',
+        headers: { Accept: 'application/json', Authorization: authorization, 'User-Agent': 'RelayStation/1.0' },
+        signal: requestSignal(this.options),
+      })
+    } catch (error) {
+      if (error instanceof PaymentConfigurationError || error instanceof PaymentProviderError) throw error
+      throw new PaymentProviderError(PROVIDER, isAbortError(error) ? '微信支付查询超时' : '微信支付查询失败', { cause: error })
+    }
+
+    let data: Record<string, any>
+    try { data = await readJsonResponse(response, PROVIDER) } catch (error) {
+      if (error instanceof PaymentProviderError) throw error
+      throw new PaymentProviderError(PROVIDER, '微信支付查询返回了无效响应', { httpStatus: response.status, cause: error })
+    }
+    if (!isHttpOk(response)) throw new PaymentProviderError(PROVIDER, safeProviderMessage(data, '微信支付订单查询失败'), { httpStatus: response.status })
+
+    const returnedOrder = String(data.out_trade_no || '').trim()
+    if (returnedOrder !== merchantOrder) throw new PaymentProviderError(PROVIDER, '微信支付订单号不匹配')
+    const providerStatus = String(data.trade_state || '').trim().toUpperCase()
+    const status = providerStatus === 'SUCCESS' ? 'paid' : /CLOSED|REVOKED|PAYERROR|REFUND|FAIL|CANCEL/.test(providerStatus) ? 'failed' : 'pending'
+    const transactionId = data.transaction_id ? String(data.transaction_id).trim() : null
+    let amountFen: number
+    try { amountFen = Number(BigInt(String(data.amount?.total ?? 0))) } catch { amountFen = 0 }
+    if (!Number.isSafeInteger(amountFen) || amountFen <= 0) throw new PaymentProviderError(PROVIDER, '微信支付订单金额无效')
+    const currency = String(data.amount?.currency || 'CNY').trim().toUpperCase()
+    if (currency !== 'CNY') throw new PaymentProviderError(PROVIDER, '微信支付订单币种不是人民币')
+    if (status === 'paid' && !transactionId) throw new PaymentProviderError(PROVIDER, '微信支付交易号缺失')
+    const paidAtRaw = data.success_time
+    return {
+      eventId: status === 'paid' && transactionId ? `query:${transactionId}` : `query:${merchantOrder}:${providerStatus || 'UNKNOWN'}`,
+      provider: PROVIDER,
+      orderId: merchantOrder,
+      transactionId,
+      status,
+      amountFen,
+      currency,
+      paidAt: paidAtRaw && Number.isFinite(Date.parse(String(paidAtRaw))) ? new Date(String(paidAtRaw)).toISOString() : null,
+      providerStatus: providerStatus || null,
+      buyerId: null,
     }
   }
 

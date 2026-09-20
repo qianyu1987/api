@@ -215,3 +215,41 @@ describe('WeChat callback verification', () => {
     await expect(gateway.verifyCallback(callback.headers, callback.body)).rejects.toBeInstanceOf(PaymentDecryptionError)
   })
 })
+
+describe('WeChat order query', () => {
+  test('signs the query and normalizes a successful paid order', async () => {
+    let requestUrl = ''
+    let requestInit: RequestInit | undefined
+    const gateway = new WechatPaymentGateway(paymentConfig(), {
+      wechatPrivateKey: privateKey,
+      now: () => Date.parse('2026-09-01T02:20:30.000Z'),
+      fetch: async (url, init) => {
+        requestUrl = String(url)
+        requestInit = init
+        return new Response(JSON.stringify({
+          out_trade_no: 'RS202609010010',
+          transaction_id: 'WX202609010010',
+          trade_state: 'SUCCESS',
+          success_time: '2026-09-01T10:20:30+08:00',
+          amount: { total: 100, currency: 'CNY' },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      },
+    })
+    await expect(gateway.queryNativeOrder('RS202609010010')).resolves.toMatchObject({
+      eventId: 'query:WX202609010010', provider: 'wechat', orderId: 'RS202609010010', status: 'paid', amountFen: 100, currency: 'CNY',
+    })
+    expect(requestUrl).toContain('/v3/pay/transactions/out-trade-no/RS202609010010?mchid=merchant-local')
+    expect(requestInit?.method).toBe('GET')
+    expect(String((requestInit?.headers as Record<string, string>).Authorization)).toContain('WECHATPAY2-SHA256-RSA2048')
+  })
+
+  test('rejects a provider response for a different merchant order', async () => {
+    const gateway = new WechatPaymentGateway(paymentConfig(), {
+      wechatPrivateKey: privateKey,
+      fetch: async () => new Response(JSON.stringify({
+        out_trade_no: 'RS-OTHER', trade_state: 'SUCCESS', transaction_id: 'WX-OTHER', amount: { total: 100, currency: 'CNY' },
+      }), { status: 200 }),
+    })
+    await expect(gateway.queryNativeOrder('RS202609010011')).rejects.toThrow('订单号不匹配')
+  })
+})

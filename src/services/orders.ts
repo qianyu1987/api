@@ -392,6 +392,66 @@ export class OrderService {
     return repaired
   }
 
+  /** Settle a pending order from a provider's signed/query response. */
+  async applyQueriedPayment(orderId: string, payment: VerifiedPayment): Promise<CallbackResult | null> {
+    const order = await this.db.one<any>(
+      `SELECT id,order_no,status,kind,amount_micros,payment_provider,payment_method
+       FROM orders WHERE id=$1`, [orderId],
+    )
+    if (!order) throw Object.assign(new Error('订单不存在'), { statusCode: 404 })
+    if (order.status !== 'pending') {
+      if (order.status === 'paid' && payment.status === 'paid' && payment.provider === 'wechat') await this.recordPaymentQueryAudit(orderId, payment)
+      return null
+    }
+    const provider = normalizeProvider(order.payment_provider) || normalizeProvider(order.payment_method)
+    if (provider !== 'wechat' || payment.provider !== 'wechat') throw new Error('该订单不支持微信查询')
+    if (String(payment.orderId || '').trim() !== String(order.order_no)) throw new Error('支付查询订单号不匹配')
+    const amountMicros = payment.amountFen === undefined ? payment.amountMicros : BigInt(String(payment.amountFen)) * MICROS_PER_CENT
+    if (bigintValue(order.amount_micros) !== bigintValue(amountMicros) || String(payment.currency).toUpperCase() !== 'CNY') {
+      throw new Error('支付查询金额或币种不匹配')
+    }
+    if (payment.status !== 'paid') return null
+    const result = await this.applyVerifiedCallback({ ...payment, orderNo: String(order.order_no), amountMicros })
+    await this.recordPaymentQueryAudit(orderId, payment)
+    return result
+  }
+
+  private async recordPaymentQueryAudit(orderId: string, payment: VerifiedPayment): Promise<void> {
+    await this.db.tx(async (client) => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`payment-query:${orderId}`])
+      await client.query(
+        `INSERT INTO admin_audit_events(actor_user_id,action,target_type,target_id,metadata)
+         SELECT NULL,'payment_query_reconciled','order',$1,$2
+         WHERE NOT EXISTS (
+           SELECT 1 FROM admin_audit_events
+           WHERE action='payment_query_reconciled' AND target_type='order' AND target_id=$1
+         )`,
+        [orderId, JSON.stringify({ provider: payment.provider, eventId: payment.eventId, providerStatus: payment.providerStatus, status: payment.status })],
+      )
+    })
+  }
+
+  /** Poll recent pending WeChat orders so a missed callback is self-healing. */
+  async reconcilePendingProviderPayments(query: (orderNo: string) => Promise<VerifiedPayment>, limit = 10): Promise<number> {
+    const rows = await this.db.query<any>(
+      `SELECT id,order_no FROM orders
+       WHERE status='pending' AND (payment_provider='wechat_native' OR payment_method='wechat')
+         AND created_at >= now() - interval '48 hours'
+       ORDER BY created_at DESC LIMIT $1`,
+      [Math.max(1, Math.min(50, Math.floor(limit)))],
+    )
+    let settled = 0
+    for (const row of rows) {
+      try {
+        const result = await this.applyQueriedPayment(String(row.id), await query(String(row.order_no)))
+        if (result?.accepted) settled += 1
+      } catch {
+        // A transient provider/configuration error must not stop later orders.
+      }
+    }
+    return settled
+  }
+
   async applyVerifiedCallback(payment: VerifiedPayment): Promise<CallbackResult> {
     const normalized = normalizePayment(payment)
     return this.db.tx(async (client) => {
