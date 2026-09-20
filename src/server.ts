@@ -803,6 +803,19 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const id = String((request.params as any).id || '')
     let row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,wallet_credit_micros,topup_multiplier_bps,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
     if (!row) { reply.code(404).send({ error: { message: '订单不存在' } }); return }
+    // A callback may be delayed or missed. The customer poll is a fast,
+    // rate-limited recovery path; the worker remains the background fallback.
+    if (row.status === 'pending' && (row.payment_provider === 'wechat_native' || row.payment_method === 'wechat')) {
+      const acquired = await redis.setNx(`payment-order-query:${id}`, '1', 4)
+      if (acquired) {
+        try {
+          const gateway = await optionalPaymentGateway(config)
+          if (gateway) await orders.applyQueriedPayment(id, await gateway.queryNativeOrder(String(row.order_no), 'wechat'))
+        } catch {
+          // A transient provider query must leave the order pending.
+        }
+      }
+    }
     await orders.reconcileCredit(id)
     row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,wallet_credit_micros,topup_multiplier_bps,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
     const credit = await orders.getCreditState(id, user.id)

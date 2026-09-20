@@ -43,6 +43,10 @@ export type UpstreamBalance = {
   unit: string | null
   checkedAt: string
   message: string | null
+  /** Whether the provider returned an account wallet or a credential quota. */
+  scope?: 'account' | 'api_key'
+  /** Usage beyond the credential quota, kept separate from available balance. */
+  overdraft?: number | null
 }
 
 export function parseUpstreamUsage(payload: unknown): Omit<UpstreamBalance, 'checkedAt'> | null {
@@ -54,6 +58,24 @@ export function parseUpstreamUsage(payload: unknown): Omit<UpstreamBalance, 'che
   const used = number(data.quota?.used ?? data.usage?.total?.actual_cost)
   if (remaining === null) return null
   return { status: 'available', remaining, quota, used, unit: typeof data.unit === 'string' && data.unit.length <= 16 ? data.unit : null, message: null }
+}
+
+export function apiKeyScopedBalance(input: { available: number; granted: number; used: number; unit: string; checkedAt: string }): UpstreamBalance {
+  return {
+    status: 'available',
+    // This endpoint reports an API Key allocation, not the provider's
+    // account wallet. Do not render an overage as wallet debt.
+    remaining: Math.max(0, input.available),
+    quota: input.granted,
+    used: input.used,
+    unit: input.unit,
+    checkedAt: input.checkedAt,
+    scope: 'api_key',
+    overdraft: input.available < 0 ? Math.abs(input.available) : null,
+    message: input.available < 0
+      ? '该 API Key 已超额使用；上游账户钱包余额请以供应商后台为准'
+      : '仅为此 API Key 的独立配额，不代表上游账户钱包余额',
+  }
 }
 
 function jsonMap(value: unknown): Record<string, string> {
@@ -232,7 +254,13 @@ export class ChannelService {
           const unit = Number(status?.data?.quota_per_unit)
           const raw = usage?.data
           if (!raw || !Number.isFinite(unit) || unit <= 0 || ![raw.total_available,raw.total_granted,raw.total_used].every(Number.isFinite)) throw new Error('invalid balance')
-          value = { status: 'available', remaining: raw.total_available / unit, quota: raw.total_granted / unit, used: raw.total_used / unit, unit: '¥', checkedAt, message: raw.total_available < 0 ? '上游额度已透支，请及时补充' : null }
+          value = apiKeyScopedBalance({
+            available: raw.total_available / unit,
+            granted: raw.total_granted / unit,
+            used: raw.total_used / unit,
+            unit: '¥',
+            checkedAt,
+          })
         } catch {
           value = { status: 'error', remaining: null, quota: null, used: null, unit: null, checkedAt, message: '余额查询失败，请稍后刷新' }
         }

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { buildApp, type RelayApp } from '../src/server.js'
 import { loadConfig } from '../src/config.js'
-import { parseUpstreamUsage } from '../src/services/channels.js'
+import { apiKeyScopedBalance, parseUpstreamUsage } from '../src/services/channels.js'
 
 const id = 'ee222222-2222-4222-8222-222222222222'
 let services: RelayApp
@@ -80,6 +80,16 @@ describe('upstream balance parsing', () => {
   test.each([null, {}, { remaining: -1 }, { remaining: '18.2' }])('rejects invalid balance payload %j', payload => {
     expect(parseUpstreamUsage(payload)).toBeNull()
   })
+  test('separates a negative API Key allocation from the provider account wallet', () => {
+    expect(apiKeyScopedBalance({ available: -4.56, granted: 0, used: 4.56, unit: '¥', checkedAt: '2026-09-20T00:00:00.000Z' })).toMatchObject({
+      remaining: 0,
+      quota: 0,
+      used: 4.56,
+      scope: 'api_key',
+      overdraft: 4.56,
+    message: '该 API Key 已超额使用；上游账户钱包余额请以供应商后台为准',
+    })
+  })
 })
 
 describe('browser request headers regression', () => {
@@ -105,6 +115,20 @@ describe('browser request headers regression', () => {
     expect((fetch.mock.calls as any)[1][1].headers.get('Content-Type')).toBe('text/plain')
     await api('/upload', { method: 'POST', body: new FormData() })
     expect((fetch.mock.calls as any)[2][1].headers.has('Content-Type')).toBe(false)
+  })
+})
+
+describe('payment refresh regression', () => {
+  const source = readFileSync(new URL('../public/app.js', import.meta.url), 'utf8')
+  const server = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8')
+  test('uses a short, non-overlapping customer payment poll', () => {
+    expect(source).toContain('let paymentPollInFlight = false')
+    expect(source).toContain('if (paymentPollInFlight) return')
+    expect(source).toContain('}, 3000)')
+  })
+  test('queries a pending WeChat order behind a distributed throttle', () => {
+    expect(server).toContain('payment-order-query:${id}')
+    expect(server).toContain("gateway.queryNativeOrder(String(row.order_no), 'wechat')")
   })
 })
 
