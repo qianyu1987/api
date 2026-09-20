@@ -1099,6 +1099,10 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if (q.search) { values.push(`%${String(q.search).slice(0, 128)}%`); where.push(`u.username ILIKE $${values.length}`) }
     return { items: await db.query<any>(`SELECT u.id,u.username,u.email,u.role,u.status,u.invite_code,u.last_login_at,u.created_at,u.disabled_at,
       w.balance_micros,COALESCE(w.reserved_micros,0) AS wallet_reserved_micros,aw.balance_micros AS affiliate_balance_micros,u.token_discount_bps,
+      (SELECT COALESCE(SUM(wl.amount_micros),0)::text FROM wallet_ledger wl
+        WHERE wl.user_id=u.id AND wl.kind='wallet_topup') AS total_topup_credit_micros,
+      (SELECT COALESCE(SUM(COALESCE(o.paid_amount_micros,o.amount_micros)),0)::text FROM orders o
+        WHERE o.user_id=u.id AND o.kind='wallet_topup' AND o.status='paid') AS total_topup_paid_micros,
       s.remaining_micros AS plan_remaining_micros,COALESCE(s.reserved_micros,0) AS plan_reserved_micros,s.reset_quota_micros AS plan_quota_micros,
       s.expires_at AS plan_expires_at,s.next_reset_at AS plan_next_reset_at,s.last_reset_at AS plan_last_reset_at,s.status AS plan_status
       FROM users u LEFT JOIN wallets w ON w.user_id=u.id LEFT JOIN affiliate_wallets aw ON aw.user_id=u.id
