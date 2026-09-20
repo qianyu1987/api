@@ -33,18 +33,18 @@ describe('media submission lifecycle',()=>{
  ])('only recognizes explicit queue admission rejection (%s)',(status,payload,expected)=>{
   expect(agnesVideoQueueFull(status as number,payload)).toBe(expected)
  })
- test.each(['queued','processing'])('queue-full response while %s only releases an unaccepted submission',async(status)=>{
+ test.each(['queued','processing'])('queue-full response while %s only requeues an unaccepted submission',async(status)=>{
   const key=Buffer.alloc(32,12),task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status,channel_id:'channel',request_payload:{},upstream_id:status==='processing'?'accepted-task':null}
   const query=vi.fn(async()=>[])
-  const db:any={query,one:vi.fn(async()=>({base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const db:any={query,one:vi.fn(async()=>({id:'channel',base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
   const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
   const fetchMock=vi.fn(async()=>new Response(JSON.stringify({code:503,message:'video queue is full, please retry later (request id: diagnostic)',data:null}),{status:503}))
   vi.stubGlobal('fetch',fetchMock)
   try{await svc.tick()}finally{vi.unstubAllGlobals()}
   expect(fetchMock).toHaveBeenCalledTimes(1)
   if(status==='queued'){
-   expect(finish).toHaveBeenCalledWith('task',false,null,'视频服务繁忙，生成队列已满，本次未接单，额度已退回，请稍后重新生成')
-   expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='unknown'")&&params?.[0]==='task')).toBe(false)
+   expect(finish).not.toHaveBeenCalled()
+   expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='queued'")&&params?.[0]==='task')).toBe(true)
   }else{
    expect(finish).not.toHaveBeenCalled()
    expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='unknown'")&&params?.[0]==='task')).toBe(true)
@@ -53,7 +53,7 @@ describe('media submission lifecycle',()=>{
  test('generic submit 503 remains uncertain and is never resubmitted',async()=>{
   const key=Buffer.alloc(32,13),task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'queued',channel_id:'channel',request_payload:{}}
   const query=vi.fn(async()=>[])
-  const db:any={query,one:vi.fn(async()=>({base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const db:any={query,one:vi.fn(async()=>({id:'channel',base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
   const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
   const fetchMock=vi.fn(async()=>new Response('Service unavailable',{status:503}));vi.stubGlobal('fetch',fetchMock)
   try{await svc.tick()}finally{vi.unstubAllGlobals()}
@@ -68,7 +68,7 @@ describe('media submission lifecycle',()=>{
  })
  test('ambiguous submit is not resent or released',async()=>{
  const task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'queued',channel_id:'channel',request_payload:{}}
- const query=vi.fn(async()=>[]);const db:any={query,one:vi.fn(async()=>({base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:'bad',enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+ const query=vi.fn(async()=>[]);const db:any={query,one:vi.fn(async()=>({id:'channel',base_url:'https://apihub.agnes-ai.com/v1',encrypted_api_key:'bad',enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
  const s=new MediaService(db,{channelEncryptionKey:Buffer.alloc(32)} as any);const finish=vi.spyOn(s,'finish');await s.tick();expect(finish).not.toHaveBeenCalled()
  expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='unknown'")&&params?.[0]==='task')).toBe(true)
  })
@@ -81,11 +81,11 @@ describe('media submission lifecycle',()=>{
   expect(fetchMock).not.toHaveBeenCalled();expect(db.one).not.toHaveBeenCalled()
   expect(query.mock.calls.some(([sql])=>sql.includes("WHERE id=$1 AND status='unknown'"))).toBe(true)
  })
- test('unknown task expires after one minute and is refunded',async()=>{
-  const query=vi.fn(async(sql:string)=>sql.startsWith('SELECT id FROM media_tasks')?[{id:'expired'}]:[])
+ test('unknown video task expires after 45 minutes and is refunded',async()=>{
+  const query=vi.fn(async(sql:string)=>sql.includes("status='unknown'")?[{id:'expired',kind:'video'}]:[])
   const s=new MediaService({query,tx:vi.fn()} as any,{} as any),finish=vi.spyOn(s,'finish').mockResolvedValue()
   await s.tick()
-  expect(finish).toHaveBeenCalledWith('expired',false,null,'生成结果未确认，额度已自动退回，可重新生成')
+  expect(finish).toHaveBeenCalledWith('expired',false,null,'暂时无法安排生成，额度已全部退回',undefined,undefined,'confirmation_timeout')
  })
  test('unknown task with upstream id recovers within the confirmation window',async()=>{
   const key=Buffer.alloc(32,6),task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'unknown',channel_id:'channel',request_payload:{},upstream_id:'upstream',uncertain_since:new Date()}
@@ -97,17 +97,17 @@ describe('media submission lifecycle',()=>{
  })
  test('video tasks reject non-Agnes channel mappings before contacting the provider',async()=>{
   const key=Buffer.alloc(32,10),task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'queued',channel_id:'channel',request_payload:{}}
-  const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>({base_url:'https://ripp.best/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>({id:'channel',base_url:'https://ripp.best/v1',encrypted_api_key:encryptSecret('provider-key',key)})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
   const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
   const fetchMock=vi.fn();vi.stubGlobal('fetch',fetchMock)
   try{await svc.tick()}finally{vi.unstubAllGlobals()}
   expect(fetchMock).not.toHaveBeenCalled()
-  expect(finish).toHaveBeenCalledWith('task',false,null,'媒体渠道与模型不匹配，冻结额度已释放')
+  expect(finish).toHaveBeenCalledWith('task',false,null,'媒体渠道与模型不匹配，冻结额度已释放',undefined,undefined,'channel_mismatch')
  })
  test('public task has safe retry input and no cost, internal payload, upstream id or snapshots',()=>{const s=new MediaService({} as any,{} as any);const t=s.publicTask({id:'test',kind:'video',status:'processing',created_at:new Date(),charge_micros:'10',user_input:{kind:'video',engine:'standard',prompt:'retry me',size:'720P',ratio:'9:16',seconds:5,mode:'text'},price_snapshot:{secret:true},actual_cost_micros:'10',request_payload:{privatePayload:true},upstream_id:'private',channel_id:'channel'});expect(t.reserved).toBe(true);expect(t.input).toMatchObject({prompt:'retry me',engine:'standard',ratio:'9:16'});expect(t.canRetry).toBe(false);expect(JSON.stringify(t)).not.toMatch(/secret|privatePayload|upstream|channel|actual_cost|snapshot|request_payload/);expect(s.publicTask({status:'failed'})).toMatchObject({reserved:false,canRetry:true,refundStatus:'returned'})})
  test('professional image worker accepts base64 without exposing an upstream URL',async()=>{
   const key=Buffer.alloc(32,7),task={id:'task',kind:'image',model:'gpt-image-2',status:'queued',channel_id:'channel',request_payload:{model:'gpt-image-2'}}
-  const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>({base_url:'https://cdn.yyapi.cloud/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>({id:'channel',base_url:'https://cdn.yyapi.cloud/v1',encrypted_api_key:encryptSecret('provider-key',key)})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
   const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
   vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({data:[{b64_json:Buffer.from([0x89,0x50,...Array(20).fill(0)]).toString('base64')}]}),{status:200,headers:{'content-type':'application/json'}})))
   try{await svc.tick()}finally{vi.unstubAllGlobals()}
@@ -115,11 +115,11 @@ describe('media submission lifecycle',()=>{
  })
  test('explicit non-json policy rejection releases the wallet hold',async()=>{
   const key=Buffer.alloc(32,8),task={id:'task',kind:'image',model:'gpt-image-2.5',status:'queued',channel_id:'channel',request_payload:{model:'gpt-image-2.5'}}
-  const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>({base_url:'https://ripp.best/v1',encrypted_api_key:encryptSecret('provider-key',key),enabled:true})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>({id:'channel',base_url:'https://ripp.best/v1',encrypted_api_key:encryptSecret('provider-key',key)})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
   const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
   vi.stubGlobal('fetch',vi.fn(async()=>new Response('status_code=400, request rejected',{status:400})))
   try{await svc.tick()}finally{vi.unstubAllGlobals()}
-  expect(finish).toHaveBeenCalledWith('task',false,null,expect.stringContaining('冻结额度已释放'))
+  expect(finish).toHaveBeenCalledWith('task',false,null,'提示词未通过上游审核，额度已全部退回',undefined,undefined,'upstream_rejected')
  })
 })
 

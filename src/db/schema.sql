@@ -958,6 +958,10 @@ ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS price_source TEXT;
 ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS price_effective_at TIMESTAMPTZ;
 ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS fx_rate_cny_micros BIGINT;
 ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS pricing_tiers JSONB;
+-- User-facing model prices are standard across all context lengths. Keep any
+-- historical tiers inside immutable billing snapshots, but remove active sales
+-- tiers so a schema migration cannot re-enable the old 272K user surcharge.
+UPDATE model_prices SET pricing_tiers = NULL WHERE active;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS wallet_settled_micros BIGINT;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS pricing_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ NOT NULL DEFAULT now();
@@ -1067,10 +1071,15 @@ CREATE TABLE IF NOT EXISTS media_tasks (
  upstream_id TEXT,
  result_url TEXT,
  error_message TEXT,
- progress INTEGER NOT NULL DEFAULT 0,
- next_poll_at TIMESTAMPTZ NOT NULL DEFAULT now(),
- lease_until TIMESTAMPTZ,
- uncertain_since TIMESTAMPTZ,
+  progress INTEGER NOT NULL DEFAULT 0,
+  next_poll_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  submit_attempts INTEGER NOT NULL DEFAULT 0 CHECK(submit_attempts >= 0),
+  queue_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  accepted_at TIMESTAMPTZ,
+  last_retry_code TEXT,
+  lease_until TIMESTAMPTZ,
+  uncertain_since TIMESTAMPTZ,
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
  finished_at TIMESTAMPTZ,
  UNIQUE(user_id,idempotency_key)
@@ -1078,11 +1087,22 @@ CREATE TABLE IF NOT EXISTS media_tasks (
 CREATE INDEX IF NOT EXISTS media_tasks_user_idx ON media_tasks(user_id,created_at DESC,id DESC);
 ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS user_input JSONB;
 ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS uncertain_since TIMESTAMPTZ;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS submit_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS queue_started_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS accepted_at TIMESTAMPTZ;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS last_retry_code TEXT;
+UPDATE media_tasks
+SET next_attempt_at=COALESCE(next_attempt_at,next_poll_at,created_at),
+    queue_started_at=COALESCE(queue_started_at,created_at),
+    submit_attempts=GREATEST(COALESCE(submit_attempts,0),0)
+WHERE next_attempt_at IS NULL OR queue_started_at IS NULL OR submit_attempts IS NULL OR submit_attempts < 0;
 UPDATE media_tasks
 SET uncertain_since=now(),next_poll_at=LEAST(next_poll_at,now())
 WHERE status='unknown' AND uncertain_since IS NULL;
 DROP INDEX IF EXISTS media_tasks_pending_idx;
-CREATE INDEX media_tasks_pending_idx ON media_tasks(next_poll_at) WHERE status IN ('queued','processing','unknown');
+CREATE INDEX media_tasks_queue_idx ON media_tasks(next_attempt_at,created_at,id) WHERE status='queued';
+CREATE INDEX media_tasks_pending_idx ON media_tasks(next_poll_at,created_at,id) WHERE status IN ('submitting','processing','unknown');
 UPDATE media_tasks
 SET user_input = jsonb_strip_nulls(jsonb_build_object(
   'kind', kind,
@@ -1154,3 +1174,10 @@ CREATE TABLE IF NOT EXISTS media_welcome_gifts (
 );
 ALTER TABLE media_tasks DROP CONSTRAINT IF EXISTS media_tasks_charge_micros_check;
 ALTER TABLE media_tasks ADD CONSTRAINT media_tasks_charge_micros_check CHECK(charge_micros >= 0);
+
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS media_failure_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS media_circuit_open_until TIMESTAMPTZ;
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS media_last_failure_at TIMESTAMPTZ;
+ALTER TABLE channels ADD COLUMN IF NOT EXISTS media_last_success_at TIMESTAMPTZ;
+ALTER TABLE channels DROP CONSTRAINT IF EXISTS channels_media_failure_count_check;
+ALTER TABLE channels ADD CONSTRAINT channels_media_failure_count_check CHECK(media_failure_count >= 0);

@@ -5,3 +5,4 @@
 .media-choice-field [data-choice="engine"] small { font-size:12px; font-weight:500; color:var(--muted, #75686d); }
 .media-choice-field [data-choice="engine"] strong { display:inline-flex; align-items:center; padding:2px 8px; border-radius:999px; background:#e5f5ec; color:#247247; font-size:12px; line-height:1.35; }
 .media-choice-field [data-choice="engine"] .media-free-choice:has(input:checked) span { color:#21633d; }
+ .balance-history{display:flex;flex-wrap:wrap;gap:14px;margin-top:14px;color:var(--muted);font-size:12px}.balance-history span{display:flex;gap:5px;align-items:baseline}.balance-history strong{color:var(--ink);font-size:14px;font-variant-numeric:tabular-nums}

@@ -78,7 +78,7 @@ describe('sol fallback routing', () => {
   })
   test.each(['/images/generations', '/audio/speech', '/embeddings', '/responses/previous'])('excludes the text fallback for %s', async path => {
     const { service, rows } = routing(); rows[0].enabled = false
-    await expect(call(service, path)).rejects.toThrow('没有已启用上游渠道')
+    await expect(call(service, path)).rejects.toThrow('当前请求包含工具、图片、文件或多轮状态，暂无兼容的上游渠道')
   })
   test('preserves gpt-6-astra mapping and priority', async () => {
     const { service, rows } = routing(); rows[1].priority = 1

@@ -115,36 +115,61 @@ export function isInvalidApiResponse(status: number, headers: Record<string, unk
   return contentType.includes('text/html')
 }
 
-export function normalizeResponsesTools(parsed: any): void {
-  if (!Array.isArray(parsed?.tools)) return
-  parsed.tools = parsed.tools.flatMap((tool: any) => {
-    if (!tool || typeof tool !== 'object') return [tool]
-    if (tool.type === 'namespace') {
-      const nested = Array.isArray(tool.functions) ? tool.functions : Array.isArray(tool.tools) ? tool.tools : null
-      if (nested?.length) {
-        const expanded = nested.map((entry: any) => ({ ...entry, name: tool.name && entry?.name ? `${String(tool.name).slice(0, 128)}.${String(entry.name).slice(0, 128)}` : entry?.name, type: entry?.type || 'function' }))
-        const holder = { tools: expanded }
-        normalizeResponsesTools(holder)
-        return holder.tools
-      }
-    }
-    if (tool.type !== 'custom' && tool.type !== 'namespace') return [tool]
-    const custom = tool.custom && typeof tool.custom === 'object' ? tool.custom : tool
-    const format = custom.format && typeof custom.format === 'object' ? custom.format : null
-    let parameters = custom.parameters || custom.input_schema || custom.schema
-    // Responses custom tools may carry a grammar instead of JSON Schema. The
-    // upstream accepts function tools only, so expose a permissive object
-    // shape and keep the original description/name for model compatibility.
-    if (!parameters && format && format.type === 'json_schema') parameters = format.schema || format.value
-    if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) parameters = { type: 'object', properties: {}, additionalProperties: true }
-    return [{
-      type: 'function',
-      name: String(custom.name || tool.name || 'custom_tool').slice(0, 256),
-      description: typeof custom.description === 'string' ? custom.description.slice(0, 4096) : undefined,
-      parameters,
-      strict: custom.strict === true || tool.strict === true,
-    }]
+type RequestShape = Record<string, any>
+
+const COMPLEX_RESPONSES_ITEM_TYPES = new Set([
+  'function_call', 'function_call_output', 'computer_call', 'computer_call_output',
+  'input_image', 'input_file', 'input_audio', 'file_search_call', 'web_search_call',
+  'code_interpreter_call', 'local_shell_call', 'reasoning', 'refusal',
+])
+
+function textContent(value: unknown): boolean {
+  if (typeof value === 'string') return true
+  if (!Array.isArray(value)) return false
+  return value.every((item) => {
+    if (typeof item === 'string') return true
+    if (!item || typeof item !== 'object') return false
+    const type = String((item as any).type || '')
+    return type === 'input_text' || type === 'text'
   })
+}
+
+function hasComplexValue(value: unknown, seen = new Set<object>()): boolean {
+  if (!value || typeof value !== 'object') return false
+  if (seen.has(value as object)) return false
+  seen.add(value as object)
+  if (Array.isArray(value)) return value.some((item) => hasComplexValue(item, seen))
+  const object = value as RequestShape
+  if (COMPLEX_RESPONSES_ITEM_TYPES.has(String(object.type || ''))) return true
+  if (object.image_url || object.file_id || object.input_image || object.input_file || object.attachments) return true
+  return Object.entries(object).some(([key, item]) => {
+    if (['tools', 'tool_choice', 'functions', 'function_call', 'previous_response_id', 'conversation', 'reasoning', 'include'].includes(key)) return true
+    return hasComplexValue(item, seen)
+  })
+}
+
+/**
+ * Agnes fallback is deliberately limited to stateless text requests. This
+ * inspects only request structure; no payload values are persisted or logged.
+ */
+export function isSimpleTextRequest(body: Buffer | undefined, path: string, method = 'POST'): boolean {
+  if (method.toUpperCase() !== 'POST' || !['/chat/completions', '/responses'].includes(path.split('?')[0])) return false
+  if (!body || !body.length) return false
+  let parsed: RequestShape
+  try { parsed = JSON.parse(body.toString('utf8')) } catch { return false }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false
+  if (hasComplexValue(parsed)) return false
+  if (path.split('?')[0] === '/responses') {
+    if (typeof parsed.input === 'string') return true
+    if (!Array.isArray(parsed.input) || parsed.input.length === 0) return false
+    return parsed.input.every((item: any) => {
+      if (!item || typeof item !== 'object') return false
+      if (item.role && !['system', 'developer', 'user', 'assistant'].includes(String(item.role))) return false
+      return textContent(item.content)
+    })
+  }
+  if (!Array.isArray(parsed.messages) || parsed.messages.length === 0) return false
+  return parsed.messages.every((message: any) => message && typeof message === 'object' && textContent(message.content))
 }
 
 export function rewriteRequestBody(body: Buffer | undefined, requestedModel: string, upstreamModel: string, path: string): Buffer | undefined {
@@ -159,19 +184,6 @@ export function rewriteRequestBody(body: Buffer | undefined, requestedModel: str
     if (requestedModel && upstreamModel && requestedModel !== upstreamModel && Object.prototype.hasOwnProperty.call(parsed, 'model')) {
       parsed.model = upstreamModel
       changed = true
-    }
-    if (path.split('?')[0] === '/responses') {
-      if (Array.isArray(parsed.tools) && parsed.tools.some((tool: any) => tool?.type === 'custom' || tool?.type === 'namespace')) {
-        normalizeResponsesTools(parsed)
-        changed = true
-      }
-      // Some CC Switch Codex requests carry tool_choice even when the
-      // provider-specific tool list is empty. OpenAI-compatible upstreams
-      // reject that combination; with no tools, tool_choice has no effect.
-      if ((!Array.isArray(parsed.tools) || parsed.tools.length === 0) && Object.prototype.hasOwnProperty.call(parsed, 'tool_choice')) {
-        delete parsed.tool_choice
-        changed = true
-      }
     }
     return changed ? Buffer.from(JSON.stringify(parsed)) : body
   } catch { return body }
@@ -331,13 +343,19 @@ export class ChannelService {
 
   async relay(path: string, method: string, headers: Record<string, string>, body: Buffer | undefined, requestedModel: string): Promise<RelayResult> {
     const fallback = (channel: Channel) => isSolFallback(requestedModel, channel.modelMap[requestedModel] || channel.modelMap['*'] || requestedModel)
+    const simpleText = isSimpleTextRequest(body, path, method)
     const channels = (await this.list()).filter((channel) => {
       if (!supportsRequestedModel(channel, requestedModel)) return false
-      // This text fallback supports only the synchronous Chat/Responses APIs.
-      // Do not route image, audio, embedding or response-management operations to it.
-      return !fallback(channel) || (method.toUpperCase() === 'POST' && ['/chat/completions', '/responses'].includes(path.split('?')[0]))
+      // Agnes fallback is intentionally restricted to stateless text. Native
+      // channels receive the original protocol payload without lossy rewrites.
+      return !fallback(channel) || simpleText
     }).sort((a, b) => Number(fallback(a)) - Number(fallback(b)))
-    if (!channels.length) throw new Error(requestedModel ? '当前模型没有已启用上游渠道，请联系管理员配置模型映射' : '暂无可用上游渠道，请联系管理员')
+    if (!channels.length) {
+      const error = new Error(simpleText ? (requestedModel ? '当前模型没有已启用上游渠道，请联系管理员配置模型映射' : '暂无可用上游渠道，请联系管理员') : '当前请求包含工具、图片、文件或多轮状态，暂无兼容的上游渠道')
+      ;(error as any).code = simpleText ? 'upstream_unavailable' : 'no_compatible_upstream'
+      ;(error as any).attempts = []
+      throw error
+    }
     const attempts: RelayAttempt[] = []
     for (let index = 0; index < channels.length; index += 1) {
       const channel = channels[index]

@@ -23,7 +23,7 @@ export function mediaApiInput(body: any, kind?: 'image' | 'video') {
   return input
 }
 
-export function registerMediaApi(app: FastifyInstance, auth: Pick<AuthService, 'authenticateApiKey'>, media: Pick<MediaService, 'create' | 'get' | 'list' | 'quote'>) {
+export function registerMediaApi(app: FastifyInstance, auth: Pick<AuthService, 'authenticateApiKey'>, media: Pick<MediaService, 'create' | 'get' | 'list' | 'quote' | 'cancel'>) {
   const identity = async (request: any) => {
     const match = /^Bearer\s+(\S+)$/i.exec(request.headers.authorization || '')
     if (!match) mediaError('需要 Bearer API Key', 401)
@@ -53,6 +53,7 @@ export function registerMediaApi(app: FastifyInstance, auth: Pick<AuthService, '
   })
   app.get('/v1/media/tasks', async request => media.list((await identity(request)).user.id))
   app.get<{Params:{id:string}}>('/v1/media/tasks/:id', async request => media.get((await identity(request)).user.id, request.params.id))
+  app.delete<{Params:{id:string}}>('/v1/media/tasks/:id', async request => media.cancel((await identity(request)).user.id, request.params.id))
   app.get<{Params:{id:string}}>('/v1/videos/:id', async request => {
     const task = await media.get((await identity(request)).user.id, request.params.id)
     if (task.kind !== 'video') mediaError('视频任务不存在', 404)

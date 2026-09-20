@@ -577,7 +577,9 @@ export class BillingService {
       priceSource: row.price_source || null,
       priceEffectiveAt: row.price_effective_at ? new Date(row.price_effective_at).toISOString() : null,
       fxRateCnyMicros: row.fx_rate_cny_micros == null ? null : bigintValue(row.fx_rate_cny_micros),
-      pricingTiers: Array.isArray(row.pricing_tiers) ? row.pricing_tiers.map((tier: any) => ({ thresholdTokens: bigintValue(tier.thresholdTokens), label: cleanText(tier.label, 128) || undefined, inputSellMicrosPerMillion: bigintValue(tier.inputSellMicrosPerMillion), outputSellMicrosPerMillion: bigintValue(tier.outputSellMicrosPerMillion), cacheSellMicrosPerMillion: bigintValue(tier.cacheSellMicrosPerMillion), inputCostMicrosPerMillion: bigintValue(tier.inputCostMicrosPerMillion), outputCostMicrosPerMillion: bigintValue(tier.outputCostMicrosPerMillion), cacheCostMicrosPerMillion: bigintValue(tier.cacheCostMicrosPerMillion) })) : undefined,
+      // Active customer prices are standard-rate only. Provider high-context
+      // costs are added later by applyChannelCost without changing the sale.
+      pricingTiers: undefined,
     }
   }
 

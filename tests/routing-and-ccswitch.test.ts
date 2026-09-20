@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { buildCcswitchImportLink, ccswitchModel } from '../src/lib/ccswitch.js'
-import { isInvalidApiResponse, normalizeResponsesTools, responseFailure, rewriteRequestBody, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
+import { isInvalidApiResponse, isSimpleTextRequest, responseFailure, rewriteRequestBody, safeRelayError, shouldFailover, supportsRequestedModel } from '../src/services/channels.js'
 import { AgnesResponsesSse, chatToResponses, isAgnesResponsesAdapter, responsesToChat } from '../src/lib/agnes-adapter.js'
 
 afterEach(() => vi.restoreAllMocks())
@@ -42,21 +42,37 @@ describe('channel failover policy', () => {
     const result = responsesToChat({ model: 'gpt-5.6-terra', input: 'hello' })
     expect(result).toMatchObject({ model: 'gpt-5.6-terra', messages: [{ role: 'user', content: 'hello' }] })
   })
-  test('converts Responses custom tools to function tools accepted by upstream gateways', () => {
-    const payload: any = { tools: [{ type: 'custom', name: 'lookup', description: 'Look up data', format: { type: 'text' } }] }
-    normalizeResponsesTools(payload)
-    expect(payload.tools[0]).toMatchObject({ type: 'function', name: 'lookup', description: 'Look up data', parameters: { type: 'object' } })
+  test('rewrites only the model and preserves native Responses structures', () => {
+    const input = {
+      model: 'gpt-5.5',
+      input: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: '查一下文件' }] },
+        { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call_1', output: '{"ok":true}' },
+      ],
+      tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }],
+      tool_choice: { type: 'function', name: 'lookup' },
+      previous_response_id: 'resp_previous',
+      reasoning: { effort: 'medium' },
+    }
+    const body = rewriteRequestBody(Buffer.from(JSON.stringify(input)), 'gpt-5.5', 'agnes-2.5-flash', '/responses?stream=true')
+    expect(JSON.parse(String(body))).toEqual({ ...input, model: 'agnes-2.5-flash' })
   })
 
-  test('expands Responses namespace tools into function tools', () => {
-    const payload: any = { tools: [{ type: 'namespace', name: 'files', functions: [{ name: 'search', parameters: { type: 'object' } }] }] }
-    normalizeResponsesTools(payload)
-    expect(payload.tools).toEqual([{ type: 'function', name: 'files.search', parameters: { type: 'object' } }])
+  test('accepts only stateless text requests for the simple fallback', () => {
+    const chat = Buffer.from(JSON.stringify({ model: 'gpt-5.5', messages: [{ role: 'user', content: '你好' }] }))
+    const responses = Buffer.from(JSON.stringify({ model: 'gpt-5.5', input: [{ role: 'user', content: [{ type: 'input_text', text: '你好' }] }] }))
+    expect(isSimpleTextRequest(chat, '/chat/completions')).toBe(true)
+    expect(isSimpleTextRequest(responses, '/responses')).toBe(true)
+    expect(isSimpleTextRequest(Buffer.from(JSON.stringify({ model: 'gpt-5.5', messages: [{ role: 'user', content: '你好' }], tools: [{ type: 'function', name: 'lookup' }] })), '/chat/completions')).toBe(false)
+    expect(isSimpleTextRequest(Buffer.from(JSON.stringify({ model: 'gpt-5.5', input: [{ type: 'message', role: 'user', content: [{ type: 'input_image', image_url: 'https://example.test/image.png' }] }] })), '/responses')).toBe(false)
+    expect(isSimpleTextRequest(Buffer.from(JSON.stringify({ model: 'gpt-5.5', input: [{ role: 'user', content: [{ type: 'input_text', text: '你好' }] }], previous_response_id: 'resp_previous' })), '/responses')).toBe(false)
   })
 
-  test('drops tool_choice when a Responses request has no tools', () => {
-    const body = rewriteRequestBody(Buffer.from(JSON.stringify({ model: 'gpt-5.5', tool_choice: { type: 'function', name: 'tool_choice' } })), 'gpt-5.5', 'agnes-2.5-flash', '/responses?stream=true')
-    expect(JSON.parse(String(body))).toEqual({ model: 'agnes-2.5-flash' })
+  test('keeps tool_choice when rewriting a request with no tools', () => {
+    const input = { model: 'gpt-5.5', tool_choice: { type: 'function', name: 'tool_choice' } }
+    const body = rewriteRequestBody(Buffer.from(JSON.stringify(input)), 'gpt-5.5', 'agnes-2.5-flash', '/responses?stream=true')
+    expect(JSON.parse(String(body))).toEqual({ ...input, model: 'agnes-2.5-flash' })
   })
   test.each([401, 403, 408, 429, 500, 502, 503, 599])('fails over retryable provider HTTP %i', (status) => {
     expect(shouldFailover(status)).toBe(true)

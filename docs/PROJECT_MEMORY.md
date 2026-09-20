@@ -81,6 +81,8 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 
 ## 最近上游运行事件
 
+- 2026-09-20 13:29 UTC 查明 Luna 当前没有启用的 `model_map` 路由或通配映射，历史映射表两条记录也已停用；60 次 Luna 502 没有转发尝试。此前“最近十五分钟无 5xx”仅是流量窗口观测，不是 Luna 恢复证据。巡检不得擅自启用/更换映射，需用户确定支持范围和渠道。
+
 - 2026-09-20 曾短时观察到 `molifangapi.com` 对 `gpt-5.6-sol`、`gpt-6-astra` 返回 403，应用因此对请求返回 503；该异常在后续十分钟复查时已停止。将来再次发生时先记录精确时间、模型和日志计数，复查近期 `usage_logs` 与本地日志；不要自行更换渠道、修改密钥、映射、价格或用户账务。
 - 2026-09-20 18:00–18:10 CST 又观察到一段 `gpt-5.6-luna`/`gpt-5.6-sol` 的 502（摘要为所有上游渠道不可用），最近 15 分钟复查已恢复且出现 200。该类波动先作为上游瞬时故障记录，不自动切换渠道或改动账务。
 
@@ -93,6 +95,12 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 5. 构建目标镜像，运行一次性 migration，再更新持久 `RELAY_IMAGE_TAG` 并 `docker compose up -d --no-deps --scale api=2 --wait api gateway`。确认 worker 后续使用同一目标版本。
 6. 检查两个 API 版本和 healthy、Gateway/PostgreSQL/Redis、worker timer、最近脱敏错误；检查 `/healthz`、`/api/v1/health`、两域名首页、静态脚本版本及内容。
 7. 真正出片、支付等业务成功要有相应验证证据；健康接口与模拟测试不等于业务端到端成功。
+
+### v1.0.87 变更边界
+
+- 账户总览历史金额必须由 `/api/me/overview` 的只读聚合和首页 `app.js` 同步发布；“历史总充值额度”按钱包到账流水统计，“历史实付总额（含套餐）”按已支付钱包充值与套餐订单统计。账户接口使用 `private, no-store`，避免支付后旧缓存遮住新余额。
+- 视频任务在上游队列满、429 或明确未接单时保持冻结并进入平台队列，30 分钟后才全额退款；已接单任务锁定渠道并在 45 分钟确认窗口内只查询原任务。生产验证不得重复提交付费视频。
+- 用户模型售价不再按 272K 分层；活跃 `model_prices.pricing_tiers` 迁移为空。`channel_model_costs.high_context_multiplier_bps` 仍用于上游成本核算，历史 `pricing_snapshot` 不改。
 
 本机 `node/npm` 可能不在 PATH；已验证 Node/npm 目录：`/Volumes/brainos/MacStorage/Caches/node-v22.23.2/node-v22.23.2-darwin-arm64/bin`。`/usr/bin/git` 曾被 Xcode license 阻断，可用 `/Library/Developer/CommandLineTools/usr/bin/git`；不要替用户接受许可证。路径不可用时再定位 bundled runtime。
 

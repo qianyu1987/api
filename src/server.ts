@@ -201,9 +201,17 @@ function responseHeader(headers: Record<string, string | string[] | undefined>, 
   return null
 }
 
-function upstreamErrorSummary(payload: any): string | null {
-  if (!payload || typeof payload !== 'object') return null
-  return '上游返回错误'
+function upstreamErrorDetails(payload: any): { code: string; summary: string } {
+  if (!payload || typeof payload !== 'object') return { code: 'upstream_http_error', summary: '上游返回错误' }
+  const error = payload.error && typeof payload.error === 'object' ? payload.error : payload
+  const code = String(error.code || '').toLowerCase()
+  const message = String(error.message || '').toLowerCase()
+  if (code === 'json_parse_error' || message.includes('responseinput') || message.includes('response input')) {
+    return { code: 'upstream_invalid_response_input', summary: '上游拒绝了 Responses 输入结构' }
+  }
+  if (message.includes('tool') || message.includes('function')) return { code: 'upstream_invalid_tool_schema', summary: '上游拒绝了工具结构' }
+  if (code.includes('auth') || code.includes('permission')) return { code: 'upstream_auth_error', summary: '上游认证或权限失败' }
+  return { code: 'upstream_http_error', summary: '上游返回错误' }
 }
 
 function waitForWritableDrain(stream: any): Promise<void> {
@@ -373,6 +381,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.post('/api/me/media/tasks', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;reply.code(202);return media.create(user.id,request.body)})
   app.get('/api/me/media/tasks', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;return media.list(user.id)})
   app.get('/api/me/media/tasks/:id', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;return media.get(user.id,String((request.params as any).id))})
+  app.delete('/api/me/media/tasks/:id', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;return media.cancel(user.id,String((request.params as any).id))})
   const sendStoredMedia = async (reply:any, taskId:string) => {
     const asset=await db.one<any>('SELECT content_type,content FROM media_task_assets WHERE task_id=$1',[taskId])
     if(!asset)return false
@@ -454,7 +463,10 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   })
   app.get('/api/admin/media',async(request,reply)=>{
     if(!await requireAdmin(request,reply))return
-    const [prices,tasks,channels]=await Promise.all([db.query('SELECT * FROM media_prices ORDER BY model,size'),db.query(`SELECT t.id,t.user_id,u.username,t.kind,t.model,t.status,t.result_url,t.gallery_status,t.gallery_featured,t.gallery_title,t.finished_at,t.charge_micros,t.actual_cost_micros,t.price_snapshot,t.error_message,t.created_at FROM media_tasks t JOIN users u ON u.id=t.user_id ORDER BY t.created_at DESC LIMIT 100`),db.query("SELECT id,name FROM channels WHERE deleted_at IS NULL AND base_url IN ('https://apihub.agnes-ai.com/v1','https://cdn.yyapi.cloud/v1','https://ripp.best/v1')")])
+    const [prices,tasks,channels]=await Promise.all([db.query('SELECT * FROM media_prices ORDER BY model,size'),db.query(`SELECT t.id,t.user_id,u.username,t.kind,t.model,t.status,t.result_url,t.gallery_status,t.gallery_featured,t.gallery_title,t.finished_at,t.charge_micros,t.actual_cost_micros,t.created_at,
+        t.queue_started_at,t.next_attempt_at,t.submit_attempts,t.accepted_at,
+        CASE WHEN t.last_retry_code IS NOT NULL THEN t.last_retry_code WHEN t.status='failed' THEN 'failed' ELSE NULL END AS error_category
+        FROM media_tasks t JOIN users u ON u.id=t.user_id ORDER BY t.created_at DESC LIMIT 100`),db.query("SELECT id,name FROM channels WHERE deleted_at IS NULL AND base_url IN ('https://apihub.agnes-ai.com/v1','https://cdn.yyapi.cloud/v1','https://ripp.best/v1')")])
     return {prices,tasks,channels}
   })
   app.patch('/api/admin/media/tasks/:id/gallery',async(request,reply)=>{
@@ -578,13 +590,36 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   })
 
   app.get('/api/me/overview', async (request, reply) => {
+    reply.header('Cache-Control', 'private, no-store')
     const user = await requireSession(request, reply); if (!user) return
     const balance = await billing.balance(user.id)
-    const discount = await db.one<any>('SELECT token_discount_bps FROM users WHERE id = $1', [user.id])
+    const [discount, totals] = await Promise.all([
+      db.one<any>('SELECT token_discount_bps FROM users WHERE id = $1', [user.id]),
+      db.one<any>(`SELECT
+        (SELECT COALESCE(SUM(wl.amount_micros),0)::text FROM wallet_ledger wl WHERE wl.user_id=$1 AND wl.kind='wallet_topup') AS total_topup_credit_micros,
+        (SELECT COALESCE(SUM(COALESCE(o.paid_amount_micros,o.amount_micros)),0)::text FROM orders o WHERE o.user_id=$1 AND o.kind='wallet_topup' AND o.status='paid') AS total_topup_paid_micros,
+        (SELECT COALESCE(SUM(COALESCE(o.paid_amount_micros,o.amount_micros)),0)::text FROM orders o WHERE o.user_id=$1 AND o.kind IN ('wallet_topup','subscription','subscription_purchase') AND o.status='paid') AS total_paid_micros`, [user.id]),
+    ])
     const discountBps = Math.max(0, Math.min(9900, Number(discount?.token_discount_bps || 0)))
-    return { user, balance: BillingService.formatBalance(balance), tokenDiscountBps: discountBps, tokenDiscountPercent: discountBps / 100, walletTopupMultiplierBps: config.walletTopupMultiplierBps, apiBaseUrl: `${config.publicBaseUrl}/v1`, downloads: { chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl }, mailConfigured: mail.configured }
+    const totalTopupCreditMicros = String(totals?.total_topup_credit_micros || '0')
+    const totalTopupPaidMicros = String(totals?.total_topup_paid_micros || '0')
+    const totalPaidMicros = String(totals?.total_paid_micros || '0')
+    return {
+      user, balance: BillingService.formatBalance(balance),
+      history: {
+        totalTopupCreditMicros: totalTopupCreditMicros,
+        totalTopupCredit: formatMicros(BigInt(totalTopupCreditMicros)),
+        totalTopupPaidMicros: totalTopupPaidMicros,
+        totalTopupPaid: formatMicros(BigInt(totalTopupPaidMicros)),
+        totalPaidMicros: totalPaidMicros,
+        totalPaid: formatMicros(BigInt(totalPaidMicros)),
+      },
+      tokenDiscountBps: discountBps, tokenDiscountPercent: discountBps / 100,
+      walletTopupMultiplierBps: config.walletTopupMultiplierBps, apiBaseUrl: `${config.publicBaseUrl}/v1`, downloads: { chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl }, mailConfigured: mail.configured,
+    }
   })
   app.get('/api/me/balance', async (request, reply) => {
+    reply.header('Cache-Control', 'private, no-store')
     const user = await requireSession(request, reply); if (!user) return
     return { data: BillingService.formatBalance(await billing.balance(user.id)) }
   })
@@ -932,18 +967,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         moneyInput(b.fixedCostMicros ?? 0, '固定成本'), moneyInput(b.fixedSellMicros ?? 0, '固定售价'), b.active !== false,
         String(b.priceSource || 'manual').slice(0, 512), b.priceEffectiveAt ? new Date(String(b.priceEffectiveAt)) : new Date(), b.fxRateMicros ? moneyInput(b.fxRateMicros, '汇率') : null,
       ]
-      const increasePercent = Number(b.tierIncreasePercent ?? 20)
-      if (!Number.isFinite(increasePercent) || increasePercent < 0 || increasePercent > 1000) throw new Error('272K+ 涨价比例必须在 0-1000% 之间')
-      const tierRate = (value: bigint) => (value * BigInt(Math.round((100 + increasePercent) * 100)) + 9999n) / 10000n
       const baseRates = { inputCostMicrosPerMillion: BigInt(String(values[1])), outputCostMicrosPerMillion: BigInt(String(values[2])), cacheCostMicrosPerMillion: BigInt(String(values[3])), inputSellMicrosPerMillion: BigInt(String(values[4])), outputSellMicrosPerMillion: BigInt(String(values[5])), cacheSellMicrosPerMillion: BigInt(String(values[6])) }
-      const highRates = Object.fromEntries(Object.entries(baseRates).map(([key, value]) => [key, tierRate(value)])) as typeof baseRates
-      const pricingTiers = JSON.stringify([
-        { thresholdTokens: '0', label: '标准（≤272K）', ...baseRates },
-        { thresholdTokens: '272001', label: `272K+（涨价${increasePercent}%）`, ...highRates },
-      ], (_key, value) => typeof value === 'bigint' ? value.toString() : value)
-      values.push(pricingTiers)
       const minimumMarginBps = await settingInt(db, 'profit_min_margin_bps', 3000)
-      for (const [label, cost, sell] of [['输入', values[1], values[4]], ['输出', values[2], values[5]], ['缓存', values[3], values[6]], ['输入(272K+)', highRates.inputCostMicrosPerMillion, highRates.inputSellMicrosPerMillion], ['输出(272K+)', highRates.outputCostMicrosPerMillion, highRates.outputSellMicrosPerMillion], ['缓存(272K+)', highRates.cacheCostMicrosPerMillion, highRates.cacheSellMicrosPerMillion]] as const) {
+      for (const [label, cost, sell] of [['输入', values[1], values[4]], ['输出', values[2], values[5]], ['缓存', values[3], values[6]]] as const) {
         requireMinimumMargin(BigInt(String(cost)), BigInt(String(sell)), minimumMarginBps, `${pattern} ${label}价格`)
       }
       return await db.one<any>(`INSERT INTO model_prices(
@@ -952,7 +978,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,
         input_sell_micros_per_million,output_sell_micros_per_million,cache_sell_micros_per_million,
         price_source,price_effective_at,fx_rate_cny_micros,pricing_tiers)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$2,$3,$4,$5,$6,$7,$11,$12,$13,$14)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$2,$3,$4,$5,$6,$7,$11,$12,$13,NULL)
         ON CONFLICT(model_pattern) DO UPDATE SET
           input_cost_micros=excluded.input_cost_micros, output_cost_micros=excluded.output_cost_micros,
           cache_cost_micros=excluded.cache_cost_micros, input_sell_micros=excluded.input_sell_micros,
@@ -966,7 +992,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           cache_sell_micros_per_million=excluded.cache_sell_micros_per_million,
           price_source=excluded.price_source, price_effective_at=excluded.price_effective_at,
           fx_rate_cny_micros=excluded.fx_rate_cny_micros,
-          pricing_tiers=excluded.pricing_tiers,
+          pricing_tiers=NULL,
           active=excluded.active, updated_at=now() RETURNING *`, values)
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
@@ -1059,14 +1085,14 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           await client.query(`INSERT INTO model_prices(
             model_pattern,input_cost_micros,output_cost_micros,cache_cost_micros,input_sell_micros,output_sell_micros,cache_sell_micros,
             input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,input_sell_micros_per_million,output_sell_micros_per_million,cache_sell_micros_per_million,
-            active,price_source,price_effective_at,fx_rate_cny_micros)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$2,$3,$4,$5,$6,$7,true,$8,$9,$10)
+              active,price_source,price_effective_at,fx_rate_cny_micros,pricing_tiers)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$2,$3,$4,$5,$6,$7,true,$8,$9,$10,NULL)
             ON CONFLICT(model_pattern) DO UPDATE SET
               input_cost_micros=excluded.input_cost_micros,output_cost_micros=excluded.output_cost_micros,cache_cost_micros=excluded.cache_cost_micros,
               input_sell_micros=excluded.input_sell_micros,output_sell_micros=excluded.output_sell_micros,cache_sell_micros=excluded.cache_sell_micros,
               input_cost_micros_per_million=excluded.input_cost_micros_per_million,output_cost_micros_per_million=excluded.output_cost_micros_per_million,cache_cost_micros_per_million=excluded.cache_cost_micros_per_million,
               input_sell_micros_per_million=excluded.input_sell_micros_per_million,output_sell_micros_per_million=excluded.output_sell_micros_per_million,cache_sell_micros_per_million=excluded.cache_sell_micros_per_million,
-              active=true,price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,fx_rate_cny_micros=excluded.fx_rate_cny_micros,updated_at=now()`,
+              active=true,price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,fx_rate_cny_micros=excluded.fx_rate_cny_micros,pricing_tiers=NULL,updated_at=now()`,
             [...values.map((value) => typeof value === 'bigint' ? value.toString() : value), `${OPENAI_PRICING_SOURCE} · 上游展示美元按人民币 1:1 结算`, effectiveAt, UPSTREAM_DISPLAY_SETTLEMENT_FX_MICROS.toString()],
           )
           inserted.push(model)
@@ -1430,6 +1456,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     let relay: any
     const query = (request.raw.url || '').includes('?') ? `?${String(request.raw.url).split('?').slice(1).join('?')}` : ''
     try { relay = await channels.relay(path + query, request.method, headers, body, model) } catch (error: any) {
+      const noCompatibleUpstream = error?.code === 'no_compatible_upstream'
       if (!isMetadata) {
         try {
           await billing.settle({
@@ -1437,7 +1464,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
             statusCode: 502, success: false, latencyMs: Date.now() - started, estimatedUsage: true,
             upstreamModel: '', channelId: null, channelName: null,
             keyId: identity.key.id, keyName: identity.key.name, requestPath, requestMethod: request.method,
-            errorCode: 'upstream_unavailable', errorSummary: '所有上游渠道均不可用',
+            errorCode: noCompatibleUpstream ? 'no_compatible_upstream' : 'upstream_unavailable',
+            errorSummary: noCompatibleUpstream ? '当前请求没有兼容的上游渠道' : '所有上游渠道均不可用',
             attemptCount: Array.isArray(error?.attempts) ? error.attempts.length : 0,
           })
           if (Array.isArray(error?.attempts)) await recordAttempts(db, requestId, error.attempts, estimatedFailedAttemptCost(price as PriceSnapshot, parsed))
@@ -1446,7 +1474,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           app.log.error({ err: billingError, requestId }, 'failed to release relay reservation')
         }
       }
-      reply.code(502).send({ error: { message: '上游渠道不可用', type: 'upstream_error', request_id: requestId } }); return
+      reply.code(502).send({ error: {
+        message: error?.message || '上游渠道不可用',
+        type: noCompatibleUpstream ? 'no_compatible_upstream' : 'upstream_error',
+        code: noCompatibleUpstream ? 'no_compatible_upstream' : 'upstream_unavailable',
+        request_id: requestId,
+      } }); return
     }
     const response = relay.response
     const responseHeaders = response.headers as Record<string, string | string[] | undefined>
@@ -1544,13 +1577,14 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if (!isMetadata) {
       const usage = usageFromPayload(parsedResponse)
       const success = response.statusCode >= 200 && response.statusCode < 300
+      const upstreamError = success ? null : upstreamErrorDetails(parsedResponse)
       try {
         await billing.settle({
           requestId, userId: identity.user.id, model, usage, price: price as PriceSnapshot,
           statusCode: response.statusCode, success, latencyMs: Date.now() - started, estimatedUsage: !usage,
           upstreamModel: String(parsedResponse?.model || relay.upstreamModel || model), channelId: relay.channel.id, channelName: relay.channel.name,
           keyId: identity.key.id, keyName: identity.key.name, requestPath, requestMethod: request.method,
-          upstreamRequestId, errorCode: success ? null : 'upstream_http_error', errorSummary: success ? null : upstreamErrorSummary(parsedResponse),
+          upstreamRequestId, errorCode: upstreamError?.code || null, errorSummary: upstreamError?.summary || null,
           attemptCount: relay.attempts.length,
         })
       } catch (billingError) {
