@@ -1103,6 +1103,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         WHERE wl.user_id=u.id AND wl.kind='wallet_topup') AS total_topup_credit_micros,
       (SELECT COALESCE(SUM(COALESCE(o.paid_amount_micros,o.amount_micros)),0)::text FROM orders o
         WHERE o.user_id=u.id AND o.kind='wallet_topup' AND o.status='paid') AS total_topup_paid_micros,
+      (SELECT COALESCE(SUM(COALESCE(o.paid_amount_micros,o.amount_micros)),0)::text FROM orders o
+        WHERE o.user_id=u.id AND o.kind IN ('wallet_topup','subscription','subscription_purchase') AND o.status='paid') AS total_paid_micros,
       s.remaining_micros AS plan_remaining_micros,COALESCE(s.reserved_micros,0) AS plan_reserved_micros,s.reset_quota_micros AS plan_quota_micros,
       s.expires_at AS plan_expires_at,s.next_reset_at AS plan_next_reset_at,s.last_reset_at AS plan_last_reset_at,s.status AS plan_status
       FROM users u LEFT JOIN wallets w ON w.user_id=u.id LEFT JOIN affiliate_wallets aw ON aw.user_id=u.id
