@@ -14,6 +14,11 @@ export const VIDEO_CONFIRMATION_WINDOW_MS = 45 * 60 * 1000
 const IMAGE_CONFIRMATION_WINDOW_MS = 60 * 1000
 const RETRY_DELAYS_MS = [10_000, 20_000, 40_000, 60_000, 120_000] as const
 
+function timestampMs(value: unknown): number | null {
+  const parsed = value instanceof Date ? value.getTime() : Date.parse(String(value || ''))
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 /** Exponential backoff with a small jitter so multiple API replicas do not stampede a provider. */
 export function mediaRetryDelayMs(attempt: number, random = Math.random): number {
   const index = Math.max(0, Math.min(RETRY_DELAYS_MS.length - 1, Math.floor(attempt) - 1))
@@ -191,6 +196,19 @@ export class MediaService {
   }
   private async finishInTransaction(client: any, id:string, success:boolean, url:string|null, message:string|null, content?:Buffer, contentType?:string, retryCode?:string) {
     const task=await one<any>(client,'SELECT * FROM media_tasks WHERE id=$1 FOR UPDATE',[id]);if(!task||['completed','failed'].includes(task.status))return
+    // Timeout refunds re-check the state after taking the row lock. A worker
+    // may have claimed the task between the expiry scan and this transaction.
+    if (retryCode === 'queue_timeout') {
+      const started = timestampMs(task.queue_started_at || task.created_at)
+      const lease = timestampMs(task.lease_until)
+      if (task.kind !== 'video' || task.status !== 'queued' || (lease !== null && lease > Date.now()) || started === null || Date.now() - started < VIDEO_QUEUE_WINDOW_MS) return
+    }
+    if (retryCode === 'confirmation_timeout') {
+      const uncertain = timestampMs(task.uncertain_since)
+      const lease = timestampMs(task.lease_until)
+      const window = task.kind === 'video' ? VIDEO_CONFIRMATION_WINDOW_MS : IMAGE_CONFIRMATION_WINDOW_MS
+      if (task.status !== 'unknown' || (lease !== null && lease > Date.now()) || uncertain === null || Date.now() - uncertain < window) return
+    }
     const wallet=await one<any>(client,'SELECT balance_micros,reserved_micros FROM wallets WHERE user_id=$1 FOR UPDATE',[task.user_id]);const charge=BigInt(task.charge_micros)
     if(BigInt(wallet.reserved_micros)<charge)throw new Error('媒体冻结金额不一致')
     const balance=BigInt(wallet.balance_micros)-(success?charge:0n)
@@ -292,9 +310,15 @@ export class MediaService {
       if(task.status==='unknown'&&!task.upstream_id){await this.db.query("UPDATE media_tasks SET lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE id=$1 AND status='unknown' AND finished_at IS NULL",[task.id]);return}
       let channel:any
       if(submitting&&task.kind==='video') channel=await this.resolveVideoChannel(task)
-      else channel=await this.db.one<any>('SELECT * FROM channels WHERE id=$1',[task.channel_id])
+      else channel=await this.db.one<any>(submitting
+        ? 'SELECT * FROM channels WHERE id=$1 AND enabled AND deleted_at IS NULL AND encrypted_api_key IS NOT NULL'
+        : 'SELECT * FROM channels WHERE id=$1',[task.channel_id])
       if(!channel?.encrypted_api_key){
-        if(submitting&&task.kind==='video'){
+        if(submitting){
+          if(task.kind !== 'video'){
+            await this.finish(task.id,false,null,'生成失败，额度已自动退回',undefined,undefined,'no_compatible_channel')
+            return
+          }
           const next=new Date(Date.now()+mediaRetryDelayMs(Number(task.submit_attempts||1)))
           await this.db.query("UPDATE media_tasks SET status='queued',last_retry_code='no_compatible_channel',error_message='正在等待可用生成服务',lease_until=NULL,next_attempt_at=$2,next_poll_at=$2 WHERE id=$1 AND status='submitting' AND finished_at IS NULL",[task.id,next])
           return

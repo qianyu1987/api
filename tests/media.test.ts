@@ -104,6 +104,15 @@ describe('media submission lifecycle',()=>{
   expect(fetchMock).not.toHaveBeenCalled()
   expect(finish).toHaveBeenCalledWith('task',false,null,'媒体渠道与模型不匹配，冻结额度已释放',undefined,undefined,'channel_mismatch')
  })
+ test('queued image with a disabled or deleted channel is refunded without an upstream call',async()=>{
+  const task={id:'task',kind:'image',model:'gpt-image-2.5',status:'queued',channel_id:'channel',request_payload:{model:'gpt-image-2.5'}}
+  const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>null),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const svc=new MediaService(db,{} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
+  const fetchMock=vi.fn();vi.stubGlobal('fetch',fetchMock)
+  try{await svc.tick()}finally{vi.unstubAllGlobals()}
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(finish).toHaveBeenCalledWith('task',false,null,'生成失败，额度已自动退回',undefined,undefined,'no_compatible_channel')
+ })
  test('public task has safe retry input and no cost, internal payload, upstream id or snapshots',()=>{const s=new MediaService({} as any,{} as any);const t=s.publicTask({id:'test',kind:'video',status:'processing',created_at:new Date(),charge_micros:'10',user_input:{kind:'video',engine:'standard',prompt:'retry me',size:'720P',ratio:'9:16',seconds:5,mode:'text'},price_snapshot:{secret:true},actual_cost_micros:'10',request_payload:{privatePayload:true},upstream_id:'private',channel_id:'channel'});expect(t.reserved).toBe(true);expect(t.input).toMatchObject({prompt:'retry me',engine:'standard',ratio:'9:16'});expect(t.canRetry).toBe(false);expect(JSON.stringify(t)).not.toMatch(/secret|privatePayload|upstream|channel|actual_cost|snapshot|request_payload/);expect(s.publicTask({status:'failed'})).toMatchObject({reserved:false,canRetry:true,refundStatus:'returned'})})
  test('professional image worker accepts base64 without exposing an upstream URL',async()=>{
   const key=Buffer.alloc(32,7),task={id:'task',kind:'image',model:'gpt-image-2',status:'queued',channel_id:'channel',request_payload:{model:'gpt-image-2'}}
