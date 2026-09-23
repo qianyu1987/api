@@ -1,6 +1,6 @@
 import {describe,test,expect,vi} from 'vitest'
 import {mediaPrice,validateMedia,mediaResultUrl,agnesVideoQueueFull} from '../src/lib/media.js'
-import {MediaService} from '../src/services/media.js'
+import {MediaService,downloadMediaImage} from '../src/services/media.js'
 import {encryptSecret} from '../src/lib/crypto.js'
 describe('media pricing and input',()=>{
  test('30 percent cash contribution after 3x credit and 10 percent referral',()=>{expect(mediaPrice(100000n,30000,0,1000)).toBe(500000n);expect(mediaPrice(100000n,30000,60,1000)).toBe(505051n)})
@@ -118,9 +118,27 @@ describe('media submission lifecycle',()=>{
   const key=Buffer.alloc(32,7),task={id:'task',kind:'image',model:'gpt-image-2',status:'queued',channel_id:'channel',request_payload:{model:'gpt-image-2'}}
   const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>({id:'channel',base_url:'https://cdn.yyapi.cloud/v1',encrypted_api_key:encryptSecret('provider-key',key)})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
   const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
-  vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({data:[{b64_json:Buffer.from([0x89,0x50,...Array(20).fill(0)]).toString('base64')}]}),{status:200,headers:{'content-type':'application/json'}})))
+  vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify({data:[{b64_json:Buffer.from([0x89,0x50,0x4e,0x47,...Array(20).fill(0)]).toString('base64')}]}),{status:200,headers:{'content-type':'application/json'}})))
   try{await svc.tick()}finally{vi.unstubAllGlobals()}
   expect(finish).toHaveBeenCalledWith('task',true,null,null,expect.any(Buffer),'image/png')
+ })
+ test('URL image results are downloaded and stored before completion',async()=>{
+  const key=Buffer.alloc(32,14),task={id:'task',kind:'image',model:'gpt-image-2',status:'queued',channel_id:'channel',request_payload:{model:'gpt-image-2'}}
+  const db:any={query:vi.fn(async()=>[]),one:vi.fn(async()=>({id:'channel',base_url:'https://cdn.yyapi.cloud/v1',encrypted_api_key:encryptSecret('provider-key',key)})),tx:async(fn:any)=>fn({query:vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))})}
+  const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
+  const png=Buffer.from([0x89,0x50,0x4e,0x47,...Array(20).fill(0)])
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({data:[{url:'https://cdn.example/result.png'}]}),{status:200})).mockResolvedValueOnce(new Response(png,{status:200,headers:{'content-type':'image/png','content-length':String(png.length)}})))
+  try{await svc.tick()}finally{vi.unstubAllGlobals()}
+  expect(finish).toHaveBeenCalledWith('task',true,null,null,png,'image/png')
+ })
+ test('image result download rejects private URLs and mismatched content',async()=>{
+  const fetchMock=vi.fn();vi.stubGlobal('fetch',fetchMock)
+  try{
+   expect(await downloadMediaImage('https://127.0.0.1/result.png')).toBeNull()
+   expect(fetchMock).not.toHaveBeenCalled()
+   fetchMock.mockResolvedValueOnce(new Response('not an image',{status:200,headers:{'content-type':'image/png'}}))
+   expect(await downloadMediaImage('https://cdn.example/result.png')).toBeNull()
+  }finally{vi.unstubAllGlobals()}
  })
  test('explicit non-json policy rejection releases the wallet hold',async()=>{
   const key=Buffer.alloc(32,8),task={id:'task',kind:'image',model:'gpt-image-2.5',status:'queued',channel_id:'channel',request_payload:{model:'gpt-image-2.5'}}

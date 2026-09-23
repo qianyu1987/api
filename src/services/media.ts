@@ -13,6 +13,47 @@ export const VIDEO_QUEUE_WINDOW_MS = 30 * 60 * 1000
 export const VIDEO_CONFIRMATION_WINDOW_MS = 45 * 60 * 1000
 const IMAGE_CONFIRMATION_WINDOW_MS = 60 * 1000
 const RETRY_DELAYS_MS = [10_000, 20_000, 40_000, 60_000, 120_000] as const
+const MAX_STORED_IMAGE_BYTES = 15 * 1024 * 1024
+
+function publicMediaUrl(value: string): URL | null {
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'https:' || url.port || url.username || url.password) return null
+    if (/^(localhost|0\.0\.0\.0|127\.|10\.|192\.168\.|169\.254\.|\[|172\.(1[6-9]|2\d|3[01])\.)/i.test(url.hostname) || url.hostname.endsWith('.localhost')) return null
+    return url
+  } catch { return null }
+}
+
+function imageContentType(content: Buffer): string | null {
+  if (content[0] === 0x89 && content[1] === 0x50 && content[2] === 0x4e && content[3] === 0x47) return 'image/png'
+  if (content[0] === 0xff && content[1] === 0xd8) return 'image/jpeg'
+  if (content[0] === 0x52 && content[1] === 0x49 && content[2] === 0x46 && content[3] === 0x46 && content.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp'
+  return null
+}
+
+export async function downloadMediaImage(value: string): Promise<{ content: Buffer; contentType: string } | null> {
+  const url = publicMediaUrl(value)
+  if (!url) return null
+  try {
+    const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(120_000) })
+    if (!response.ok || !response.body) return null
+    const declared = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
+    const declaredLength = Number(response.headers.get('content-length') || 0)
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(declared) || (declaredLength > 0 && declaredLength > MAX_STORED_IMAGE_BYTES)) return null
+    const reader = response.body.getReader(), chunks: Buffer[] = []
+    let total = 0
+    while (true) {
+      const { done, value: chunk } = await reader.read()
+      if (done) break
+      total += chunk.byteLength
+      if (total > MAX_STORED_IMAGE_BYTES) { await reader.cancel(); return null }
+      chunks.push(Buffer.from(chunk))
+    }
+    const content = Buffer.concat(chunks, total)
+    const detected = content.length >= 16 ? imageContentType(content) : null
+    return detected === declared ? { content, contentType: detected } : null
+  } catch { return null }
+}
 
 function timestampMs(value: unknown): number | null {
   const parsed = value instanceof Date ? value.getTime() : Date.parse(String(value || ''))
@@ -307,7 +348,13 @@ export class MediaService {
     });if(!task)return
     const submitting=Boolean(task._wasQueued)
     try {
-      if(task.status==='unknown'&&!task.upstream_id){await this.db.query("UPDATE media_tasks SET lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE id=$1 AND status='unknown' AND finished_at IS NULL",[task.id]);return}
+      if(task.status==='unknown'&&!task.upstream_id){
+        if(task.kind==='image'&&typeof task.result_url==='string'&&task.result_url.startsWith('https://')){
+          const asset=await downloadMediaImage(task.result_url)
+          if(asset){await this.finish(task.id,true,null,null,asset.content,asset.contentType);return}
+        }
+        await this.db.query("UPDATE media_tasks SET lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE id=$1 AND status='unknown' AND finished_at IS NULL",[task.id]);return
+      }
       let channel:any
       if(submitting&&task.kind==='video') channel=await this.resolveVideoChannel(task)
       else channel=await this.db.one<any>(submitting
@@ -343,11 +390,15 @@ export class MediaService {
       if(data===null)throw new Error('invalid upstream response')
       if(task.kind==='image'){
         const result=mediaResultUrl(data)
-        if(result){await this.markMediaSuccess(String(channel.id));await this.finish(task.id,true,result,null);return}
+        if(result){
+          const asset=await downloadMediaImage(result)
+          if(asset){await this.markMediaSuccess(String(channel.id));await this.finish(task.id,true,null,null,asset.content,asset.contentType);return}
+          await this.db.query("UPDATE media_tasks SET status='unknown',result_url=$2,uncertain_since=COALESCE(uncertain_since,now()),error_message='图片已生成，正在保存结果',lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE id=$1 AND status='submitting' AND finished_at IS NULL",[task.id,result]);return
+        }
         const encoded=data?.data?.[0]?.b64_json
         if(['gpt-image-2','gpt-image-2.5'].includes(task.model)&&typeof encoded==='string'&&/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)&&encoded.length<=20*1024*1024){
           const content=Buffer.from(encoded,'base64'); if(content.length<16||content.length>15*1024*1024)throw new Error('invalid image data')
-          const type=content[0]===0x89&&content[1]===0x50?'image/png':content[0]===0xff&&content[1]===0xd8?'image/jpeg':content[0]===0x52&&content[1]===0x49?'image/webp':null
+          const type=imageContentType(content)
           if(!type)throw new Error('invalid image type')
           await this.markMediaSuccess(String(channel.id));await this.finish(task.id,true,null,null,content,type);return
         }
