@@ -2,6 +2,15 @@
 
 时间使用明确日期；本条生产证据来自 2026-09-20 本会话实际工具输出。以后追加新记录并更新当前状态，不覆盖历史。
 
+## RIPP 优惠渠道修复与 v1.0.88 发布（2026-09-23）
+
+- 新建“优惠”渠道保存为 `https://ripp.best`，缺少 `/v1`，导致 Luna/Terra 请求收到网站 HTML；应用记录为 HTTP 200 的 `upstream_invalid_content_type`，连续失败后渠道熔断。最近七天记录中 Luna 为无可用渠道 502，Terra 退到 Agnes 后出现 Responses 400。
+- 不计费能力探测确认 RIPP `/v1/models` 返回 JSON并包含 `gpt-5.6-terra`，但不包含 `gpt-5.6-luna`。生产事务内将地址修正为 `https://ripp.best/v1`、清除错误熔断、暂时移除 Luna 映射，并写入不含密钥的配置审计。应用自身选路再次请求模型目录，确认走“优惠”渠道、HTTP 200、Terra 存在、Luna 不存在。
+- 修改前备份 `/opt/relay-station-backups/pre-ripp-route-fix-20260923T115015Z`，PostgreSQL dump 已通过 `pg_restore --list` 验证，配置归档仅留服务器受限目录。没有输出密钥，没有发起付费生成请求，没有修改售价或用户账务。
+- 发布提交 `9161385`、标签 `v1.0.88`；本地 20 个测试文件 / 223 项通过，typecheck、build、`git diff --check` 通过。生产 migration 完成，两个 API 副本均为 `relay-station:v1.0.88` 且 healthy，Gateway/PostgreSQL/Redis healthy、worker timer active。
+- `https://api.hhtc.top/healthz`、`/api/v1/health` 均 200；`api.hhtc.top` 与 `www.hhtc.top` 都加载 `app.js?v=1.0.88`，账户页包含历史总充值 DOM。保留 `v1.0.86` 镜像作为回滚。副本重建当分钟出现三条 Gateway 连接中断，属于发布切换窗口，需以切换后的持续日志复查为准。
+- Luna 仍不可用不是本地路由故障：当前 RIPP Key 的模型目录没有该模型。上游开通前不要重新添加映射。
+
 ## 待发布变更：v1.0.87（2026-09-21）
 
 - 根因核对：生产 `v1.0.86` 的首页脚本没有账户总览历史统计 DOM/渲染；本地未发布代码才包含该字段。因此用户看不到历史总充值，不是账务汇总 SQL 缺失。
