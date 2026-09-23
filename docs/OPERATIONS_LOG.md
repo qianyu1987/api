@@ -2,6 +2,13 @@
 
 时间使用明确日期；本条生产证据来自 2026-09-20 本会话实际工具输出。以后追加新记录并更新当前状态，不覆盖历史。
 
+## Laya-MLX 本地旁路可行性验证：2026-09-23
+
+- 用户要求先试运行，再考虑参与 `api.hhtc.top` 的真实模型路由。本机 Apple M4、macOS 26.6.1、Python 3.12.13 已安装 `laya-mlx` 0.2.0、MLX 0.32.2 和 `aac6fef/laya-multilingual-mlx`；运行时与权重位于外置盘，不进入仓库或生产镜像。
+- 固定 12 条中文业务样例中，原始标签的任务类型准确率 50%、工具需求准确率 41.7%；改成具体中文业务标签后为 66.7% 和 50%。预热后中位推理约 19.5 ms，说明性能合格但准确率不合格。
+- 新增 `tools/laya-shadow/` 本地原型：默认只监听 `127.0.0.1:19091`，分类接口支持 bearer 鉴权，不记录提示内容；实际验证健康检查 200、无凭据分类 401、有凭据分类 200。服务测试后已停止。
+- 未修改生产路由、渠道映射、价格、账务或服务器配置，未部署、未推送。除非后续使用真实脱敏样本达到另行确定的准确率门槛，否则不得让该结果影响真实选路。
+
 ## RIPP 优惠渠道修复与 v1.0.88 发布（2026-09-23）
 
 - 新建“优惠”渠道保存为 `https://ripp.best`，缺少 `/v1`，导致 Luna/Terra 请求收到网站 HTML；应用记录为 HTTP 200 的 `upstream_invalid_content_type`，连续失败后渠道熔断。最近七天记录中 Luna 为无可用渠道 502，Terra 退到 Agnes 后出现 Responses 400。
@@ -10,6 +17,13 @@
 - 发布提交 `9161385`、标签 `v1.0.88`；本地 20 个测试文件 / 223 项通过，typecheck、build、`git diff --check` 通过。生产 migration 完成，两个 API 副本均为 `relay-station:v1.0.88` 且 healthy，Gateway/PostgreSQL/Redis healthy、worker timer active。
 - `https://api.hhtc.top/healthz`、`/api/v1/health` 均 200；`api.hhtc.top` 与 `www.hhtc.top` 都加载 `app.js?v=1.0.88`，账户页包含历史总充值 DOM。保留 `v1.0.86` 镜像作为回滚。副本重建当分钟出现三条 Gateway 连接中断，属于发布切换窗口，需以切换后的持续日志复查为准。
 - Luna 仍不可用不是本地路由故障：当前 RIPP Key 的模型目录没有该模型。上游开通前不要重新添加映射。
+
+## 图片结果持久化修复 / v1.0.89（2026-09-23）
+
+- 用户报告任务 `3c8ee4ac-83af-46f7-9049-49e09a6a057c` 的结果接口返回 502。任务已完成且 YYAPI 临时 PNG 外链仍可从服务器读取，但结果代理只允许 Agnes 域名，数据库也没有 `media_task_assets`，所以安全域名检查主动拒绝该 CDN。
+- 已下载并校验该任务的 PNG 文件头、Content-Type 和大小，在事务中写入 `media_task_assets`，将结果切换为 `stored://media/...`。恢复后记录为 `image/png`、1,981,481 字节，PNG 签名有效；未重新生成、未重复计费。
+- `v1.0.89` 修改图片 Worker：URL 结果立即下载并持久化，限制 15 MiB，只接受公开 HTTPS 且 Content-Type 与 PNG/JPEG/WebP 文件签名一致。首次下载失败时保留原结果地址并进入一分钟自动确认，只重试下载，不重复调用生成上游；超过窗口仍失败则沿用既有退款事务。
+- 本地 20 个测试文件 / 225 项通过，typecheck、build、`git diff --check` 通过；提交 `6d841e9`、标签 `v1.0.89`。生产 migration 完成，两个 API 副本均为 `relay-station:v1.0.89` 且 healthy。
 
 ## 待发布变更：v1.0.87（2026-09-21）
 
