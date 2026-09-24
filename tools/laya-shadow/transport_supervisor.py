@@ -136,10 +136,12 @@ if not (health == 200 and unauthorized == 401 and authorized == 200 and result.g
 '''
 
 
-def run_remote(command: str, timeout: int = 20, stdin_payload: dict | None = None) -> tuple[int, str]:
+def run_remote(command: str, timeout: int = 20, stdin_payload: dict | None = None,
+               merge_stderr: bool = False) -> tuple[int, str, str]:
     proc = subprocess.run(build_ssh_base() + [HOST, command], input=json.dumps(stdin_payload or {}),
                           text=True, capture_output=True, timeout=timeout)
-    return proc.returncode, (proc.stdout + proc.stderr).strip()
+    combined = proc.stdout if not merge_stderr else (proc.stdout + proc.stderr).strip()
+    return proc.returncode, combined.strip(), proc.stderr.strip()
 
 
 def local_classifier_healthy() -> bool:
@@ -181,9 +183,9 @@ def ensure_token() -> None:
 
 
 def ensure_host_bridge() -> None:
-    code, output = run_remote(remote_bridge_command(), timeout=30)
-    if code != 0 or not output.rstrip().endswith('bridge_up'):
-        raise RuntimeError(f'host bridge not up: {output[:200]}')
+    code, output, stderr = run_remote(remote_bridge_command(), timeout=30)
+    if code != 0 or not output.endswith('bridge_up'):
+        raise RuntimeError(f'host bridge not up: {output[:100]} {stderr[:150]}')
 
 
 def open_tunnel(control: str) -> subprocess.Popen:
@@ -195,12 +197,12 @@ def wait_socket_repairable(token: str) -> dict:
     deadline = time.monotonic() + 15
     last_error = 'no attempt'
     while time.monotonic() < deadline:
-        code, output = run_remote(f'{remote_socket_repair_command()} && '
-                                  f'python3 -c {json.dumps(remote_verify_script())}',
-                                  stdin_payload={'token': token}, timeout=25)
+        code, output, stderr = run_remote(f'{remote_socket_repair_command()} && '
+                                          f'python3 -c {json.dumps(remote_verify_script())}',
+                                          stdin_payload={'token': token}, timeout=25)
         if code == 0:
             return json.loads(output.splitlines()[-1])
-        last_error = output[:200]
+        last_error = (stderr or output)[:200]
         time.sleep(1)
     raise RuntimeError(f'transport verification failed: {last_error}')
 
@@ -224,9 +226,9 @@ def main() -> int:
     while not _STOP:
         tunnel = None
         try:
-            code, output = run_remote(remote_dir_bootstrap_command())
+            code, _, stderr = run_remote(remote_dir_bootstrap_command())
             if code != 0:
-                raise RuntimeError(f'host directory bootstrap failed: {output[:200]}')
+                raise RuntimeError(f'host directory bootstrap failed: {stderr[:200]}')
             ensure_host_bridge()
             tunnel = open_tunnel(control)
             report = wait_socket_repairable(TOKEN_FILE.read_text())

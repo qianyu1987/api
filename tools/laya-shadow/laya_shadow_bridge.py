@@ -8,8 +8,6 @@ forward connects back to the Mac classifier. No TCP listener is exposed on the
 Docker bridge; the socket itself is group-restricted so only the API
 containers' node user (gid 1000) can connect.
 """
-from __future__ import annotations
-
 import os
 import socket
 import sys
@@ -20,7 +18,7 @@ TCP_TARGET = ('127.0.0.1', 19093)
 GROUP_GID = 1000
 
 
-def pipe(source: socket.socket, destination: socket.socket) -> None:
+def pipe(source, destination):
     try:
         while True:
             data = source.recv(65536)
@@ -36,7 +34,7 @@ def pipe(source: socket.socket, destination: socket.socket) -> None:
             pass
 
 
-def main() -> int:
+def main():
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     if os.path.exists(UNIX_SOCKET):
         os.unlink(UNIX_SOCKET)
