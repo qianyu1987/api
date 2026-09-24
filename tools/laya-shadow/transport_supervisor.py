@@ -76,13 +76,17 @@ def build_tunnel_args(control: str) -> list[str]:
                                '-R', f'127.0.0.1:{REMOTE_TCP_PORT}:127.0.0.1:{LOCAL_PORT}', HOST]
 
 
-def remote_bridge_command() -> str:
-    # Restart the stateless host bridge each cycle; the bracket trick keeps
-    # pkill from matching the invoking shell itself.
-    return ("pkill -f 'laya_shadow_bridg[e].py' 2>/dev/null || true; sleep 0.5; "
-            'rm -f ' + REMOTE_SOCKET + '; nohup python3 /opt/relay-station/tools/laya-shadow/laya_shadow_bridge.py '
-            '>> /opt/laya-shadow/bridge.log 2>&1 & sleep 1; '
-            'test -S ' + REMOTE_SOCKET + ' && echo bridge_up || echo bridge_down')
+def remote_bridge_kill_command() -> str:
+    # Standalone invocation: the invoking shell's command line must not contain
+    # the plain script name, hence the bracket trick.
+    return "pkill -f 'laya_shadow_bridg[e].py' 2>/dev/null; true"
+
+
+def remote_bridge_start_command() -> str:
+    return ('rm -f ' + REMOTE_SOCKET
+            + '; nohup python3 /opt/relay-station/tools/laya-shadow/laya_shadow_bridge.py '
+            + '>> /opt/laya-shadow/bridge.log 2>&1 & sleep 2; '
+            + 'test -S ' + REMOTE_SOCKET + ' && echo bridge_up || echo bridge_down')
 
 
 def remote_dir_bootstrap_command() -> str:
@@ -183,7 +187,8 @@ def ensure_token() -> None:
 
 
 def ensure_host_bridge() -> None:
-    code, output, stderr = run_remote(remote_bridge_command(), timeout=30)
+    run_remote(remote_bridge_kill_command(), timeout=15)
+    code, output, stderr = run_remote(remote_bridge_start_command(), timeout=30)
     if code != 0 or not output.endswith('bridge_up'):
         raise RuntimeError(f'host bridge not up: {output[:100]} {stderr[:150]}')
 

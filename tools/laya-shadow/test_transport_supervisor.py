@@ -109,11 +109,16 @@ class TransportSupervisorTests(unittest.TestCase):
         self.assertIn('ExitOnForwardFailure=yes', args)
         self.assertNotIn(supervisor.REMOTE_SOCKET, args)
 
-    def test_bridge_command_restarts_stateless_host_bridge(self):
-        command = supervisor.remote_bridge_command()
+    def test_bridge_kill_command_is_self_unmatchable(self):
+        command = supervisor.remote_bridge_kill_command()
         self.assertIn('laya_shadow_bridg[e].py', command)
+        self.assertNotIn('laya_shadow_bridge.py', command)
+
+    def test_bridge_start_command_reports_marker(self):
+        command = supervisor.remote_bridge_start_command()
         self.assertIn('/opt/relay-station/tools/laya-shadow/laya_shadow_bridge.py', command)
         self.assertIn('bridge_up', command)
+        self.assertNotIn('pkill', command)
 
     def test_host_commands_use_restricted_directory_and_container_gid(self):
         self.assertIn('0750', supervisor.remote_dir_bootstrap_command())
