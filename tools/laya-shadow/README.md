@@ -74,6 +74,33 @@ loopback). The actual sampling scope — which administrator API key to observe 
 remains an explicit user decision. There is no automatic routing mode in this
 implementation, and no evaluation score enables one.
 
+## Local web observation console
+
+`dashboard/dashboard.py` + `dashboard/dashboard.html` run a loopback-only web
+console on `127.0.0.1:19095` (override with `--port`). It observes and
+demonstrates the shadow pipeline without changing any server configuration:
+
+- component liveness (classifier `:19091`, `transport_supervisor.py`, recent
+  `transport.log` / `supervisor.log` events, in-process model state),
+- in-process single-classification with full per-option probabilities, noul
+  value, confidence and latency (concurrency 1, shared MLX model; prompt text
+  is never logged and nothing is forwarded anywhere),
+- the built-in evaluation set (quick 15-case or full 41-case runs) with
+  confusion counts and per-case latencies,
+- live JSON log tails and the historical report files in the runtime directory.
+
+Start it detached with the runtime Python:
+
+```bash
+RUNTIME=/Volumes/brainos/CodexMedia/generated/laya-mlx-shadow
+nohup "$RUNTIME/.venv/bin/python" tools/laya-shadow/dashboard/dashboard.py >>"$RUNTIME/dashboard.log" 2>&1 &
+```
+
+Then open `http://127.0.0.1:19095`. The console adds its own model instance;
+if the supervisor's classifier (`:19091`) is running, both hold the model in
+memory. Observation only: it reads logs and manifest files, performs no SSH,
+and no prompt content is written to any log.
+
 ## Ephemeral private transport probe
 
 `probe_transport.py --model /absolute/model/path` loads a fresh local classifier

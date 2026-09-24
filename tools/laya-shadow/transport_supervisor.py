@@ -126,6 +126,8 @@ def request(path, token=None, body=None):
             break
         data += chunk
     head, _, body_bytes = data.partition(b'\r\n\r\n')
+    if not head:
+        raise RuntimeError('empty bridge response')
     status = int(head.split(b' ')[1])
     return status, body_bytes
 health, _ = request('/healthz')
@@ -213,6 +215,22 @@ def wait_socket_repairable(token: str) -> dict:
     raise RuntimeError(f'transport verification failed: {last_error}')
 
 
+def restart_classifier() -> None:
+    global classifier, owned_classifier
+    if owned_classifier and classifier is not None and classifier.poll() is None:
+        classifier.terminate()
+        classifier.wait(timeout=10)
+        classifier = None
+    if local_classifier_healthy():
+        classifier = None
+        owned_classifier = False
+        log('reusing_existing_classifier')
+    else:
+        classifier = start_classifier()
+        owned_classifier = True
+        log('classifier_started')
+
+
 def main() -> int:
     global _STOP
     signal.signal(signal.SIGTERM, lambda *_: globals().update(_STOP=True))
@@ -221,13 +239,7 @@ def main() -> int:
     classifier = None
     owned_classifier = False
     control = str(RUNTIME / 'ssh-control')
-    if local_classifier_healthy():
-        classifier = None
-        log('reusing_existing_classifier')
-    else:
-        classifier = start_classifier()
-        owned_classifier = True
-        log('classifier_started')
+    restart_classifier()
     attempts = 0
     while not _STOP:
         tunnel = None
@@ -240,9 +252,13 @@ def main() -> int:
             report = wait_socket_repairable(TOKEN_FILE.read_text())
             log('transport_ready', **report, attempt=attempts + 1)
             attempts = 0
+            next_classifier_check = time.monotonic()
             while not _STOP and tunnel.poll() is None:
-                if owned_classifier and classifier is not None and classifier.poll() is not None:
-                    raise RuntimeError(f'classifier exited code {classifier.poll()}')
+                if time.monotonic() >= next_classifier_check:
+                    next_classifier_check = time.monotonic() + 5
+                    if not local_classifier_healthy():
+                        restart_classifier()
+                        raise RuntimeError('classifier unavailable; restarting transport cycle')
                 time.sleep(1)
             if _STOP:
                 break
