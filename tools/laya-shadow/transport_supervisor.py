@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shlex
 import signal
 import socket
 import subprocess
@@ -203,7 +204,7 @@ def wait_socket_repairable(token: str) -> dict:
     last_error = 'no attempt'
     while time.monotonic() < deadline:
         code, output, stderr = run_remote(f'{remote_socket_repair_command()} && '
-                                          f'python3 -c {json.dumps(remote_verify_script())}',
+                                          f'python3 -c {shlex.quote(remote_verify_script())}',
                                           stdin_payload={'token': token}, timeout=25)
         if code == 0:
             return json.loads(output.splitlines()[-1])
