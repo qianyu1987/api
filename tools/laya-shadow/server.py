@@ -153,7 +153,7 @@ def main() -> None:
     args = parser.parse_args()
     token = os.environ.get("LAYA_SHADOW_TOKEN", "")
     server = LayaServer((args.host, args.port), args.model, token, args.concurrency)
-    print(json.dumps({"ready": True, "host": args.host, "port": args.port, "load_ms": server.load_ms}))
+    print(json.dumps({"ready": True, "host": args.host, "port": args.port, "load_ms": server.load_ms}), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

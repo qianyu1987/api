@@ -142,7 +142,7 @@ def start_classifier() -> subprocess.Popen:
     environment = dict(os.environ)
     environment['LAYA_SHADOW_TOKEN'] = TOKEN_FILE.read_text()
     proc = subprocess.Popen(
-        [str(VENV_PYTHON), str(REPO_TOOLS / 'server.py'), '--model', str(MODEL_PATH),
+        [str(VENV_PYTHON), '-u', str(REPO_TOOLS / 'server.py'), '--model', str(MODEL_PATH),
          '--port', str(LOCAL_PORT)],
         env=environment, cwd=str(REPO_TOOLS), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     assert proc.stdout is not None
