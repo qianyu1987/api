@@ -30,6 +30,7 @@ export type SmtpConfig = {
 }
 
 export type AppConfig = {
+  layaShadow?: { url: string; token: string; adminUserId: string; socketPath?: string }
   env: 'development' | 'test' | 'production'
   host: string
   port: number
@@ -109,8 +110,25 @@ export function loadConfig(): AppConfig {
   }
 
   const publicBaseUrl = text('PUBLIC_BASE_URL', 'https://api.hhtc.top').replace(/\/$/, '')
+  let layaShadow: AppConfig['layaShadow']
+  if (text('LAYA_SHADOW_ENABLED') === 'true') {
+    const socketPath = text('LAYA_SHADOW_SOCKET_PATH')
+    if (socketPath && socketPath !== '/run/laya-shadow/classifier.sock') {
+      throw new Error('LAYA_SHADOW_SOCKET_PATH must be /run/laya-shadow/classifier.sock')
+    }
+    if (socketPath && text('LAYA_SHADOW_URL')) throw new Error('Choose socket or URL transport, not both')
+    const url = new URL(socketPath ? 'http://127.0.0.1/v1/classify' : text('LAYA_SHADOW_URL'))
+    // Requires a separately verified private tunnel inside the API network namespace.
+    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.pathname !== '/v1/classify'
+      || url.username || url.password || url.search || url.hash) throw new Error('LAYA_SHADOW_URL must be loopback /v1/classify')
+    const token = text('LAYA_SHADOW_TOKEN')
+    const adminUserId = text('LAYA_SHADOW_ADMIN_USER_ID')
+    if (token.length < 32 || !adminUserId) throw new Error('Laya shadow requires a token and an explicit admin user ID')
+    layaShadow = { url: url.href, token, adminUserId, ...(socketPath ? { socketPath } : {}) }
+  }
 
   return {
+    layaShadow,
     env,
     host: text('HOST', '0.0.0.0'),
     port: positiveInt('PORT', 3000),

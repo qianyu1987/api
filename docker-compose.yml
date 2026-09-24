@@ -9,7 +9,7 @@ x-app-environment: &app-environment
   REDIS_URL: redis://redis:6379
 
 x-app-service: &app-service
-  image: relay-station:${RELAY_IMAGE_TAG:-v1.0.89}
+  image: relay-station:${RELAY_IMAGE_TAG:-v1.0.90}
   build:
     context: .
     target: runtime
@@ -88,6 +88,15 @@ services:
     command: ["node", "dist/server.js"]
     expose:
       - "3000"
+    volumes:
+      - type: bind
+        source: ./secrets
+        target: /run/secrets/relay
+        read_only: true
+      - type: bind
+        source: /opt/laya-shadow
+        target: /run/laya-shadow
+        read_only: true
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then((response)=>{if(!response.ok)throw new Error(String(response.status))}).catch(()=>process.exit(1))"]
       interval: 10s

@@ -33,6 +33,7 @@ import { registerMediaApi } from './lib/media-api.js'
 import { mediaPrice } from './lib/media.js'
 import { ChatService } from './services/chat.js'
 import { ChannelCostService } from './services/channel-costs.js'
+import { LayaShadow } from './services/laya-shadow.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 
@@ -268,6 +269,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   const orders = new OrderService(db, affiliate, config)
   const mail = new MailService(db, config)
   const profit = new ProfitService(db)
+  const layaShadow = new LayaShadow(config.layaShadow)
 
   await app.register(sensible)
   await app.register(cookie, { secret: config.cookieSecret })
@@ -1450,6 +1452,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         reply.code(errorStatus(error)).send({ error: { message: (error as Error).message, type: 'billing_error', request_id: requestId } }); return
       }
     }
+    layaShadow.observe(identity.user.role, identity.user.id, request.method, path, parsed)
     const started = Date.now()
     const headers: Record<string, string> = {}
     for (const [key, value] of Object.entries(request.headers as Record<string, string | string[] | undefined>)) if (typeof value === 'string') headers[key] = value
@@ -1617,7 +1620,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   for (const route of rootApiRoutes) app.all(route, (request, reply) => relayRequest(request, reply, ''))
 
   app.setErrorHandler((error: any, _request, reply) => { if (!reply.sent) reply.code(errorStatus(error)).send({ error: { message: error?.message || '服务器错误' } }) })
-  app.addHook('onClose', async () => { await redis.close() })
+  app.get('/api/admin/laya-shadow', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    reply.header('Cache-Control', 'no-store')
+    return layaShadow.snapshot()
+  })
+  app.addHook('onClose', async () => { await layaShadow.close(); await redis.close() })
   return { app, db, redis, config, auth, billing, affiliate, channels, orders, mail, profit }
 }
 
