@@ -102,11 +102,16 @@ successful container connection. No prompt or token is sent by container checks.
 replicas. It runs only on the Mac and owns:
 
 1. the local classifier (`server.py` on `127.0.0.1:19091`),
-2. one SSH master that forward-binds the host Unix socket
-   `/opt/laya-shadow/classifier.sock` to that loopback port,
-3. socket permission repair (`chgrp 1000`, group-writable) so the
+2. a stateless host bridge (`laya_shadow_bridge.py`, stdlib-only, restarted
+   per cycle) that listens on `/opt/laya-shadow/classifier.sock` and pipes
+   each connection to the host loopback `127.0.0.1:19093`,
+3. one SSH master that forward-binds that loopback TCP port to the Mac
+   classifier. The host OpenSSH (7.4) cannot bind a Unix socket via -R, so
+   the bridge owns the socket; no TCP listener is exposed on the Docker
+   bridge,
+4. socket permission repair (`chgrp 1000`, group-writable) so the
    unprivileged container user can connect, and
-4. host-side synthetic verification after every reconnect: `/healthz` 200,
+5. host-side synthetic verification after every reconnect: `/healthz` 200,
    unauthenticated classify 401, authenticated classify 200/shadow.
 
 Host prerequisite (idempotent, also performed by the supervisor):
@@ -121,10 +126,12 @@ replicas at `/run/laya-shadow`. The relay side already accepts only
 and dispatches it with a single-connection Undici Unix-socket agent
 (`src/services/laya-shadow.ts`). No TCP listener is exposed on the Docker
 bridge and no SSH config change is required. When the SSH master or the local
-classifier dies, the supervisor sleeps five seconds, resets the stale socket
-file, reopens the tunnel, repairs permissions and re-verifies. A missing or
-broken socket only increments shadow failure counters; user requests, routing
-and billing are unaffected.
+classifier dies, the supervisor sleeps five seconds, restarts the bridge and
+the tunnel, repairs permissions and re-verifies. A missing or broken socket
+only increments shadow failure counters; user requests, routing and billing
+are unaffected. The bridge file itself ships in the repository but is not
+part of the container image; the host runs it from the synced
+`/opt/relay-station/tools/laya-shadow/` directory.
 
 Run it detached:
 

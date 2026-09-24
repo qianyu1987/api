@@ -6,9 +6,17 @@ SSH-forwarded Unix socket inside a dedicated restricted host directory, which
 the API containers mount read-only. The supervisor owns:
 
 * the local classifier subprocess (server.py bound to 127.0.0.1:19091),
-* a single SSH master with the -R socket forward,
+* a host-side stdlib bridge (laya_shadow_bridge.py) that listens on the
+  restricted host Unix socket and pipes to a loopback-only TCP port,
+* a single SSH master that forward-binds that loopback TCP port to the Mac
+  classifier,
 * socket permission repair and host-side synthetic verification on every
   reconnect.
+
+OpenSSH 7.4 on the host cannot -R bind a Unix socket directly; the bridge
+keeps the socket inside the restricted host directory while the container-side
+mount and Undici dispatcher stay unchanged. No TCP listener is exposed on the
+Docker bridge.
 
 While the relay switch stays off no website prompts are transmitted; host-side
 verification only ever sends fixed synthetic text through the private socket.
@@ -36,6 +44,7 @@ VENV_PYTHON = RUNTIME / '.venv' / 'bin' / 'python'
 HOST = 'root@101.35.223.148'
 IDENTITY = '/Volumes/brainos/MacStorage/Downloads/111.pem'
 LOCAL_PORT = 19091
+REMOTE_TCP_PORT = 19093  # host loopback only; piped by the bridge
 REMOTE_DIR = '/opt/laya-shadow'
 REMOTE_SOCKET = f'{REMOTE_DIR}/classifier.sock'
 SOCKET_GROUP_GID = 1000
@@ -64,7 +73,16 @@ def build_ssh_base() -> list[str]:
 
 def build_tunnel_args(control: str) -> list[str]:
     return build_ssh_base() + ['-S', control, '-M', '-NT', '-o', 'ExitOnForwardFailure=yes',
-                               '-R', f'{REMOTE_SOCKET}:127.0.0.1:{LOCAL_PORT}', HOST]
+                               '-R', f'127.0.0.1:{REMOTE_TCP_PORT}:127.0.0.1:{LOCAL_PORT}', HOST]
+
+
+def remote_bridge_command() -> str:
+    # Restart the stateless host bridge each cycle; the bracket trick keeps
+    # pkill from matching the invoking shell itself.
+    return ("pkill -f 'laya_shadow_bridg[e].py' 2>/dev/null || true; sleep 0.5; "
+            'rm -f ' + REMOTE_SOCKET + '; nohup python3 /opt/relay-station/tools/laya-shadow/laya_shadow_bridge.py '
+            '>> /opt/laya-shadow/bridge.log 2>&1 & sleep 1; '
+            'test -S ' + REMOTE_SOCKET + ' && echo bridge_up || echo bridge_down')
 
 
 def remote_dir_bootstrap_command() -> str:
@@ -72,8 +90,6 @@ def remote_dir_bootstrap_command() -> str:
     return f'install -d -m 0750 -o root -g {SOCKET_GROUP_GID} {REMOTE_DIR}'
 
 
-def remote_socket_reset_command() -> str:
-    return f'rm -f {REMOTE_SOCKET}'
 
 
 def remote_socket_repair_command() -> str:
@@ -164,10 +180,13 @@ def ensure_token() -> None:
         TOKEN_FILE.chmod(0o600)
 
 
+def ensure_host_bridge() -> None:
+    code, output = run_remote(remote_bridge_command(), timeout=30)
+    if code != 0 or not output.rstrip().endswith('bridge_up'):
+        raise RuntimeError(f'host bridge not up: {output[:200]}')
+
+
 def open_tunnel(control: str) -> subprocess.Popen:
-    code, output = run_remote(remote_socket_reset_command())
-    if code != 0:
-        raise RuntimeError(f'socket reset failed: {output[:200]}')
     return subprocess.Popen(build_tunnel_args(control), stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
 
@@ -208,6 +227,7 @@ def main() -> int:
             code, output = run_remote(remote_dir_bootstrap_command())
             if code != 0:
                 raise RuntimeError(f'host directory bootstrap failed: {output[:200]}')
+            ensure_host_bridge()
             tunnel = open_tunnel(control)
             report = wait_socket_repairable(TOKEN_FILE.read_text())
             log('transport_ready', **report, attempt=attempts + 1)

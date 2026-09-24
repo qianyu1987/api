@@ -103,11 +103,17 @@ class TransportSupervisorTests(unittest.TestCase):
         self.assertIn('BatchMode=yes', args)
         self.assertIn('StrictHostKeyChecking=yes', args)
 
-    def test_tunnel_args_pin_remote_socket_and_local_port(self):
+    def test_tunnel_args_forward_loopback_tcp_only(self):
         args = supervisor.build_tunnel_args('/tmp/ctl')
-        self.assertIn(f'{supervisor.REMOTE_SOCKET}:127.0.0.1:{supervisor.LOCAL_PORT}', args)
+        self.assertIn(f'127.0.0.1:{supervisor.REMOTE_TCP_PORT}:127.0.0.1:{supervisor.LOCAL_PORT}', args)
         self.assertIn('ExitOnForwardFailure=yes', args)
-        self.assertEqual(supervisor.REMOTE_SOCKET, '/opt/laya-shadow/classifier.sock')
+        self.assertNotIn(supervisor.REMOTE_SOCKET, args)
+
+    def test_bridge_command_restarts_stateless_host_bridge(self):
+        command = supervisor.remote_bridge_command()
+        self.assertIn('laya_shadow_bridg[e].py', command)
+        self.assertIn('/opt/relay-station/tools/laya-shadow/laya_shadow_bridge.py', command)
+        self.assertIn('bridge_up', command)
 
     def test_host_commands_use_restricted_directory_and_container_gid(self):
         self.assertIn('0750', supervisor.remote_dir_bootstrap_command())
