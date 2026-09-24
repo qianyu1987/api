@@ -152,6 +152,14 @@
 - 独立评测：新构造 44 条样例（与前调参 41 条互不相交，代理自标注，非人类独立标注）：任务类型 36.36%（16/44）、工具需求 50.00%（22/44），中位推理 16.9 ms；20 条 text 中 15 条误判 other，15 条需工具的正样本误判为不需要。报告 `/Volumes/brainos/CodexMedia/generated/laya-mlx-shadow/independent-report-20260924.json`（数据集 sha256 见报告）。该结果进一步证实调参集上的 73.17% 属过拟合；**仍不得作为生产路由依据**。
 - 三态区分：本地原型=完成且运行中（Mac 分类器+监督进程）；线上旁路=接入完成并双向验证、开关关闭、零真实提示；真实自动路由=未实现、未启用。启用观察需用户指定管理员 Key 并向宿主 `.env` 写入 `LAYA_SHADOW_ENABLED=true`、token、管理员用户 ID 与 socket 路径后重启 api。
 
+## Agnes 3.0 新渠道（专用 Key）：2026-09-24 CST
+
+- 用户提供新 Agnes Key（`sk-...9sr`，仅命令内使用，未写入报告/Git）与模型 `agnes-3.0-flash`。直连验证：`/v1/models` 200（12 个模型，含 agnes-3.0-flash），最小 chat 1 次 200（prompt 81 / completion 2 tokens，成本可忽略）。
+- 按用户选择"新 Key 单独可审计、可轮换"：事务内新建渠道 `Agnes 3.0`（id `dbd82ed7-5d41-47f8-b257-6c1fceeaf4c7`，`https://apihub.agnes-ai.com/v1`，prio 1000，启用；Key 经应用自身 `encryptSecret` 加密入库并往返校验），映射 `agnes-3.0-flash -> agnes-3.0-flash`（启用），并写 `config_audit_logs`（不含密钥）。
+- 变更前备份 `/opt/relay-station-backups/pre-agnes30-channel/db.sql`（545M，41 表 + 完整尾部）。
+- 验证：渠道/映射/审计三行独立复查通过；应用路由视图已含该渠道（按请求实时读取，无需重启）；两副本 v1.0.90 保持 healthy。
+- 边界：未新增 `model_prices`，用户直接请求 `agnes-3.0-flash` 仍会 503"管理员尚未配置该模型价格"——售卖价格与成本待用户确定后补价即可调用；未做经 relay 的付费实测（前序授权已用尽）。
+
 ## 更新模板
 
 新增记录应包含：日期/时区、用户目标与授权范围、实际原因、修改和提交、测试结果、是否推送、是否部署、两副本版本、备份/回滚位置、线上验证范围和未解决事项。只记非敏感证据。

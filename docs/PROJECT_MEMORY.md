@@ -81,6 +81,7 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 
 ## 最近上游运行事件
 
+- 2026-09-24 新建渠道 `Agnes 3.0`（专用新 Key，AES 加密入库，可独立轮换/停用）：base_url `https://apihub.agnes-ai.com/v1`，prio 1000，启用；唯一映射 `agnes-3.0-flash -> agnes-3.0-flash`（启用）；审计 `config_audit_logs` 已记录（不含密钥）。变更前备份 `pre-agnes30-channel`。上游直连验证通过（models 200、最小 chat 200）。**未配置 `model_prices`：用户请求该模型暂 503"未配置价格"，补价后即可调用**；经 relay 的付费实测未做。详见运维日志。
 - 2026-09-24 发布 `v1.0.90`（Laya 旁路接入）：两副本 healthy、migration 完成、worker timer active、无前端变更（`app.js?v=1.0.88`）。宿主桥接 + SSH loopback 转发 + api 只读 Unix socket 挂载链路实测打通，api-1/api-2 容器内 200/401/200 shadow（合成文本），SSH master 断开自动恢复。**`LAYA_SHADOW*` 环境变量为 0，开关保持关闭、未采集真实提示**；启用需用户指定管理员 Key 并写宿主 `.env` 后重启 api。独立 44 条代理自标注评测：任务类型 36.36%、工具需求 50%（`independent-report-20260924.json`），证实调参集 73.17% 属过拟合，不构成生产准确率证据。真实自动路由未实现、未启用。Mac 端传输监督进程（`tools/laya-shadow/transport_supervisor.py`，日志在 CodexMedia）在 Mac 重启/长时间睡眠后需重新启动；链路故障只影响 shadow 计数，不影响用户请求。详见运维日志与 `tools/laya-shadow/README.md`。
 - 2026-09-24 后续实测：宿主机 Laya 隧道正常时，api-1/api-2 到各自 loopback 及 backend gateway 的 19092 均 ECONNREFUSED。下一步采用受限 Unix socket 转发/挂载方案，尚未实现；不应直接改为 Docker 网关 TCP 地址或声称容器已接通。
 
