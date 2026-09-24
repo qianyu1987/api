@@ -15,7 +15,6 @@ import threading
 
 UNIX_SOCKET = '/opt/laya-shadow/classifier.sock'
 TCP_TARGET = ('127.0.0.1', 19093)
-GROUP_GID = 1000
 
 
 def pipe(source, destination):
@@ -39,11 +38,9 @@ def main():
     if os.path.exists(UNIX_SOCKET):
         os.unlink(UNIX_SOCKET)
     server.bind(UNIX_SOCKET)
-    os.chmod(UNIX_SOCKET, 0o660)
-    try:
-        os.chgrp(UNIX_SOCKET, GROUP_GID)
-    except (PermissionError, OSError):
-        pass
+    # Start restrictive; the transport supervisor repairs group access (gid 1000)
+    # after the socket appears, so a short unrepairable window is deny-by-default.
+    os.chmod(UNIX_SOCKET, 0o600)
     server.listen(8)
     print('laya-shadow bridge ready on ' + UNIX_SOCKET, flush=True)
     while True:
