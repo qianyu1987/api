@@ -53,6 +53,8 @@ SYNTHETIC_TEXT = 'Write a Python function that adds two integers.'
 RECONNECT_DELAY_S = 5
 
 _STOP = False
+classifier = None
+owned_classifier = False
 
 
 def log(event: str, **fields: object) -> None:
@@ -115,10 +117,10 @@ def request(path, token=None, body=None):
                 'Content-Length: %d\r\n') % (path, len(body))
         if token:
             head += 'Authorization: Bearer %s\r\n' % token
-        head += 'Connection: close\r\n\r\n' + body
+        head += 'Connection: close\r\n\r\n'
     else:
         head = 'GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n' % path
-    s.sendall(head.encode())
+    s.sendall(head.encode() + (body or b''))
     data = b''
     while True:
         chunk = s.recv(4096)
@@ -232,12 +234,10 @@ def restart_classifier() -> None:
 
 
 def main() -> int:
-    global _STOP
+    global _STOP, classifier, owned_classifier
     signal.signal(signal.SIGTERM, lambda *_: globals().update(_STOP=True))
     signal.signal(signal.SIGINT, lambda *_: globals().update(_STOP=True))
     ensure_token()
-    classifier = None
-    owned_classifier = False
     control = str(RUNTIME / 'ssh-control')
     restart_classifier()
     attempts = 0
