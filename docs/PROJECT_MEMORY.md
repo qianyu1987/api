@@ -81,7 +81,14 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 
 ## 最近上游运行事件
 
-- 2026-09-23 在本机 Apple M4 上验证 `laya-mlx` 0.2.0 与 multilingual MLX 检查点。模型和运行环境可用，但固定的 GPT TOKEN 路由样例第一轮任务类型准确率仅 50%、工具需求准确率 41.7%；业务标签校准后也只有 66.7% / 50%。因此 Laya 目前只能作为本地旁路研究原型，禁止参与生产模型/渠道选择。`tools/laya-shadow/` 提供仅监听 loopback、可选 bearer 鉴权的原型与固定评测门槛；运行时和权重不进仓库。
+- 2026-09-24 发布 `v1.0.90`（Laya 旁路接入）：两副本 healthy、migration 完成、worker timer active、无前端变更（`app.js?v=1.0.88`）。宿主桥接 + SSH loopback 转发 + api 只读 Unix socket 挂载链路实测打通，api-1/api-2 容器内 200/401/200 shadow（合成文本），SSH master 断开自动恢复。**`LAYA_SHADOW*` 环境变量为 0，开关保持关闭、未采集真实提示**；启用需用户指定管理员 Key 并写宿主 `.env` 后重启 api。独立 44 条代理自标注评测：任务类型 36.36%、工具需求 50%（`independent-report-20260924.json`），证实调参集 73.17% 属过拟合，不构成生产准确率证据。真实自动路由未实现、未启用。Mac 端传输监督进程（`tools/laya-shadow/transport_supervisor.py`，日志在 CodexMedia）在 Mac 重启/长时间睡眠后需重新启动；链路故障只影响 shadow 计数，不影响用户请求。详见运维日志与 `tools/laya-shadow/README.md`。
+- 2026-09-24 后续实测：宿主机 Laya 隧道正常时，api-1/api-2 到各自 loopback 及 backend gateway 的 19092 均 ECONNREFUSED。下一步采用受限 Unix socket 转发/挂载方案，尚未实现；不应直接改为 Docker 网关 TCP 地址或声称容器已接通。
+
+- 2026-09-24 已实测宿主机至 Mac 的临时 SSH 反向传输：服务器仅监听 `127.0.0.1:19092`，构造文本分类鉴权 401/200 正常，测试结束监听已移除。两个生产 API 仍为 v1.0.89 healthy。本证据不包括 API 容器接入、真实采样或部署；可复跑脚本 `tools/laya-shadow/probe_transport.py`，不产生付费请求。
+
+- 2026-09-24 Laya 旁路本地代码已接入请求处理流程，默认关闭，仅允许显式指定管理员的单条纯文本，分类失败不进入转发/结算错误路径。9 项旁路测试及全量 234 项通过；尚未部署、未采集真实请求，私有传输和独立标注评测待完成。统计为副本进程内计数，不是准确率；真实路由未实现。详见 `tools/laya-shadow/README.md` 与运维日志。
+
+- 2026-09-23 在本机 Apple M4 上验证 `laya-mlx` 0.2.0 与 multilingual MLX 检查点。2026-09-24 复跑扩大后的 41 条构造样例：任务类型 73.17%、工具需求 46.34%，文本类 13 条有 10 条误判 other。该集合含此前调参样例，不是独立评测或生产准确率。Laya 仍仅是本地研究原型，不得参与生产模型/渠道选择；线上旁路尚未实现。`tools/laya-shadow/` 源码现强制 loopback/bearer/单并发，支持加载外部评测 JSON 和保存无提示正文的报告；旧进程不代表新版代码已运行。运行时和权重不进仓库，具体证据见运维日志。
 
 - 2026-09-23 修复新建 RIPP “优惠”渠道：后台地址误填为 `https://ripp.best`，请求命中网站 HTML 并被安全归类为 `upstream_invalid_content_type`，连续失败触发熔断。生产已改为 `https://ripp.best/v1`、清除该配置错误造成的熔断，并通过应用自身选路以不计费的 `/models` 请求确认 `gpt-5.6-terra` 返回 JSON。该 Key 的上游模型目录不包含 `gpt-5.6-luna`，因此已暂时移除 Luna 映射，不能宣称 Luna 可用；需上游为此 Key 开通并在模型目录中返回后再启用。
 - 生产已于 2026-09-23 发布 `v1.0.88`，两个 API 副本和依赖健康，两域名加载 `app.js?v=1.0.88`。该版本包含 Responses 复杂输入兼容性保护、视频排队和账户历史充值显示；`v1.0.86` 镜像保留用于回滚。

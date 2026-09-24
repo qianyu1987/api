@@ -106,6 +106,52 @@
 - 前序交接提及订单查询 `pe.created_at` 不存在的旧错误；本次源码搜索未发现该引用，未单独复现，勿直接重做修复或称其已完成业务验证。
 - 镜像构建时 npm 报告生产依赖 1 high / 2 critical；本轮没有修改依赖。后续需核对公告与可达性后独立处理，勿自动执行破坏性 `npm audit fix --force`。
 
+## Laya 本地评测可复现与接口边界修复：2026-09-24 CST
+
+- 本轮仍限本地原型，未采集网站提示、未部署线上旁路、未改变模型/渠道/费用。生产版本未在本轮重新核验，不能将历史 v1.0.89 当作本轮上线证据。
+- 41 条 agent 构造的中文 smoke 样例（含此前调参样例）复跑：任务类型 30/41（73.17%），工具需求标签 19/41（46.34%），预热中位 19.3 ms。文本类 13 条中有 10 条误判 other；不是独立留出集，也不是生产准确率。工具需求标签仍有产品能力语义歧义。
+- `evaluate.py` 增加外部 JSON 样例加载、数据及问题哈希、无提示正文的 JSON 报告、单样例延迟处理；外部输入默认标为来源未核验，不自动视为独立评测。报告保存 `/Volumes/brainos/CodexMedia/generated/laya-mlx-shadow/smoke-report-20260924.json`。
+- 本地 HTTP 源码改为强制 bearer token、强制 loopback、串行 MLX 推理、5 秒 socket 超时，修复数组/null JSON 导致异常，并取消含任意请求路径的访问日志。尚未声称已替换此前运行中的服务；这些限制不等于生产入口加固完毕。
+- 4 项本地 HTTP 测试通过，覆盖鉴权、非法输入、繁忙、失败后释放和不安全启动拒绝；项目 20 文件/225 测试、typecheck、build、diff --check 通过。工具仍为未提交本地文件，未推送。
+- 待完成：独立样本及标注审查、默认关闭的线上旁路实现与隔离验证。前序提出的实际请求采集范围尚未得到明确回复，本轮未进行真实提示传输。真实自动路由继续关闭。
+
+## Laya 默认关闭的旁路代码接入：2026-09-24 CST
+
+- 新增 `src/services/laya-shadow.ts`，在正常预扣成功后发起不等待结果的分类观察。仅指定管理员 API Key 的单条纯文本请求，限 2000 字；排除历史、工具、附件、未知字段。普通用户不采集，开关默认关闭，结果不传给渠道或计费服务。
+- 每副本最多 1 个在途请求，750 ms 总超时，结果限 16 KiB，无队列、无重试，不保存提示正文。目标仅允许 loopback `/v1/classify`、显式配置 32 字符以上 token 和管理员 ID。新增管理员统计接口，只返回本副本进程内计数，不表示准确率，重启清零。
+- 新增 9 项测试，包含旁路挂起时正常请求仍返回 200、模型和原始请求不变、原渠道结算一次，以及默认关闭、非管理员排除、超时、过大/异常返回、未登录统计 401。21 文件/234 测试、typecheck、build、diff --check 通过。
+- 本轮仅本地代码，未提交/推送/部署，也未设置生产开关或采集真实提示。Mac 到生产两个 API 容器的私有传输尚未实现；容器 loopback 不是 Mac 地址。下一步先验证传输及生命周期，实际采集范围沿用前序待明确项。独立标注评测仍待完成，真实自动选路没有实现也未启用。
+
+## Laya 服务器至 Mac 临时私有传输实测：2026-09-24 CST
+
+- 使用固定密钥成功连接 `101.35.223.148`，主机名 `VM-0-7-centos`，两 API 副本实测仍为 `relay-station:v1.0.89` 且 healthy。未重新发布、未重启服务、未修改数据库、渠道或账务。
+- 新增可复跑的 `tools/laya-shadow/probe_transport.py`，在 Mac 启动新版强制鉴权分类服务，随机凭据仅驻留内存，通过 SSH 反向转发临时绑定服务器 `127.0.0.1:19092`。发送构造文本前核验实际监听地址，不修改 SSH 配置，不开放公网入口。
+- 实际远程分类：错误凭据 401，正确凭据 200 / mode=shadow，构造编程文本分类 coding，单次本地推理 57.8 ms（不是完整网络延迟或准确率指标）。随后关闭 SSH 隧道，服务器监听已消失，本地探测服务也已关闭。
+- 4 项本地 HTTP 测试及 diff --check 通过；本轮未更改 TS 应用代码，沿用上一轮 234 项回归结果。未采集网站提示，未调用收费上游。
+- 证据边界：仅验证服务器宿主机到 Mac 的临时传输，尚未接到两个 API 容器；不能称线上旁路已部署。下一步实现容器可访问且隔离的传输及重连/断线验证，独立标注评测继续待办。真实路由保持未实现/未启用。
+
+## Laya 双副本网络隔离验证：2026-09-24 CST
+
+- 增强临时探测脚本，在宿主机鉴权隧道打开期间，从 api-1/api-2 分别请求容器 loopback 和实际 backend gateway 的 19092 健康接口；四次均 ECONNREFUSED。宿主机同期分类仍为无有效凭据 401、有凭据 200/shadow，证明当前隧道仅宿主机可达，不能直接用于 API 容器。
+- 本轮构造文本推理 50.9 ms，不作为准确率或端到端延迟；无真实提示采集。隧道关闭后监听消失，未改生产网络、SSH 配置或 API 进程。初始临时 shell 命令因 rm 清理方式被自动检查整体拒绝，随后使用已有鉴权脚本完成安全探测。
+- 后续方案：独立受限目录下的 SSH Unix socket 转发，API 只读挂载目录并使用 Unix socket HTTP dispatcher。尚未实现/部署，需检查权限、重连、挂载和两个副本，不能将本轮负向隔离测试称为容器接入成功。
+- 本地 HTTP 4 项测试与 diff --check 通过；未修改 TS 应用代码。独立标注评测仍缺，线上旁路及真实自动路由均未启用。
+
+## Laya v1.0.90 旁路试运行接入发布：2026-09-24 CST
+
+- 发布提交 `db1ae30`（标签 `v1.0.90`，main 后续工具修复提交 `e38d65f`、`1de9212`、`316bb1c` 等均已推送；tools/ 不进容器镜像，不影响已部署行为）。本地 22 文件/235 测试、typecheck、build、`git diff --check` 通过。
+- 代码边界：`src/services/laya-shadow.ts` 默认关闭，仅观察显式指定管理员的单条纯文本（≤2000 字），每副本至多 1 个在途、750 ms 截止、16 KiB 上限，结果绝不进入路由或结算；`src/config.ts` 仅接受 `LAYA_SHADOW_SOCKET_PATH=/run/laya-shadow/classifier.sock`（或 loopback URL）+ ≥32 字符 token + 显式管理员 ID；compose 仅给两个 api 副本 ro 挂载宿主 `/opt/laya-shadow`。
+- 部署前备份 `/opt/relay-station-backups/pre-laya-v1.0.90/`：545M 文本 dump（41 张 CREATE TABLE + 41 COPY + 完整尾部）与 `.env` 归档（0600）；保留 `relay-station:v1.0.89` 回滚镜像。
+- 部署：migration 完成；两副本 `relay-station:v1.0.90` healthy；Gateway/Postgres/Redis healthy；`relay-station-worker.timer` active；`/healthz`、`/api/v1/health`、两域名首页 200；静态脚本保持 `app.js?v=1.0.88`（本次无前端变更）；`/api/admin/laya-shadow` 未登录 401。宿主 `.env` 中 `LAYA_SHADOW*` 变量为 0，**开关保持关闭、未采集任何真实提示**；采样范围（指定管理员 Key）仍待用户确认。
+
+## Laya 宿主 Unix-socket 传输与独立评测：2026-09-24 CST
+
+- 传输链路（全部实测）：Mac 分类器 `127.0.0.1:19091`（loopback）→ SSH `-R 127.0.0.1:19093`（宿主 loopback）→ 宿主 stdlib 桥接 `tools/laya-shadow/laya_shadow_bridge.py`（root 运行、每周期重启，socket `/opt/laya-shadow/classifier.sock` 0600→`chgrp 1000`+group-writable）→ 两个 api 副本 ro 挂载 `/run/laya-shadow` → undici Unix-socket dispatcher。宿主 OpenSSH 7.4p1 实测无法直接 -R 绑定 Unix socket（`remote port forwarding failed for listen path`），故引入宿主桥接；未新增公网或 Docker 网桥 TCP 入口，未改 SSH 配置。
+- Mac 端 `transport_supervisor.py`（当前以 setsid 脱离运行；日志 `/Volumes/brainos/CodexMedia/generated/laya-mlx-shadow/transport.log`）负责分类器、宿主桥接、SSH master、重连与权限修复，每 5 秒探测分类器端口，任一环节死亡后自动重建并整链路再验证。宿主侧验证：`/healthz` 200、无凭据 401、凭据 200/shadow；随后 **api-1 与 api-2 容器内**经 Unix socket 实测同样 200/401/200 shadow（合成编程文本，分类 coding；容器内 139.7/34.7 ms 为含网络往返的参考值，非端到端延迟指标，更不是准确率）。杀掉 SSH master 后监督进程自动恢复（日志 `transport_ready` attempt 2）。全程未传输真实用户提示，未发起任何付费请求，未改动渠道、价格、账务。
+- 本地 Python 10 项测试（SSH 参数/宿主命令构造、验证脚本不打印 token 不变量、Unix-socket HTTP 往返、桥接命令自检）通过。
+- 独立评测：新构造 44 条样例（与前调参 41 条互不相交，代理自标注，非人类独立标注）：任务类型 36.36%（16/44）、工具需求 50.00%（22/44），中位推理 16.9 ms；20 条 text 中 15 条误判 other，15 条需工具的正样本误判为不需要。报告 `/Volumes/brainos/CodexMedia/generated/laya-mlx-shadow/independent-report-20260924.json`（数据集 sha256 见报告）。该结果进一步证实调参集上的 73.17% 属过拟合；**仍不得作为生产路由依据**。
+- 三态区分：本地原型=完成且运行中（Mac 分类器+监督进程）；线上旁路=接入完成并双向验证、开关关闭、零真实提示；真实自动路由=未实现、未启用。启用观察需用户指定管理员 Key 并向宿主 `.env` 写入 `LAYA_SHADOW_ENABLED=true`、token、管理员用户 ID 与 socket 路径后重启 api。
+
 ## 更新模板
 
 新增记录应包含：日期/时区、用户目标与授权范围、实际原因、修改和提交、测试结果、是否推送、是否部署、两副本版本、备份/回滚位置、线上验证范围和未解决事项。只记非敏感证据。
