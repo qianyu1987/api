@@ -160,6 +160,14 @@
 - 验证：渠道/映射/审计三行独立复查通过；应用路由视图已含该渠道（按请求实时读取，无需重启）；两副本 v1.0.90 保持 healthy。
 - 边界：未新增 `model_prices`，用户直接请求 `agnes-3.0-flash` 仍会 503"管理员尚未配置该模型价格"——售卖价格与成本待用户确定后补价即可调用；未做经 relay 的付费实测（前序授权已用尽）。
 
+## Agnes 3.0 渠道补价与付费实测：2026-09-25 CST
+
+- 用户指令"测，按 OpenAI 价目表三分之一补价"。以 `gpt-5-mini`（$0.25/$2/$0.025 每百万 tokens，OpenAI 价目表内置映射）为基准：新 `model_prices` 行 `agnes-3.0-flash` 售价 = 1/3 基准（input 83334 / output 666667 / cache 8334 微元/M，向上取整），成本 = 基准 1:1 结算（250000 / 2000000 / 25000 微元/M），fx 1:1，active；审计写 `config_audit_logs`。首次事务因 JSON 引号失败已回滚，重试成功。
+- 首次付费请求 502"当前模型没有已启用上游渠道"：路由按渠道 `model_map` JSONB 逐模型显式 opt-in（`supportsRequestedModel`），`channel_model_mappings` 表只用于模型清单/价目初始化。修复：`Agnes 3.0` 渠道 `model_map={"agnes-3.0-flash":"agnes-3.0-flash"}`，审计已记。
+- 付费实测 1 次（用户授权）：经公网 `https://api.hhtc.top/v1/chat/completions`，管理员 API Key 由应用自身解密恢复（明文仅存于内存/命令变量，未落日志/报告/Git）。结果 HTTP 200，model 回显 agnes-3.0-flash，81 prompt + 2 completion tokens。
+- `usage_logs` 证据：`final_channel=Agnes 3.0`、`http=200`、`charge=9 / cost=25 / profit=-16` 微元（钱包扣 9）。小规模请求下售价=1/3 价目 < 成本=1:1 价目，出现小额负毛利；Agnes 真实上游成本未知，待用户给成本数据后修正 `model_prices` 成本列或 `channel_model_costs`。
+- 两副本 v1.0.90 保持 healthy；未重启服务（渠道/价格按请求实时读取）。
+
 ## 更新模板
 
 新增记录应包含：日期/时区、用户目标与授权范围、实际原因、修改和提交、测试结果、是否推送、是否部署、两副本版本、备份/回滚位置、线上验证范围和未解决事项。只记非敏感证据。
