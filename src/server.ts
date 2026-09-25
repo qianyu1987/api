@@ -23,7 +23,7 @@ import { MailService } from './services/mail.js'
 import { buildCcswitchImportLink } from './lib/ccswitch.js'
 import { calculateUsageMoney, estimatedRequestTokens, formatMicros, sellForGrossMargin, yuanToMicros } from './lib/money.js'
 import { parseSseUsage, usageFromPayload } from './lib/usage.js'
-import { PublicModelSse, rewritePublicModel } from './lib/public-model.js'
+import { isPublicFallbackModel, PublicModelSse, rewritePublicModel } from './lib/public-model.js'
 import { decodeResponseBuffer, decodeResponseStream } from './lib/response-compression.js'
 import { ProfitService } from './services/profit.js'
 import { fallbackCostAlerts, fallbackCostPending, pendingFallbackCostSql } from './lib/cost-status.js'
@@ -1489,7 +1489,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const upstreamRequestId = responseHeader(responseHeaders, ['x-request-id', 'openai-request-id', 'request-id'])
     const isSse = String(responseHeaders['content-type'] || '').includes('text/event-stream')
     const contentEncoding = responseHeaders['content-encoding']
-    const rewriteModel = ['gpt-5.6-sol', 'gpt-5.6-terra'].includes(model) && relay.upstreamModel !== model
+    const rewriteModel = isPublicFallbackModel(model) && relay.upstreamModel !== model
     if (isSse) {
       reply.hijack()
       reply.raw.statusCode = response.statusCode

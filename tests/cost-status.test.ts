@@ -15,6 +15,7 @@ describe('fallback cost provenance', () => {
     }
     expect(fallbackCostPending({ ...row, pricing_snapshot: { appliedChannelCost: cost } })).toBe(false)
     expect(fallbackCostPending({ ...row, upstream_model: 'gpt-5.6-sol' })).toBe(false)
+    expect(fallbackCostPending({ ...row, requested_model: 'gpt-5.6-luna' })).toBe(true)
   })
   test('billing restores the frozen fallback cost despite later configuration changes', () => {
     const price: PriceSnapshot = {

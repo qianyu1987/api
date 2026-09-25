@@ -4,7 +4,7 @@ import { gzipSync, deflateSync, brotliCompressSync } from 'node:zlib'
 import { MockAgent, getGlobalDispatcher, setGlobalDispatcher } from 'undici'
 import { ChannelService } from '../src/services/channels.js'
 import { encryptSecret } from '../src/lib/crypto.js'
-import { PublicModelSse, rewritePublicModel } from '../src/lib/public-model.js'
+import { isPublicFallbackModel, isSolFallback, PublicModelSse, rewritePublicModel } from '../src/lib/public-model.js'
 import { decodeResponseStream } from '../src/lib/response-compression.js'
 import { buildApp, type RelayApp } from '../src/server.js'
 import { loadConfig } from '../src/config.js'
@@ -43,6 +43,10 @@ const body = Buffer.from(JSON.stringify({ model, messages: [{ role: 'user', cont
 const call = (service: ChannelService, path = '/chat/completions', requestedModel = model) => service.relay(path, 'POST', { 'content-type': 'application/json' }, body, requestedModel)
 
 describe('sol fallback routing', () => {
+  test.each(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'])('recognizes %s as an Agnes-compatible public model', requestedModel => {
+    expect(isPublicFallbackModel(requestedModel)).toBe(true)
+    expect(isSolFallback(requestedModel, upstream)).toBe(true)
+  })
   test('keeps real providers first even if an administrator gives fallback a lower priority', async () => {
     const { service, rows } = routing(); rows[1].priority = 1
     respond('real')
@@ -137,7 +141,7 @@ describe('relay HTTP integration and billing boundary', () => {
   })
   afterEach(async () => { if (services) { await services.app.close(); await services.db.close() } })
   async function relayResponse(sse: boolean, fail = false, requestedModel = model, encoding = '', corrupt = false) {
-    const finalModel = requestedModel === model ? upstream : requestedModel
+    const finalModel = isPublicFallbackModel(requestedModel) ? upstream : requestedModel
     const payload = { model: finalModel, choices: [], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } }
     const plain = Buffer.from(sse ? `data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n` : JSON.stringify(payload))
     const compress = { gzip: gzipSync, deflate: deflateSync, br: brotliCompressSync }[encoding]
@@ -161,6 +165,13 @@ describe('relay HTTP integration and billing boundary', () => {
     expect(services.billing.release).not.toHaveBeenCalled()
     const records = vi.mocked(services.db.query).mock.calls.filter(([sql]) => sql.includes('INSERT INTO relay_attempts'))
     expect(records).toHaveLength(2); expect(records[1][1]).toContain(upstream)
+  })
+  test.each(['gpt-5.6-terra', 'gpt-5.6-luna'])('rewrites Agnes response metadata back to %s', async requestedModel => {
+    const response = await relayResponse(false, false, requestedModel)
+    expect(response.statusCode).toBe(200)
+    expect(response.json().model).toBe(requestedModel)
+    expect(response.body).not.toContain(upstream)
+    expect(services.billing.settle).toHaveBeenCalledWith(expect.objectContaining({ model: requestedModel, upstreamModel: upstream }))
   })
   test('all HTTP failures settle once without charging twice', async () => {
     const response = await relayResponse(false, true)
