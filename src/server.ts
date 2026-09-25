@@ -24,6 +24,7 @@ import { buildCcswitchImportLink } from './lib/ccswitch.js'
 import { calculateUsageMoney, estimatedRequestTokens, formatMicros, sellForGrossMargin, yuanToMicros } from './lib/money.js'
 import { parseSseUsage, usageFromPayload } from './lib/usage.js'
 import { isPublicFallbackModel, PublicModelSse, rewritePublicModel } from './lib/public-model.js'
+import { AgnesResponsesSse, chatToResponses } from './lib/agnes-adapter.js'
 import { decodeResponseBuffer, decodeResponseStream } from './lib/response-compression.js'
 import { ProfitService } from './services/profit.js'
 import { fallbackCostAlerts, fallbackCostPending, pendingFallbackCostSql } from './lib/cost-status.js'
@@ -1496,7 +1497,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       reply.raw.setHeader('X-Request-Id', requestId)
       for (const [key, value] of Object.entries(responseHeaders)) if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.raw.setHeader(key, value as any)
       const decoder = new StringDecoder('utf8')
-      const publicStream = rewriteModel ? new PublicModelSse(model) : null
+      const publicStream = relay.responseAdapter === 'agnes_responses'
+        ? new AgnesResponsesSse(model)
+        : rewriteModel ? new PublicModelSse(model) : null
       let pending = ''
       let usage = null as ReturnType<typeof parseSseUsage>
       const consumeUsage = (value: string) => {
@@ -1605,7 +1608,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     reply.code(response.statusCode)
     for (const [key, value] of Object.entries(responseHeaders)) if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.header(key, value as any)
     // Billing above always receives the unmodified upstream metadata.
-    reply.send(rewriteModel ? Buffer.from(rewritePublicModel(data.toString('utf8'), model)) : data)
+    const successfulAgnesResponse = relay.responseAdapter === 'agnes_responses'
+      && response.statusCode >= 200 && response.statusCode < 300 && parsedResponse
+    const outgoingData = successfulAgnesResponse
+      ? Buffer.from(JSON.stringify(chatToResponses(parsedResponse, model)))
+      : rewriteModel ? Buffer.from(rewritePublicModel(data.toString('utf8'), model)) : data
+    reply.send(outgoingData)
   }
 
   // CC Switch installations created before v1.0.6 sometimes retain the host

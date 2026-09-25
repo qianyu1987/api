@@ -46,6 +46,9 @@ describe('channel failover policy', () => {
   test('uses the same adapter for the luna public model', () => {
     const result = responsesToChat({ model: 'gpt-5.6-luna', input: 'hello' })
     expect(result).toMatchObject({ model: 'gpt-5.6-luna', messages: [{ role: 'user', content: 'hello' }] })
+    expect(result).not.toHaveProperty('stream')
+    expect(responsesToChat({ model: 'gpt-5.6-luna', input: 'hello', stream: null })).not.toHaveProperty('stream')
+    expect(responsesToChat({ model: 'gpt-5.6-luna', input: 'hello', stream: true })).toHaveProperty('stream', true)
   })
   test('rewrites only the model and preserves native Responses structures', () => {
     const input = {

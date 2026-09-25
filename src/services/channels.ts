@@ -1,6 +1,7 @@
 import { request, type Dispatcher } from 'undici'
 import { decryptSecret } from '../lib/crypto.js'
 import { isSolFallback } from '../lib/public-model.js'
+import { isAgnesResponsesAdapter, responsesToChat } from '../lib/agnes-adapter.js'
 import type { AppConfig } from '../config.js'
 import { Database, one } from '../db/index.js'
 
@@ -33,6 +34,7 @@ export type RelayResult = {
   channel: Channel
   attempts: RelayAttempt[]
   upstreamModel: string
+  responseAdapter?: 'agnes_responses'
 }
 
 export type UpstreamBalance = {
@@ -360,8 +362,10 @@ export class ChannelService {
     for (let index = 0; index < channels.length; index += 1) {
       const channel = channels[index]
       const upstreamModel = channel.modelMap[requestedModel] || channel.modelMap['*'] || requestedModel
+      const agnesResponses = isAgnesResponsesAdapter(channel.baseUrl, path, fallback(channel))
       const started = Date.now()
-      const target = `${channel.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
+      const upstreamPath = agnesResponses ? '/chat/completions' : path
+      const target = `${channel.baseUrl}${upstreamPath.startsWith('/') ? upstreamPath : `/${upstreamPath}`}`
       try {
         const apiKey = decryptSecret(channel.encryptedApiKey, this.config.channelEncryptionKey)
         const outgoingHeaders: Record<string, string> = {}
@@ -377,7 +381,10 @@ export class ChannelService {
         // Fallback metadata must be inspected and rewritten. Prefer plain bytes;
         // the response layer also handles providers that still send compression.
         if (fallback(channel)) outgoingHeaders['accept-encoding'] = 'identity'
-        const outgoingBody = rewriteRequestBody(body, requestedModel, upstreamModel, path)
+        let outgoingBody = rewriteRequestBody(body, requestedModel, upstreamModel, path)
+        if (agnesResponses && outgoingBody?.length) {
+          outgoingBody = Buffer.from(JSON.stringify(responsesToChat(JSON.parse(outgoingBody.toString('utf8')))))
+        }
         if (outgoingBody && outgoingBody !== body) {
           // The original content-length is deliberately removed above; undici
           // computes the new length from the rewritten payload.
@@ -404,14 +411,14 @@ export class ChannelService {
           // upstream response into a retry. The response path remains usable
           // during a transient PostgreSQL outage.
           await this.markSuccess(channel.id).catch(() => undefined)
-          return { response, channel, attempts, upstreamModel }
+          return { response, channel, attempts, upstreamModel, ...(agnesResponses ? { responseAdapter: 'agnes_responses' as const } : {}) }
         }
         await this.markFailure(channel.id).catch(() => undefined)
         // A retryable response can only be returned when it is the final
         // channel attempt. Earlier bodies must be drained before failover; do
         // not retain one of those drained responses and accidentally return it
         // after a later network error.
-        if (index === channels.length - 1 && !invalidResponse) return { response, channel, attempts, upstreamModel }
+        if (index === channels.length - 1 && !invalidResponse) return { response, channel, attempts, upstreamModel, ...(agnesResponses ? { responseAdapter: 'agnes_responses' as const } : {}) }
         try { for await (const _chunk of response.body as any) { /* drain */ } } catch { /* noop */ }
       } catch (error: any) {
         const latencyMs = Date.now() - started

@@ -67,6 +67,22 @@ describe('sol fallback routing', () => {
     const recovered = await call(service)
     expect(recovered.channel.id).toBe('real'); await recovered.response.body.dump()
   })
+  test('adapts fallback Responses requests to Chat Completions upstream', async () => {
+    const { service, rows } = routing(); rows[0].enabled = false
+    rows[1].base_url = 'https://apihub.agnes-ai.com/v1'
+    agent.get('https://apihub.agnes-ai.com').intercept({
+      path: '/v1/chat/completions', method: 'POST',
+      body: value => {
+        const parsed = JSON.parse(String(value))
+        return parsed.model === upstream && parsed.messages?.[0]?.content === 'hello'
+          && !Object.hasOwn(parsed, 'input') && !Object.hasOwn(parsed, 'stream')
+      },
+    }).reply(200, { model: upstream, choices: [{ message: { role: 'assistant', content: 'OK' } }] }, { headers: { 'content-type': 'application/json' } })
+    const responsesBody = Buffer.from(JSON.stringify({ model, input: 'hello', max_output_tokens: 8 }))
+    const result = await service.relay('/responses', 'POST', { 'content-type': 'application/json' }, responsesBody, model)
+    expect(result.responseAdapter).toBe('agnes_responses')
+    await result.response.body.dump()
+  })
   test.each([401, 403, 408, 429, 500, 502, 503])('fails over HTTP %i', async status => {
     const { service } = routing(); respond('real', status); respond('fallback', 200, upstream)
     const result = await call(service)
@@ -142,13 +158,14 @@ describe('relay HTTP integration and billing boundary', () => {
   afterEach(async () => { if (services) { await services.app.close(); await services.db.close() } })
   async function relayResponse(sse: boolean, fail = false, requestedModel = model, encoding = '', corrupt = false) {
     const finalModel = isPublicFallbackModel(requestedModel) ? upstream : requestedModel
-    const payload = { model: finalModel, choices: [], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } }
+    const payload = { model: finalModel, choices: sse ? [{ delta: { content: 'OK' } }] : [{ message: { role: 'assistant', content: 'OK' } }], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } }
     const plain = Buffer.from(sse ? `data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n` : JSON.stringify(payload))
     const compress = { gzip: gzipSync, deflate: deflateSync, br: brotliCompressSync }[encoding]
     const bytes = corrupt ? Buffer.from('invalid compressed response') : compress ? compress(plain) : plain
     const attempts = [{ channelId: 'real', channelName: 'Real', attemptNo: 1, statusCode: 503, outcome: 'server_error' }, { channelId: 'fallback', channelName: '低价plus', upstreamModel: finalModel, attemptNo: 2, statusCode: fail ? 503 : 200, outcome: fail ? 'server_error' : 'success' }]
     vi.spyOn(services.channels, 'relay').mockResolvedValue({
       upstreamModel: finalModel, channel: { id: 'fallback', name: '低价plus' }, attempts,
+      ...(isPublicFallbackModel(requestedModel) ? { responseAdapter: 'agnes_responses' } : {}),
       response: { statusCode: fail ? 503 : 200, headers: { 'content-type': sse ? 'text/event-stream' : 'application/json', ...(encoding ? { 'content-encoding': encoding, 'content-length': String(bytes.length) } : {}) },
         body: sse ? Readable.from([...bytes].map(b => Buffer.from([b]))) : { arrayBuffer: async () => bytes } },
     } as any)
@@ -158,7 +175,7 @@ describe('relay HTTP integration and billing boundary', () => {
     const response = await relayResponse(sse)
     expect(response.statusCode).toBe(200)
     expect(response.body).toContain(model); expect(response.body).not.toContain(upstream)
-    if (sse) expect(response.body).toContain('[DONE]')
+    if (sse) expect(response.body).toContain('response.completed')
     expect(services.billing.reserve).toHaveBeenCalledTimes(1)
     expect(services.billing.settle).toHaveBeenCalledTimes(1)
     expect(services.billing.settle).toHaveBeenCalledWith(expect.objectContaining({ model, upstreamModel: upstream, channelId: 'fallback', success: true, attemptCount: 2, usage: { input: 5n, output: 2n, cache: 0n, reportedTotal: 7n } }))
@@ -170,6 +187,7 @@ describe('relay HTTP integration and billing boundary', () => {
     const response = await relayResponse(false, false, requestedModel)
     expect(response.statusCode).toBe(200)
     expect(response.json().model).toBe(requestedModel)
+    expect(response.json().object).toBe('response')
     expect(response.body).not.toContain(upstream)
     expect(services.billing.settle).toHaveBeenCalledWith(expect.objectContaining({ model: requestedModel, upstreamModel: upstream }))
   })
@@ -187,7 +205,7 @@ describe('relay HTTP integration and billing boundary', () => {
       expect(response.headers).not.toHaveProperty('content-encoding')
       expect(response.body).toContain(model)
       expect(response.body).not.toContain(upstream)
-      if (sse) expect(response.body).toContain('[DONE]')
+      if (sse) expect(response.body).toContain('response.completed')
       expect(services.billing.settle).toHaveBeenLastCalledWith(expect.objectContaining({
         upstreamModel: upstream, estimatedUsage: false,
         usage: { input: 5n, output: 2n, cache: 0n, reportedTotal: 7n },

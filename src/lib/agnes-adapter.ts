@@ -56,6 +56,7 @@ export function responsesToChat(input: AnyRecord): AnyRecord {
   if (input.max_output_tokens != null && out.max_tokens == null) out.max_tokens = input.max_output_tokens
   delete out.max_output_tokens
   delete out.stream_options
+  if (typeof out.stream !== 'boolean') delete out.stream
   return out
 }
 
