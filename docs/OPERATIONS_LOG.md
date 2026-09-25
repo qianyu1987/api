@@ -181,6 +181,13 @@
 - 发布提交 `4268916`，标签 `v1.0.91` 已推送。发布前备份 `/opt/relay-station-backups/pre-v1.0.91-terra-luna-20260925`（547M，41 张表/41 COPY + 配置归档），保留 v1.0.90 镜像。两 API 副本均为 v1.0.91 healthy；Gateway/PostgreSQL/Redis healthy，worker timer active；`/healthz`、`/api/v1/health`、两个首页均 200。
 - 生产事务补齐 Terra/Luna 的 `model_map`、映射表及审计，并将 Agnes 同一上游的已核实成本复制为 Terra/Luna 渠道级成本快照。公开 `/v1/models` 已同时列出 Sol/Terra/Luna，相关备用成本告警为 0。未发起付费文本请求；真实生成成功仍需后续获准的低成本调用确认。
 
+## Terra/Luna 真实验证与 v1.0.92 Agnes Responses 修复：2026-09-25 CST
+
+- 用户明确授权真实收费测试。Terra 首次非流式 `/v1/responses` 成功：HTTP 200、模型 `gpt-5.6-terra`、文本 `OK`，走原生“高价稳定pro”；结算 80005 微元、成本 16215 微元。Luna 首次请求走“超稳定备用”但上游对缺省流式字段产生 `stream=null` 并返回 400；该失败结算 charge/cost/profit 均为 0。
+- 根因是 Agnes Responses 转换器虽存在但未接入实际转发链路。v1.0.92 将简单文本 `/responses` 转成 Agnes `/chat/completions`，仅保留布尔 `stream`，再将流式/非流式结果还原为标准 Responses；原简单文本限制、模型名回写、失败退款和账务快照保持不变。新增实际路由路径、请求字段、流式结束和 Luna 回写测试；22 文件/242 测试、typecheck、build、diff-check 通过。
+- 发布提交 `61684a0`，标签 `v1.0.92` 已推送。发布前备份 `/opt/relay-station-backups/pre-v1.0.92-agnes-responses-20260925`（547M，41 表/41 COPY + 配置归档）；v1.0.90、v1.0.91 镜像均保留。两 API 副本 v1.0.92 healthy，Gateway/PostgreSQL/Redis healthy，worker timer active，四个线上入口均 200。
+- 发布后真实复测：Luna 非流式及流式均 HTTP 200、标准 Responses、模型 `gpt-5.6-luna`、文本 `OK`，每次 charge 3830 / cost 131 / profit 3699 微元；Terra 流式 HTTP 200、1 个 `response.completed`、模型与文本正确，charge 80005 / cost 16215 / profit 63790 微元。每次测试只提交一次，无重复账单。
+
 ## 更新模板
 
 新增记录应包含：日期/时区、用户目标与授权范围、实际原因、修改和提交、测试结果、是否推送、是否部署、两副本版本、备份/回滚位置、线上验证范围和未解决事项。只记非敏感证据。
