@@ -81,6 +81,7 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 
 ## 最近上游运行事件
 
+- 2026-09-25 发布 v1.0.91：Terra 原生路由加入上游目录明确支持的 `稳定pro`、`高价稳定pro`，保留“优惠”及 Agnes 备用；Luna 没有原生上游，按公共低价档映射“超稳定备用”的 `agnes-3.0-flash`，且仅允许简单文本兼容降级。Terra/Luna 的 Agnes 渠道成本已按同一上游成本补齐，模型目录同时列出 Sol/Terra/Luna，两个 API 副本及依赖健康。发布前备份 `pre-v1.0.91-terra-luna-20260925`；未做付费生成测试。
 - 2026-09-25 CC Switch 曾因已打开会话携带 `gpt-6-sol` 而收到“未配置该模型价格”503。生产 `/v1/models` 非计费核验：有 `gpt-5.6-sol`、无 `gpt-6-sol`；本机“默认 Key”和 Codex 持久配置均为 `gpt-5.6-sol`，切回后代理请求连续 200。不要为修复拼写/会话覆盖而凭空复制价格或渠道映射；先使用模型目录中实际存在的 `gpt-5.6-sol`。
 - 2026-09-25 `agnes-3.0-flash` 已可售卖并付费实测通过：`model_prices` 行售价=OpenAI gpt-5-mini 价目 1/3（83334/666667/8334 微元/M），成本=gpt-5-mini 1:1（250000/2000000/25000）；渠道 `Agnes 3.0` 的 `model_map` 已显式 opt-in（路由按 model_map JSONB 匹配，`channel_model_mappings` 表仅用于模型清单/价目初始化——新增渠道两表需同时配置）。公网 1 次最小请求 200，`usage_logs` 确认走 `Agnes 3.0`、扣款 9 微元；**当前成本按 OpenAI 价目 1:1 记账导致小额负毛利，Agnes 真实上游成本待用户提供后修正**。详见运维日志。
 - 2026-09-24 新建渠道 `Agnes 3.0`（专用新 Key，AES 加密入库，可独立轮换/停用）：base_url `https://apihub.agnes-ai.com/v1`，prio 1000，启用；唯一映射 `agnes-3.0-flash -> agnes-3.0-flash`（启用）；审计 `config_audit_logs` 已记录（不含密钥）。变更前备份 `pre-agnes30-channel`。上游直连验证通过（models 200、最小 chat 200）。**未配置 `model_prices`：用户请求该模型暂 503"未配置价格"，补价后即可调用**；经 relay 的付费实测未做。详见运维日志。
