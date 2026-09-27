@@ -168,6 +168,14 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 - `v1.0.97` 修复用户中心横向溢出和上游 `x-request-id` 覆盖本站账务请求 ID。提交 `d62b70d`、`aafb741` 及标签 `v1.0.96`、`v1.0.97` 均已推送 `origin/main`；本地 25 个测试文件/282 项通过，typecheck、build、前端语法和 diff-check 通过。
 - 生产备份 `/opt/relay-station-backups/pre-v1.0.96-night-gpt6sol-20260927T110057Z` 已验证可读，旧 `v1.0.95` 镜像保留。当前两个 API 副本均为 `relay-station:v1.0.97` / package 1.0.97 且 healthy，Gateway、PostgreSQL、Redis 与维护 timer 正常；三个公网健康接口和首页均为 200，首页加载 `styles.css?v=1.0.97`、`app.js?v=1.0.97`。登录态桌面及 390px 手机检查均无页面横向溢出；手机端深夜折扣卡片完整显示。
 
+## GPT-6 Sol Standard/272K+ 分层价格与 v1.0.99 服务档保护（2026-09-28 CST）
+
+- `v1.0.98`/`v1.0.99` 已推送并部署到固定生产主机 `101.35.223.148`；两个 API 副本当前均为 `relay-station:v1.0.99`、healthy。`/healthz`、`/api/v1/health`、`hhtc.top` 健康接口及 `www.hhtc.top` 首页均已复核 200，首页静态资源为 v1.0.99。
+- `gpt-6-sol` 生产模型行：Standard 成本 `2/10/0.2` 美元等价的输入/输出/cache-read（微元列 `2000000/10000000/200000`）；272K+ 成本按输入类 `2.0x`、输出 `1.5x`，并记录 cache-write，价格行的 272K+ 阈值为 `272001` Token。当前 272K+ 站内售价约为输入 ¥33.333334、输出 ¥125、cache-read ¥3.333334、cache-write ¥41.666667 / 百万 Token。
+- 7/7 个启用 `gpt-6-sol` 渠道都有运行映射、带来源成本和 2/1.5/2/2 分层倍率；审计记录、模型价格与成本快照已核对。生产护栏仍为最低毛利 30%、返利 10%、支付费 0%，没有把全站目标改成 50%。其他模型的成本缺口仍存在，不能把本次 Sol 价格发布扩大解释为全站成本/利润完成。
+- `v1.0.99` 在结算前拒绝 `service_tier=fast/priority` 以及未计价服务档请求头，返回 422 且不触发上游或账务；Fast/priority 未开放。站内尚无可证明独立 cache-write 实际用量结算的生产付费样本，不作超出字段能力的结论。
+- 本地 25 个测试文件/291 项测试、typecheck、build、前端语法和 diff-check 通过。备份：`/opt/relay-station-backups/pre-v1.0.98-gpt6sol-tiered-20260927T233442Z/`、`/opt/relay-station-backups/pre-v1.0.99-service-tier-20260928T000800Z/`；镜像标签配置同步备份 `/opt/relay-station-backups/pre-v1.0.99-env-sync-20260928T163009Z/`。本轮未新增真实付费请求；如需新价格收费验收，须另行确认金额/预算。
+
 ## 用户偏好与维护约定
 
 - 已授权范围内直接执行、验证并完成，不反复要求部署授权或恢复 SSH。遇到具体阻碍说明证据和原因。

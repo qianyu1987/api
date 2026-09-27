@@ -262,6 +262,17 @@
 - 发布与回滚：发布前备份 `/opt/relay-station-backups/pre-v1.0.96-night-gpt6sol-20260927T110057Z` 约 381 MB，目录 0700；PostgreSQL custom dump、配置/密钥归档和源码归档均验证可读，旧 `relay-station:v1.0.95` 镜像保留。v1.0.96 先完成业务验证，随后以相同备份边界发布 v1.0.97；migration 成功，未覆盖 `.env` 或 `secrets/`。
 - 生产验收：两个 API 副本均为 `relay-station:v1.0.97` / package 1.0.97 且 healthy；Gateway、PostgreSQL、Redis healthy，`relay-station-worker.timer` enabled/active。`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 和 `https://www.hhtc.top/` 均为 200；首页加载 `styles.css?v=1.0.97` 和 `app.js?v=1.0.97`。登录态总览可见 Sol 6 价格和深夜卡片，后台可见深夜折扣输入/开关及安全上限。
 
+## GPT-6 Sol Standard/272K+ 分层价格与服务档保护：v1.0.98/v1.0.99（2026-09-28 CST）
+
+- 用户确认采用其提供的 Standard 与 272K+ 成本证据。生产前备份 `/opt/relay-station-backups/pre-v1.0.98-gpt6sol-tiered-20260927T233442Z/`、`/opt/relay-station-backups/pre-v1.0.99-service-tier-20260928T000800Z/` 已保留；数据库、配置归档和旧镜像均未覆盖。
+- `v1.0.98` migration 增加/校验分层成本、cache-write 字段与计费快照；`gpt-6-sol` 的模型价格保留 Standard 基准 `input=2000000/output=10000000/cache-read=200000` 微元/百万 Token，并有 `thresholdTokens=272001` 的 272K+ 档：成本 `4000000/15000000/400000`，cache-write 成本 `5000000`；对应售价 `33333334/125000000/3333334`，cache-write 售价 `41666667` 微元/百万 Token（约 ¥33.333334/¥125/¥3.333334/¥41.666667）。
+- 7 个启用 GPT 渠道均有 `gpt-6-sol` 运行映射、带来源成本和分层成本；7/7 的倍率复核为输入 `2.0x`、输出 `1.5x`、cache-read/cache-write `2.0x`。本次写入 7 条渠道成本审计和 1 条模型价格审计，最近两小时审计记录共 8 条。
+- 生产账务参数仍为最低毛利 `30%`、返利 `10%`、支付费 `0%`；本次没有把全站护栏改为 50%，也没有把一次优惠账单当作长期标准成本。其他模型仍存在缺少有来源渠道成本的路由，不能宣称全站价格或全站利润已重算。
+- `v1.0.99` 增加 `gpt-6-sol` 未计价服务档保护：请求体 `service_tier=fast/priority` 及 `service-tier`、`x-service-tier` 等未计价请求头均在路由/结算前拒绝（HTTP 422），不访问上游、不产生账务。Fast/priority 尚未开放，需先补齐独立成本与售价并完成验证。
+- 本地验证：25 个测试文件、291 项测试通过；TypeScript 检查、构建、前端语法检查和 `git diff --check` 通过。提交 `1e88b6d`（`v1.0.98`）和 `da6264c`（`v1.0.99`）已推送 `origin/main`，工作树干净。
+- 生产部署已核验：两个 API 副本均为 `relay-station:v1.0.99` 且 healthy；Gateway、PostgreSQL、Redis healthy，`relay-station-worker.timer` enabled/active。`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 均 200，`www.hhtc.top` 加载 `styles.css?v=1.0.99`、`app.js?v=1.0.99`。服务器 `.env` 的镜像标签曾滞后为 v1.0.97，已先备份并同步为 `RELAY_IMAGE_TAG=v1.0.99`，备份目录为 `/opt/relay-station-backups/pre-v1.0.99-env-sync-20260928T163009Z/`，未重启服务。
+- 本轮没有发起新的真实付费 `gpt-6-sol` 请求；此前 v1.0.97 的单次 200/结算证据仍属于旧分层发布前测试，不能冒充本次新价格的付费验收。新价格目前有数据库/审计/非计费接口验证，若要再次做收费验收需单独确认测试金额或预算。
+
 ## 更新模板
 
 新增记录应包含：日期/时区、用户目标与授权范围、实际原因、修改和提交、测试结果、是否推送、是否部署、两副本版本、备份/回滚位置、线上验证范围和未解决事项。只记非敏感证据。
