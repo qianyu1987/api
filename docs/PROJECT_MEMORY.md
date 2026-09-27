@@ -81,6 +81,7 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 
 ## 最近上游运行事件
 
+- 2026-09-27 发布 `v1.0.95`：个人中心总览新增 Astra/Sol/Terra/Luna 的月卡 1:4、普通钱包 1:3、企业钱包 1:5 价格对比及北京时间当日调用/真实扣费；企业充值固定最低 ¥498、按 1:5 到账，倍率由服务端和订单快照决定；所有注册用户可保存独立站联系信息，管理员可只读查看线索。提交 `d51a708` 和标签已推送。生产备份 `/opt/relay-station-backups/pre-v1.0.95-enterprise-20260927T093754Z/` 已验证，迁移后 145 条历史订单均回填 `standard`，企业约束和线索表生效；两个 API 副本、Gateway、PostgreSQL、Redis 和维护 timer 正常。线上只创建一张 ¥498 的未付款企业订单验证 `¥498 -> ¥2490`，状态保持 pending、无支付时间和钱包到账，未发生真实支付。`/v1/models` 非计费核验 200 且四个目标模型仍在，四模型售价和真实路由未被本次发布修改。
 - 2026-09-27 只读复核四个公开 GPT 模型：四条 `model_prices` 均启用，Astra/Sol/Terra 在最近 24 小时分别有 214/493/16 次成功请求；Luna 只有 2 次简单 `/chat/completions` 成功，同时 305 次复杂 `/responses` 因 `no_compatible_upstream` 被拒。Luna 仍只有“超稳定备用”映射到 `agnes-3.0-flash`，不是原生 Luna，只能用于无工具、无附件、无多轮状态的简单文本。对 10 个候选渠道的非计费 `/models` 探测均返回 200 JSON；其中“优惠”的 Astra/Terra 与“best”的 Sol 映射目标已不在当前目录，属于待清理的过期映射，其他原生主路由仍有近期 200。多数原生渠道尚未补齐可审计渠道级成本，不得把模型级 CSV 价格当成所有渠道成本已配置。此次未修改生产配置、路由、价格或账务，也未发起新的付费生成。
 - 2026-09-25 发布 v1.0.92：修复 Luna 经 Agnes 备用处理 `/responses` 时上游生成 `stream=null` 的 400。现在平台先转换为 `/chat/completions`，仅转发合法布尔 `stream`，再将流式/非流式结果转换回标准 Responses。真实测试中 Terra 与 Luna 的非流式/流式请求均 200、返回 `OK`；Luna 初始失败账单为 0，成功请求分别独立结算。备份 `pre-v1.0.92-agnes-responses-20260925`，两个 API 副本及依赖健康。
 - 2026-09-25 发布 v1.0.91：Terra 原生路由加入上游目录明确支持的 `稳定pro`、`高价稳定pro`，保留“优惠”及 Agnes 备用；Luna 没有原生上游，按公共低价档映射“超稳定备用”的 `agnes-3.0-flash`，且仅允许简单文本兼容降级。Terra/Luna 的 Agnes 渠道成本已按同一上游成本补齐，模型目录同时列出 Sol/Terra/Luna，两个 API 副本及依赖健康。发布前备份 `pre-v1.0.91-terra-luna-20260925`；未做付费生成测试。

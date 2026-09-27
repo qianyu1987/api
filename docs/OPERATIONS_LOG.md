@@ -236,6 +236,16 @@
 - 在 API 容器内解密渠道 Key 后仅在内存中探测 10 个候选上游 `/models`；全部返回 HTTP 200 JSON，未输出 Key 或完整响应。“高速pro”、`0.12/0.2/0.6/0.8`、稳定渠道及 Agnes 目录包含其当前有效映射目标；“优惠”目录不含当前仍配置的 Astra/Terra，“best”目录不含当前仍配置的 Sol，属于过期映射。主路由仍有同期真实 200，因此不是四模型全部中断。
 - Astra/Sol/Terra 原生路径可用；Luna 仅部分可用，不能宣称四模型能力完全相同。多数原生启用映射仍缺少带来源的渠道级成本，模型级 CSV 售价启用不等于所有上游成本已补齐。本轮只读诊断，未改生产配置、路由、价格或账务，未发起新的付费请求。
 
+## v1.0.95 个人价格对比与企业充值发布：2026-09-27 CST
+
+- 用户授权实施并发布个人中心价格对比与企业充值方案。代码增加北京时间今日调用/真实扣费、四模型月卡 1:4 与普通钱包 1:3 对照、独立企业 1:5 价格表；企业充值最低 ¥498、固定 1:5，客户端不能覆盖倍率，订单保存 `topup_offer_code` 与倍率快照；企业充值继续复用原钱包、支付回调、补账和 10% 返利幂等链路。所有注册用户可保存独立站联系信息，管理员有独立只读线索列表。
+- 发布提交 `d51a708`、标签 `v1.0.95` 已推送 `origin/main`。本地 24 个测试文件/257 项测试、typecheck、build、前端语法和 diff-check 通过；企业回调测试覆盖 ¥498 到账 ¥2490、重复回调不重复到账/返利。桌面 1440px 与手机 390px 截图位于 `/Volumes/brainos/CodexMedia/generated/relay-enterprise-v1-0-95/`，无页面横向溢出或文字重叠；Impeccable 因本机缺 HTML 解析模块仅完成降级规则扫描，浏览器截图补充了实际布局验证。
+- 发布前暂停 `relay-station-worker.timer`，备份 `/opt/relay-station-backups/pre-v1.0.95-enterprise-20260927T093754Z/`：目录 0700，配置、源码归档、发布 archive 和 PostgreSQL custom dump 均 0600；`pg_restore -l` 与源码 tar 读取通过，旧 `relay-station:v1.0.94` 镜像保留。生产目录先由已提交的 Git archive 更新，未覆盖 `.env` 或 `secrets/`。
+- migration 成功：`orders.topup_offer_code` 为 NOT NULL/default standard，两项 CHECK 均已验证，`enterprise_site_leads`、索引与更新时间 trigger 存在；迁移时 145 条历史订单全部有方案快照且无倍率/金额违规。维护 worker 手动运行成功，timer 恢复 active/enabled。
+- 两个 API 副本均为 `relay-station:v1.0.95` / package 1.0.95 且 healthy，Gateway/PostgreSQL/Redis healthy；`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 均 200，`www.hhtc.top` 加载 `app.js?v=1.0.95`。登录态总览和企业充值页显示四模型价格、当日调用/扣费、`¥498 -> ¥2490`，用户线索 GET 和管理员线索列表均正常。
+- 生产验收只创建一张 ¥498 未付款企业订单：数据库快照为 multiplier 50000、offer enterprise、status pending，`paid_at` 与 `wallet_credit_micros` 均为空；未扫码、未付款、未到账、未发放返利。非计费 `/v1/models` 返回 200、共 9 个模型且包含 Astra/Sol/Terra/Luna；四模型精确售价与发布前一致，本次未修改渠道映射、真实模型路由或历史账单。
+- 后续边界：价格卡当前以 active 且三项非零的 `model_prices` 判断展示可用，未额外联查启用渠道；本次线上 `/v1/models` 已确认四模型存在，但未来若单独停用全部渠道，应同步改为复用模型目录可用性判断，避免价格与路由状态短时不一致。
+
 ## 更新模板
 
 新增记录应包含：日期/时区、用户目标与授权范围、实际原因、修改和提交、测试结果、是否推送、是否部署、两副本版本、备份/回滚位置、线上验证范围和未解决事项。只记非敏感证据。
