@@ -5,6 +5,8 @@ import {
   deserializePriceSnapshot,
   serializePriceSnapshot,
   nextShanghaiReset,
+  nextSubscriptionReset,
+  nextGrantCycle,
   calculatePrice,
   tierRates,
   type PriceSnapshot,
@@ -36,6 +38,17 @@ describe('billing invariants', () => {
   test('computes the next Monday 09:00 in Shanghai time', () => {
     expect(nextShanghaiReset(new Date('2026-08-31T00:30:00.000Z')).toISOString()).toBe('2026-08-31T01:00:00.000Z')
     expect(nextShanghaiReset(new Date('2026-08-31T01:00:00.000Z')).toISOString()).toBe('2026-09-07T01:00:00.000Z')
+  })
+  test('finite grant plans reset seven days after purchase while legacy plans keep Monday schedule', () => {
+    const purchase = new Date('2026-09-01T04:00:00.000Z')
+    expect(nextSubscriptionReset(purchase, true).toISOString()).toBe('2026-09-08T04:00:00.000Z')
+    expect(nextSubscriptionReset(purchase, false).toISOString()).toBe('2026-09-07T01:00:00.000Z')
+  })
+  test('manual grants preserve the purchase cadence and delayed workers skip stale cycles', () => {
+    const daySeven = new Date('2026-09-08T04:00:00.000Z')
+    expect(nextGrantCycle(daySeven, new Date('2026-09-09T04:00:00.000Z'), true).toISOString()).toBe('2026-09-15T04:00:00.000Z')
+    expect(nextGrantCycle(daySeven, new Date('2026-09-20T04:00:00.000Z'), true).toISOString()).toBe('2026-09-27T04:00:00.000Z')
+    expect(nextGrantCycle(daySeven, new Date('2026-09-09T04:00:00.000Z'), false).toISOString()).toBe('2026-09-14T01:00:00.000Z')
   })
   test('price snapshots are immutable string values that can be restored exactly', () => {
     const snapshot = serializePriceSnapshot({ ...price, pricingTiers: [{ thresholdTokens: 272001n, ...price }] }, {

@@ -47,7 +47,7 @@ from tuning must be reviewed before calling it an independent evaluation.
 No score from this script enables routing. Run HTTP boundary tests with the
 runtime Python: `python -m unittest discover -s tools/laya-shadow -p 'test_*.py'`.
 
-## Relay integration status (not deployed)
+## Relay integration status (observation enabled since 2026-09-26)
 
 `src/services/laya-shadow.ts` observes eligible requests after successful billing
 reservation. Its return value is never used for routing or settlement. It is
@@ -66,13 +66,20 @@ resource use. The normal API response does not wait for classification.
 returns counts only. Counts are process-local, reset on restart, and are **not**
 accuracy measurements or combined statistics across replicas.
 
-The switch stays off by default. Enabling it requires, in host `.env`:
-`LAYA_SHADOW_ENABLED=true`, the 32+ character `LAYA_SHADOW_TOKEN`, an explicit
-`LAYA_SHADOW_ADMIN_USER_ID` and `LAYA_SHADOW_SOCKET_PATH=/run/laya-shadow/classifier.sock`
-(the transport is chosen by the socket path; URL mode is still restricted to
-loopback). The actual sampling scope — which administrator API key to observe —
-remains an explicit user decision. There is no automatic routing mode in this
-implementation, and no evaluation score enables one.
+The switch is **enabled** on the host since 2026-09-26: host `.env` carries
+`LAYA_SHADOW_ENABLED=true`, `LAYA_SHADOW_SOCKET_PATH=/run/laya-shadow/classifier.sock`,
+the 43-character transport token and an explicit `LAYA_SHADOW_ADMIN_USER_ID`
+(the default administrator, owner of the "默认 Key"). Sampling scope is that
+single administrator's plain-text single-message requests; other users' text is
+never transmitted. The `.env` was backed up to
+`/opt/relay-station-backups/pre-laya-observe-20260925T232751Z/` before the change.
+There is still no automatic routing mode, and no evaluation score enables one.
+
+Since 2026-09-26 `server.py` also appends one JSON line per successful
+`/v1/classify` to `$RUNTIME/classifier-events.log` (0600, override with
+`LAYA_EVENTS_LOG`): timestamp, predicted `task_type`, `noul` value and latency.
+Prompt content is never logged. This is the Mac-side evidence stream for shadow
+observation (e.g. the 2026-09-26 end-to-end verification event).
 
 ## Local web observation console
 
@@ -100,6 +107,26 @@ Then open `http://127.0.0.1:19095`. The console adds its own model instance;
 if the supervisor's classifier (`:19091`) is running, both hold the model in
 memory. Observation only: it reads logs and manifest files, performs no SSH,
 and no prompt content is written to any log.
+
+## Agent triage helper (Codex and other agents)
+
+`dashboard/ask.py` (stdlib only) turns one task description into a compact JSON
+triage signal against the running console on `127.0.0.1:19095`:
+
+```bash
+RUNTIME=/Volumes/brainos/CodexMedia/generated/laya-mlx-shadow
+"$RUNTIME/.venv/bin/python" tools/laya-shadow/dashboard/ask.py "把这段视频剪成 15 秒竖屏"
+```
+
+Exit codes: 0 ok, 1 bad input/inference error, 2 console unreachable. The
+signal (`task_type`, top-2 probabilities, `needs_tools` noul verdict, latency)
+is an **observation hint for choosing a tool or model**; it is not routing
+authority, and current built-in/external evaluation accuracies (~40% task,
+~50% tools) mean it must not gate hard decisions. Equivalently, any agent may
+`POST` to `/api/classify` directly.
+
+A Codex skill wraps this for cross-repo use: `~/.codex/skills/laya-triage/SKILL.md`
+("先分诊一下" / "route this task" / "跑一下 laya").
 
 ## Ephemeral private transport probe
 

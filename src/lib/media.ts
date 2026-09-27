@@ -2,9 +2,9 @@ export const MEDIA_MODELS = { image: 'agnes-image-2.5-flash', video: 'agnes-vide
 export type MediaEngine = 'standard' | 'pro' | 'enhanced'
 export const mediaError = (message: string, statusCode = 400): never => { throw Object.assign(new Error(message), { statusCode }) }
 export const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b
-export function mediaPrice(cost: bigint, multiplierBps: number, feeBps: number, rebateBps: number) {
-  if (cost <= 0n || ![multiplierBps, feeBps, rebateBps].every(Number.isInteger) || multiplierBps < 10000 || multiplierBps > 100000 || feeBps < 0 || rebateBps < 0 || feeBps + rebateBps >= 7000) mediaError('成本或费用配置无效，暂不可生成', 503)
-  return ceilDiv(cost * BigInt(multiplierBps), BigInt(7000 - feeBps - rebateBps))
+export function mediaPrice(cost: bigint, multiplierBps: number, feeBps: number, rebateBps: number, marginBps = 3000) {
+  if (cost <= 0n || ![multiplierBps, feeBps, rebateBps, marginBps].every(Number.isInteger) || multiplierBps < 10000 || multiplierBps > 100000 || feeBps < 0 || rebateBps < 0 || marginBps < 0 || marginBps >= 10000 || 10000 - marginBps - feeBps - rebateBps <= 0) mediaError('成本或费用配置无效，暂不可生成', 503)
+  return ceilDiv(cost * BigInt(multiplierBps), BigInt(10000 - marginBps - feeBps - rebateBps))
 }
 export function validateMedia(body: any) {
   const requestedEngine = body?.engine === 'pro' ? 'pro' : body?.engine === 'enhanced' ? 'enhanced' : body?.engine === 'standard' || body?.engine == null ? 'standard' : null

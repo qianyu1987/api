@@ -37,7 +37,7 @@ from pathlib import Path
 
 RUNTIME = Path(os.environ.get('LAYA_RUNTIME', '/Volumes/brainos/CodexMedia/generated/laya-mlx-shadow'))
 REPO_TOOLS = Path(__file__).resolve().parent
-MODEL_PATH = RUNTIME / 'models' / 'laya-multilingual-mlx'
+MODEL_PATH = Path(os.environ.get('LAYA_MODEL_PATH') or str(RUNTIME / 'models' / 'laya-multilingual-mlx'))
 TOKEN_FILE = RUNTIME / 'transport-token'
 LOG_FILE = RUNTIME / 'transport.log'
 VENV_PYTHON = RUNTIME / '.venv' / 'bin' / 'python'

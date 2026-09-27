@@ -7,6 +7,7 @@ import argparse
 import hmac
 import json
 import os
+from pathlib import Path
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,20 @@ from typing import Any
 
 import laya_mlx as laya
 
+
+EVENTS_LOG = Path(os.environ.get("LAYA_EVENTS_LOG", "/Volumes/brainos/CodexMedia/generated/laya-mlx-shadow/classifier-events.log"))
+
+
+def log_event(entry: dict[str, Any]) -> None:
+    try:
+        exists = EVENTS_LOG.exists()
+        EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with EVENTS_LOG.open("a") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        if not exists:
+            EVENTS_LOG.chmod(0o600)
+    except OSError:
+        pass  # event logging must never break classification
 
 TASK_LABELS = {
     "回答问题、解释知识、翻译或撰写普通文本": "text",
@@ -133,10 +148,17 @@ class Handler(BaseHTTPRequestHandler):
             started = time.perf_counter()
             result = self.server.agent.predict(text, QUESTIONS)
             duration_ms = round((time.perf_counter() - started) * 1000, 1)
+            answers = compact_answers(result)
+            log_event({
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                "task_type": answers.get("task_type", {}).get("choice"),
+                "noul": answers.get("needs_tools", {}).get("value"),
+                "duration_ms": duration_ms,
+            })
             self.send_json(HTTPStatus.OK, {
                 "mode": "shadow",
                 "duration_ms": duration_ms,
-                "answers": compact_answers(result),
+                "answers": answers,
             })
         except Exception:
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "inference_failed"})

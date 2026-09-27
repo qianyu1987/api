@@ -242,6 +242,7 @@ CREATE TABLE IF NOT EXISTS plans (
   name TEXT NOT NULL,
   price_micros BIGINT NOT NULL,
   quota_micros BIGINT NOT NULL,
+  reset_grant_limit SMALLINT NOT NULL DEFAULT 1,
   duration_days SMALLINT NOT NULL DEFAULT 30,
   active BOOLEAN NOT NULL DEFAULT TRUE,
   enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -252,6 +253,7 @@ CREATE TABLE IF NOT EXISTS plans (
   CHECK (char_length(trim(name)) BETWEEN 1 AND 128),
   CHECK (price_micros > 0),
   CHECK (quota_micros > 0),
+  CHECK (reset_grant_limit BETWEEN 1 AND 52),
   CHECK (duration_days = 30)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS plans_code_ci_unique ON plans (lower(code));
@@ -269,6 +271,9 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   expires_at TIMESTAMPTZ,
   last_purchase_at TIMESTAMPTZ,
   reset_quota_micros BIGINT NOT NULL DEFAULT 0,
+  -- NULL preserves legacy subscriptions' existing weekly-reset behavior.
+  reset_grant_limit SMALLINT,
+  reset_grant_count SMALLINT NOT NULL DEFAULT 0,
   reset_timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
   next_reset_at TIMESTAMPTZ,
   last_reset_at TIMESTAMPTZ,
@@ -280,6 +285,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   CHECK (remaining_micros >= 0),
   CHECK (reserved_micros >= 0),
   CHECK (reset_quota_micros >= 0),
+  CHECK (reset_grant_limit IS NULL OR reset_grant_limit BETWEEN 1 AND 52),
+  CHECK (reset_grant_count >= 0 AND (reset_grant_limit IS NULL OR reset_grant_count <= reset_grant_limit)),
   CHECK (reset_version >= 0),
   CONSTRAINT subscriptions_reserved_within_remaining CHECK (reserved_micros <= remaining_micros),
   CHECK (status IN ('active', 'expired', 'canceled')),
@@ -428,6 +435,7 @@ CREATE TABLE IF NOT EXISTS orders (
   plan_name_snapshot TEXT,
   plan_quota_micros BIGINT,
   plan_duration_days SMALLINT,
+  plan_reset_grant_limit SMALLINT,
   amount_micros BIGINT NOT NULL,
   -- Immutable promotion terms for wallet top-ups. Existing rows default to
   -- 1:1; new rows snapshot the configured multiplier when created.
@@ -462,6 +470,7 @@ CREATE TABLE IF NOT EXISTS orders (
   CHECK ((kind IN ('subscription', 'subscription_purchase')) = (plan_id IS NOT NULL)),
   CHECK (plan_quota_micros IS NULL OR plan_quota_micros > 0),
   CHECK (plan_duration_days IS NULL OR plan_duration_days = 30),
+  CHECK (plan_reset_grant_limit IS NULL OR plan_reset_grant_limit BETWEEN 1 AND 52),
   CHECK (paid_at IS NULL OR status = 'paid')
 );
 CREATE UNIQUE INDEX IF NOT EXISTS orders_order_no_unique ON orders (order_no);
@@ -496,11 +505,13 @@ CREATE TABLE IF NOT EXISTS subscription_purchases (
   plan_id UUID NOT NULL REFERENCES plans(id) ON DELETE RESTRICT,
   plan_name_snapshot TEXT NOT NULL,
   quota_added_micros BIGINT NOT NULL,
+  reset_grant_limit SMALLINT NOT NULL DEFAULT 1,
   amount_paid_micros BIGINT NOT NULL,
   starts_at TIMESTAMPTZ NOT NULL,
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (quota_added_micros > 0 AND amount_paid_micros > 0),
+  CHECK (reset_grant_limit BETWEEN 1 AND 52),
   CHECK (expires_at > starts_at)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS subscription_purchases_order_unique ON subscription_purchases (order_id);
@@ -696,9 +707,11 @@ CREATE TABLE IF NOT EXISTS subscription_reset_events (
   before_remaining_micros BIGINT NOT NULL,
   after_remaining_micros BIGINT NOT NULL,
   quota_cap_micros BIGINT NOT NULL,
+  grant_number INTEGER,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK (reset_kind IN ('automatic', 'manual', 'migration')),
-  CHECK (before_remaining_micros >= 0 AND after_remaining_micros >= 0 AND quota_cap_micros > 0)
+  CHECK (before_remaining_micros >= 0 AND after_remaining_micros >= 0 AND quota_cap_micros > 0),
+  CHECK (grant_number IS NULL OR grant_number > 0)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS subscription_reset_events_key_unique
   ON subscription_reset_events(subscription_id, reset_key);
@@ -768,7 +781,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
 
 -- Platform profit guardrails and auditable configuration changes.
 INSERT INTO app_settings(key, setting_key, value, value_json)
-VALUES ('profit_min_margin_bps', 'profit.min_margin_bps', '3000', to_jsonb('3000'::text))
+VALUES ('profit_min_margin_bps', 'profit.min_margin_bps', '5000', to_jsonb('5000'::text))
 ON CONFLICT (key) DO NOTHING;
 INSERT INTO app_settings(key, setting_key, value, value_json)
 VALUES ('payment_fee_rate_bps', 'profit.payment_fee_rate_bps', '0', to_jsonb('0'::text))
@@ -940,11 +953,29 @@ ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reset_timezone TEXT NOT NULL 
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS next_reset_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS last_reset_at TIMESTAMPTZ;
 ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reset_version BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE plans ADD COLUMN IF NOT EXISTS reset_grant_limit SMALLINT NOT NULL DEFAULT 1;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_reset_grant_limit SMALLINT;
+ALTER TABLE subscription_purchases ADD COLUMN IF NOT EXISTS reset_grant_limit SMALLINT NOT NULL DEFAULT 1;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reset_grant_limit SMALLINT;
+ALTER TABLE subscriptions ADD COLUMN IF NOT EXISTS reset_grant_count SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE subscription_reset_events ADD COLUMN IF NOT EXISTS grant_number INTEGER;
+ALTER TABLE plans DROP CONSTRAINT IF EXISTS plans_reset_grant_limit_check;
+ALTER TABLE plans ADD CONSTRAINT plans_reset_grant_limit_check CHECK (reset_grant_limit BETWEEN 1 AND 52);
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_plan_reset_grant_limit_check;
+ALTER TABLE orders ADD CONSTRAINT orders_plan_reset_grant_limit_check CHECK (plan_reset_grant_limit IS NULL OR plan_reset_grant_limit BETWEEN 1 AND 52);
+ALTER TABLE subscription_purchases DROP CONSTRAINT IF EXISTS subscription_purchases_reset_grant_limit_check;
+ALTER TABLE subscription_purchases ADD CONSTRAINT subscription_purchases_reset_grant_limit_check CHECK (reset_grant_limit BETWEEN 1 AND 52);
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_reset_grant_limit_check;
+ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_reset_grant_limit_check CHECK (reset_grant_limit IS NULL OR reset_grant_limit BETWEEN 1 AND 52);
+ALTER TABLE subscriptions DROP CONSTRAINT IF EXISTS subscriptions_reset_grant_count_check;
+ALTER TABLE subscriptions ADD CONSTRAINT subscriptions_reset_grant_count_check CHECK (reset_grant_count >= 0 AND (reset_grant_limit IS NULL OR reset_grant_count <= reset_grant_limit));
+ALTER TABLE subscription_reset_events DROP CONSTRAINT IF EXISTS subscription_reset_events_grant_number_check;
+ALTER TABLE subscription_reset_events ADD CONSTRAINT subscription_reset_events_grant_number_check CHECK (grant_number IS NULL OR grant_number > 0);
 CREATE INDEX IF NOT EXISTS subscriptions_reset_due_idx ON subscriptions (status, next_reset_at, expires_at);
--- The v1.0.13 monthly plan uses a ¥149 weekly-reset quota. Existing plans
--- keep their identity while their mutable configuration is upgraded in place.
+-- The monthly-149 plan grants ¥149 immediately and three more weekly grants.
+-- Existing subscriptions retain their nullable legacy reset limit.
 UPDATE plans
-SET price_micros = 149000000, quota_micros = 149000000, duration_days = 30,
+SET price_micros = 149000000, quota_micros = 149000000, reset_grant_limit = 4, duration_days = 30,
     active = TRUE, enabled = TRUE, updated_at = now()
 WHERE lower(code) = lower('monthly-149');
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS api_key_id UUID REFERENCES api_keys(id) ON DELETE SET NULL;
@@ -1101,8 +1132,8 @@ UPDATE media_tasks
 SET uncertain_since=now(),next_poll_at=LEAST(next_poll_at,now())
 WHERE status='unknown' AND uncertain_since IS NULL;
 DROP INDEX IF EXISTS media_tasks_pending_idx;
-CREATE INDEX media_tasks_queue_idx ON media_tasks(next_attempt_at,created_at,id) WHERE status='queued';
-CREATE INDEX media_tasks_pending_idx ON media_tasks(next_poll_at,created_at,id) WHERE status IN ('submitting','processing','unknown');
+CREATE INDEX IF NOT EXISTS media_tasks_queue_idx ON media_tasks(next_attempt_at,created_at,id) WHERE status='queued';
+CREATE INDEX IF NOT EXISTS media_tasks_pending_idx ON media_tasks(next_poll_at,created_at,id) WHERE status IN ('submitting','processing','unknown');
 UPDATE media_tasks
 SET user_input = jsonb_strip_nulls(jsonb_build_object(
   'kind', kind,

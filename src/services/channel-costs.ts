@@ -1,5 +1,6 @@
-import { Database, one } from '../db/index.js'
+import { Database, one, query } from '../db/index.js'
 import { yuanToMicros } from '../lib/money.js'
+import { buildPricingPreview, type PricingPreview, type PricingRules } from './pricing.js'
 
 const invalid = (message: string, statusCode = 400): never => { throw Object.assign(new Error(message), { statusCode }) }
 const uuid = (value: unknown) => {
@@ -10,6 +11,17 @@ const uuid = (value: unknown) => {
 
 export class ChannelCostService {
   constructor(private readonly db: Database) {}
+
+  private async previewWith(client: Database | any, rules: PricingRules): Promise<PricingPreview> {
+    const [channels, prices, costs] = await Promise.all([
+      query<any>(client, `SELECT c.id,c.name,c.priority,c.enabled,c.deleted_at,c.model_map,m.requested_model
+        FROM channels c LEFT JOIN channel_model_mappings m ON m.channel_id=c.id AND m.enabled=true
+        WHERE c.deleted_at IS NULL AND c.enabled=true ORDER BY c.priority,c.name,c.id`),
+      query<any>(client, `SELECT * FROM model_prices WHERE active=true ORDER BY model_pattern`),
+      query<any>(client, `SELECT * FROM channel_model_costs WHERE price_effective_at IS NULL OR price_effective_at <= now()`),
+    ])
+    return buildPricingPreview({ channels, prices, costs, rules })
+  }
 
   async list() {
     const [items, channels, audits] = await Promise.all([
@@ -60,6 +72,48 @@ export class ChannelCostService {
       await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value)
         VALUES($1,'channel_model_cost',$2,$3,$4)`, [actorId, `${channelId}:${model}`, before ? JSON.stringify(before) : null, JSON.stringify(after)])
       return after
+    })
+  }
+
+  async pricingPreview(rules: PricingRules): Promise<PricingPreview> {
+    return this.previewWith(this.db, rules)
+  }
+
+  async publishPricing(rules: PricingRules, actorId: string): Promise<PricingPreview & { publishedAt: string }> {
+    return this.db.tx(async (client) => {
+      await client.query('LOCK TABLE channels, channel_model_mappings, channel_model_costs, model_prices, app_settings IN SHARE ROW EXCLUSIVE MODE')
+      const preview = await this.previewWith(client, rules)
+      if (!preview.ready) {
+        throw Object.assign(new Error('渠道成本不完整，未发布任何价格；请先补齐预览中的缺失项'), { statusCode: 409, pricingPreview: preview })
+      }
+      const publishedAt = new Date()
+      for (const item of preview.models) {
+        const source = `channel-cost-preview ${publishedAt.toISOString()} · ${item.sources.join('；')}`.slice(0, 512)
+        const before = await one<any>(client, 'SELECT * FROM model_prices WHERE model_pattern=$1 FOR UPDATE', [item.model])
+        const after = await one<any>(client, `INSERT INTO model_prices(
+          model_pattern,input_cost_micros,output_cost_micros,cache_cost_micros,
+          input_sell_micros,output_sell_micros,cache_sell_micros,fixed_cost_micros,fixed_sell_micros,active,
+          input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,
+          input_sell_micros_per_million,output_sell_micros_per_million,cache_sell_micros_per_million,
+          price_source,price_effective_at,pricing_tiers)
+          VALUES($1,$2,$3,$4,$5,$6,$7,0,0,true,$2,$3,$4,$5,$6,$7,$8,$9,NULL)
+          ON CONFLICT(model_pattern) DO UPDATE SET
+            input_cost_micros=excluded.input_cost_micros,output_cost_micros=excluded.output_cost_micros,cache_cost_micros=excluded.cache_cost_micros,
+            input_sell_micros=excluded.input_sell_micros,output_sell_micros=excluded.output_sell_micros,cache_sell_micros=excluded.cache_sell_micros,
+            input_cost_micros_per_million=excluded.input_cost_micros_per_million,output_cost_micros_per_million=excluded.output_cost_micros_per_million,cache_cost_micros_per_million=excluded.cache_cost_micros_per_million,
+            input_sell_micros_per_million=excluded.input_sell_micros_per_million,output_sell_micros_per_million=excluded.output_sell_micros_per_million,cache_sell_micros_per_million=excluded.cache_sell_micros_per_million,
+            price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,pricing_tiers=NULL,active=true,updated_at=now()
+          RETURNING *`, [item.model, item.inputCostMicrosPerMillion, item.outputCostMicrosPerMillion, item.cacheCostMicrosPerMillion, item.inputSellMicrosPerMillion, item.outputSellMicrosPerMillion, item.cacheSellMicrosPerMillion, source, publishedAt])
+        await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value)
+          VALUES($1,'model_price',$2,$3,$4)`, [actorId, item.model, before ? JSON.stringify(before) : null, JSON.stringify(after)])
+      }
+      const beforeRules = await one<any>(client, `SELECT key,value FROM app_settings WHERE key IN ('profit_min_margin_bps','payment_fee_rate_bps','affiliate_rate_bps') ORDER BY key`)
+      await client.query(`INSERT INTO app_settings(key,setting_key,value,value_json,updated_by_user_id)
+        VALUES('profit_min_margin_bps','profit.min_margin_bps',$1,to_jsonb($1::text),$2)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value,value_json=excluded.value_json,updated_by_user_id=excluded.updated_by_user_id,updated_at=now()`, [String(rules.minimumMarginBps), actorId])
+      await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value)
+        VALUES($1,'profit_settings','global',$2,$3)`, [actorId, JSON.stringify(beforeRules || {}), JSON.stringify({ ...rules, publishedAt: publishedAt.toISOString() })])
+      return { ...preview, publishedAt: publishedAt.toISOString() }
     })
   }
 }

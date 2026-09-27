@@ -3,7 +3,7 @@ import type { AppConfig } from '../config.js'
 import { Database, one } from '../db/index.js'
 import { MICROS_PER_CENT } from '../lib/money.js'
 import { AffiliateService } from './affiliate.js'
-import { nextShanghaiReset } from './billing.js'
+import { nextSubscriptionReset } from './billing.js'
 
 export type PaymentMethod = 'wechat' | 'alipay'
 
@@ -45,6 +45,7 @@ export type CreatedOrder = {
   amountMicros: bigint
   walletCreditMicros: bigint | null
   topupMultiplierBps: number
+  planResetGrantLimit: number | null
   paymentMethod: PaymentMethod
   planId: string | null
   expiresAt: Date
@@ -222,19 +223,21 @@ export class OrderService {
     let planNameSnapshot: string | null = null
     let planQuotaSnapshot: bigint | null = null
     let planDurationSnapshot: number | null = null
+    let planResetGrantLimitSnapshot: number | null = null
     let amount = input.amountMicros || 0n
     const configuredTopupMultiplier = Number(this.config.walletTopupMultiplierBps ?? 30000)
     if (!Number.isInteger(configuredTopupMultiplier) || configuredTopupMultiplier < 10000 || configuredTopupMultiplier > 100000) throw new Error('充值倍率配置无效')
     const topupMultiplierBps = input.kind === 'wallet_topup' ? configuredTopupMultiplier : 10000
     if (input.kind === 'subscription') {
       if (!planId) throw new Error('请选择套餐')
-      const plan = await this.db.one<any>('SELECT id, name, price_micros, quota_micros, duration_days, active, enabled FROM plans WHERE id = $1', [planId])
+      const plan = await this.db.one<any>('SELECT id, name, price_micros, quota_micros, reset_grant_limit, duration_days, active, enabled FROM plans WHERE id = $1', [planId])
       if (!plan || !plan.active || !plan.enabled) throw new Error('套餐不可购买')
       amount = bigintValue(plan.price_micros)
       planNameSnapshot = String(plan.name || '').trim().slice(0, 128) || '套餐'
       planQuotaSnapshot = bigintValue(plan.quota_micros)
       planDurationSnapshot = Number(plan.duration_days)
-      if (planQuotaSnapshot <= 0n || planDurationSnapshot !== 30) throw new Error('套餐配置无效')
+      planResetGrantLimitSnapshot = Number(plan.reset_grant_limit)
+      if (planQuotaSnapshot <= 0n || planDurationSnapshot !== 30 || !Number.isInteger(planResetGrantLimitSnapshot) || planResetGrantLimitSnapshot < 1 || planResetGrantLimitSnapshot > 52) throw new Error('套餐配置无效')
     }
     if (amount <= 0n) throw new Error('金额必须大于 0')
     if (amount % MICROS_PER_CENT !== 0n) throw new Error('支付金额必须精确到分')
@@ -242,16 +245,16 @@ export class OrderService {
     const row = await this.db.one<any>(
       `INSERT INTO orders(
          order_no, user_id, kind, order_type, amount_micros, plan_id,
-         plan_name_snapshot, plan_quota_micros, plan_duration_days,
+         plan_name_snapshot, plan_quota_micros, plan_duration_days, plan_reset_grant_limit,
          topup_multiplier_bps, payment_method, payment_provider, expires_at
-       ) VALUES ($1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ) VALUES ($1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING id, order_no, kind, amount_micros, topup_multiplier_bps, plan_id, payment_method, expires_at`,
-      [no, userId, input.kind, amount.toString(), planId, planNameSnapshot, planQuotaSnapshot?.toString() || null, planDurationSnapshot, topupMultiplierBps, input.paymentMethod, paymentProvider(input.paymentMethod), expiresAt],
+      [no, userId, input.kind, amount.toString(), planId, planNameSnapshot, planQuotaSnapshot?.toString() || null, planDurationSnapshot, planResetGrantLimitSnapshot, topupMultiplierBps, input.paymentMethod, paymentProvider(input.paymentMethod), expiresAt],
     )
     if (!row) throw new Error('创建订单失败')
     const orderAmount = bigintValue(row.amount_micros)
     const storedMultiplier = Number(row.topup_multiplier_bps ?? topupMultiplierBps)
-    return { id: String(row.id), orderNo: String(row.order_no), kind: row.kind, amountMicros: orderAmount, walletCreditMicros: row.kind === 'wallet_topup' ? topupCreditAmount(orderAmount, storedMultiplier) : null, topupMultiplierBps: storedMultiplier, paymentMethod: row.payment_method, planId: row.plan_id ? String(row.plan_id) : null, expiresAt: new Date(row.expires_at) }
+    return { id: String(row.id), orderNo: String(row.order_no), kind: row.kind, amountMicros: orderAmount, walletCreditMicros: row.kind === 'wallet_topup' ? topupCreditAmount(orderAmount, storedMultiplier) : null, topupMultiplierBps: storedMultiplier, planResetGrantLimit: row.plan_reset_grant_limit == null ? null : Number(row.plan_reset_grant_limit), paymentMethod: row.payment_method, planId: row.plan_id ? String(row.plan_id) : null, expiresAt: new Date(row.expires_at) }
   }
 
   async attachNativePayment(orderId: string, payment: { providerOrderId: string | null; codeUrl: string }): Promise<void> {
@@ -652,7 +655,8 @@ export class OrderService {
     const planName = cleanMetadataText(order.plan_name_snapshot, 128)
     const quota = bigintValue(order.plan_quota_micros)
     const durationDays = Number(order.plan_duration_days)
-    if (!planName || quota <= 0n || durationDays !== 30) throw new Error('订单缺少有效套餐快照，请人工核查')
+    const grantLimit = Number(order.plan_reset_grant_limit ?? 1)
+    if (!planName || quota <= 0n || durationDays !== 30 || !Number.isInteger(grantLimit) || grantLimit < 1 || grantLimit > 52) throw new Error('订单缺少有效套餐快照，请人工核查')
 
     const existing = await one<any>(client,
       `SELECT * FROM subscriptions WHERE user_id = $1 FOR UPDATE`,
@@ -674,22 +678,22 @@ export class OrderService {
         await client.query(
           `UPDATE subscriptions
          SET plan_id = $1, current_plan_id = $1, remaining_micros = $2,
-             reset_quota_micros = $6, reset_timezone = 'Asia/Shanghai',
+             reset_quota_micros = $6, reset_grant_limit = $8, reset_grant_count = 1, reset_timezone = 'Asia/Shanghai',
              next_reset_at = $7, last_reset_at = NULL,
              status = 'active', started_at = $3, expires_at = $4,
              last_purchase_at = $3, version = version + 1, updated_at = now()
          WHERE user_id = $5`,
-        [plan.id, remaining.toString(), startsAt, expiresAt, order.user_id, quota.toString(), nextShanghaiReset(startsAt)],
+        [plan.id, remaining.toString(), startsAt, expiresAt, order.user_id, quota.toString(), nextSubscriptionReset(startsAt, grantLimit > 1), grantLimit],
       )
     } else {
       const sub = await one<any>(client,
         `INSERT INTO subscriptions(
          user_id, plan_id, current_plan_id, remaining_micros, status,
            started_at, expires_at, last_purchase_at, reset_quota_micros,
-           reset_timezone, next_reset_at
-         ) VALUES ($1, $2, $2, $3, 'active', $4, $5, $4, $6, 'Asia/Shanghai', $7)
+           reset_grant_limit, reset_grant_count, reset_timezone, next_reset_at
+         ) VALUES ($1, $2, $2, $3, 'active', $4, $5, $4, $6, $7, 1, 'Asia/Shanghai', $8)
          RETURNING id`,
-        [order.user_id, plan.id, quota.toString(), startsAt, expiresAt, quota.toString(), nextShanghaiReset(startsAt)],
+        [order.user_id, plan.id, quota.toString(), startsAt, expiresAt, quota.toString(), grantLimit, nextSubscriptionReset(startsAt, grantLimit > 1)],
       )
       if (!sub?.id) throw new Error('创建套餐余额失败')
       subscriptionId = String(sub.id)
@@ -698,9 +702,9 @@ export class OrderService {
     await client.query(
       `INSERT INTO subscription_purchases(
          subscription_id, order_id, plan_id, plan_name_snapshot,
-         quota_added_micros, amount_paid_micros, starts_at, expires_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [subscriptionId, order.id, plan.id, planName, quota.toString(), paidAmountMicros.toString(), startsAt, expiresAt],
+         quota_added_micros, amount_paid_micros, starts_at, expires_at, reset_grant_limit
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+      [subscriptionId, order.id, plan.id, planName, quota.toString(), paidAmountMicros.toString(), startsAt, expiresAt, grantLimit],
     )
     await client.query(
       `INSERT INTO subscription_ledger(
@@ -712,7 +716,7 @@ export class OrderService {
         order.user_id,
         quota.toString(),
         order.id,
-        JSON.stringify({ planName, expiresAt: expiresAt.toISOString() }),
+        JSON.stringify({ planName, expiresAt: expiresAt.toISOString(), resetGrantLimit: grantLimit, resetGrantCount: 1 }),
       ],
     )
   }

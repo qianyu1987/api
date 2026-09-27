@@ -1,10 +1,11 @@
 import { Database, type DbClient } from '../db/index.js'
+import { requiredWalletSell } from './pricing.js'
 
 export function effectiveDiscountBps(personal: number, global: number): number {
   return Math.max(personal, global)
 }
 
-export type ProfitRules = { minimumMarginBps: number; paymentFeeRateBps: number; affiliateRateBps: number; globalDiscountBps: number }
+export type ProfitRules = { minimumMarginBps: number; paymentFeeRateBps: number; affiliateRateBps: number; globalDiscountBps: number; walletTopupMultiplierBps: number }
 
 function bps(value: unknown, fallback: number, max = 10000): number {
   const number = Number(value ?? fallback)
@@ -12,12 +13,13 @@ function bps(value: unknown, fallback: number, max = 10000): number {
   return number
 }
 
-export function profitRules(settings: Record<string, string>): ProfitRules {
+export function profitRules(settings: Record<string, string>, walletTopupMultiplierBps = 10000): ProfitRules {
   return {
-    minimumMarginBps: bps(settings.profit_min_margin_bps, 3000, 9999),
+    minimumMarginBps: bps(settings.profit_min_margin_bps, 5000, 9999),
     paymentFeeRateBps: bps(settings.payment_fee_rate_bps, 0),
     affiliateRateBps: settings.affiliate_enabled === 'false' ? 0 : bps(settings.affiliate_rate_bps, 1000),
     globalDiscountBps: bps(settings.global_token_discount_bps, 0, 9900),
+    walletTopupMultiplierBps,
   }
 }
 
@@ -30,7 +32,7 @@ export function discountLimit(rows: any[], rules: ProfitRules) {
       const rawCost = tier[part + 'CostMicrosPerMillion']; const rawSell = tier[part + 'SellMicrosPerMillion']
       const valid = /^\d+$/.test(String(rawCost)) && /^\d+$/.test(String(rawSell))
       const cost = valid ? BigInt(rawCost) : 0n; const sell = valid ? BigInt(rawSell) : 0n
-      const required = retainedBps > 0n ? (cost * 10000n + retainedBps - 1n) / retainedBps : null
+      const required = retainedBps > 0n ? requiredWalletSell(cost, rules) : null
       let reason: string | null = !valid ? '成本或售价缺失' : retainedBps <= 0n ? '利润与费用比例合计达到 100%' : sell === 0n ? '售价为零' : required! > sell ? '原价已低于利润线' : null
       // Round the required sale UP, matching billing's discounted-rate floor.
       const maxDiscountBps = reason ? 0 : Math.min(9900, Number((sell - required!) * 10000n / sell))
@@ -48,12 +50,12 @@ export function assertDiscount(rows: any[], rules: ProfitRules, discount = rules
 }
 
 export class ProfitService {
-  constructor(private readonly db: Database) {}
+  constructor(private readonly db: Database, private readonly walletTopupMultiplierBps = 30000) {}
 
   async overview(client?: DbClient) {
     const read = async (sql: string) => client ? (await client.query(sql)).rows : this.db.query<any>(sql)
     const settings = Object.fromEntries((await read('SELECT key,value FROM app_settings')).map((row) => [row.key, row.value]))
-    const rules = profitRules(settings)
+    const rules = profitRules(settings, this.walletTopupMultiplierBps)
     const limit = discountLimit(await read('SELECT * FROM model_prices WHERE active'), rules)
     const users = await read('SELECT token_discount_bps FROM users')
     return { ...rules, ...limit, personalDiscountRiskCount: users.filter((user) => Number(user.token_discount_bps) > limit.maxDiscountBps).length }

@@ -164,6 +164,7 @@ describe('wallet media settlement',()=>{
  });const s=new MediaService({tx:async(fn:any)=>fn({query})} as any,{} as any)
  await s.finish('task',success,success?'https://example.com/result':null,null);await s.finish('task',success,null,null)
  expect(wallet.balance_micros).toBe(success?'50':'100');expect(wallet.reserved_micros).toBe('0');expect(ledgers).toHaveLength(1);expect(ledgers[0][1]).toBe(success?'usage_settle':'usage_release')
+ expect(query.mock.calls.some(([sql])=>sql.includes('next_attempt_at=NULL'))).toBe(false)
  expect(query.mock.calls.some(([sql])=>sql.includes('subscription'))).toBe(false)
  })
 })

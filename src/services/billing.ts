@@ -78,6 +78,8 @@ export type BalanceView = {
   planReservedMicros: bigint
   planUsedMicros: bigint
   planQuotaMicros: bigint
+  planGrantLimit: number | null
+  planGrantCount: number
   planExpiresAt: string | null
   planNextResetAt: string | null
   planLastResetAt: string | null
@@ -93,6 +95,7 @@ export type SubscriptionResetResult = {
   beforeRemainingMicros: bigint
   afterRemainingMicros: bigint
   quotaCapMicros: bigint
+  grantNumber: number | null
   resetAt: string | null
   nextResetAt: string | null
 }
@@ -162,6 +165,7 @@ function nonNegative(value: bigint): bigint { return value > 0n ? value : 0n }
 function minimum(left: bigint, right: bigint): bigint { return left < right ? left : right }
 
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000
+const SUBSCRIPTION_RESET_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000
 
 /** Shanghai has no DST. Return the next Monday 09:00 local time after `from`. */
 export function nextShanghaiReset(from: Date = new Date()): Date {
@@ -171,6 +175,17 @@ export function nextShanghaiReset(from: Date = new Date()): Date {
   let candidate = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate() - daysSinceMonday, 9, 0, 0, 0) - SHANGHAI_OFFSET_MS
   if (candidate <= from.getTime()) candidate += 7 * 24 * 60 * 60 * 1000
   return new Date(candidate)
+}
+
+/** New finite-grant plans reset exactly every seven days from purchase. */
+export function nextSubscriptionReset(from: Date, finiteGrantPlan: boolean): Date {
+  return finiteGrantPlan ? new Date(from.getTime() + SUBSCRIPTION_RESET_INTERVAL_MS) : nextShanghaiReset(from)
+}
+
+export function nextGrantCycle(scheduled: Date, now: Date, finiteGrantPlan: boolean): Date {
+  if (!finiteGrantPlan) return nextShanghaiReset(now)
+  const following = nextSubscriptionReset(scheduled, true)
+  return following.getTime() > now.getTime() ? following : nextSubscriptionReset(now, true)
 }
 
 function shanghaiDate(value: Date): string {
@@ -403,6 +418,7 @@ export class BillingService {
               COALESCE(s.remaining_micros, 0) AS plan,
               COALESCE(s.reserved_micros, 0) AS plan_reserved,
               COALESCE(s.reset_quota_micros, 0) AS plan_quota,
+              s.reset_grant_limit AS plan_grant_limit, COALESCE(s.reset_grant_count, 0) AS plan_grant_count,
               s.status AS plan_status, s.expires_at, s.next_reset_at, s.last_reset_at
        FROM users u
        LEFT JOIN wallets w ON w.user_id = u.id
@@ -425,6 +441,8 @@ export class BillingService {
       planReservedMicros: planReserved,
       planUsedMicros: planUsed,
       planQuotaMicros: planQuota,
+      planGrantLimit: row?.plan_grant_limit == null ? null : Number(row.plan_grant_limit),
+      planGrantCount: Number(row?.plan_grant_count || 0),
       planExpiresAt: activePlan ? expires.toISOString() : null,
       planNextResetAt: activePlan && row.next_reset_at ? new Date(row.next_reset_at).toISOString() : null,
       planLastResetAt: activePlan && row.last_reset_at ? new Date(row.last_reset_at).toISOString() : null,
@@ -445,7 +463,11 @@ export class BillingService {
       }
       const cap = bigintValue(row.reset_quota_micros)
       if (cap <= 0n) throw Object.assign(new Error('套餐未配置周期额度'), { statusCode: 409 })
+      const grantLimit = row.reset_grant_limit == null ? null : Number(row.reset_grant_limit)
+      const grantCount = Number(row.reset_grant_count || 0)
+      if (grantLimit !== null && grantCount >= grantLimit) throw Object.assign(new Error('套餐周期额度已全部发放'), { statusCode: 409 })
       const scheduled = row.next_reset_at ? new Date(row.next_reset_at) : null
+      if (!scheduled || !Number.isFinite(scheduled.getTime())) throw Object.assign(new Error('套餐没有待发放周期额度'), { statusCode: 409 })
       // Manual and automatic actions share the scheduled cycle key. This makes
       // an admin click before the worker runs idempotent with that worker run.
       const resetKey = scheduled && Number.isFinite(scheduled.getTime())
@@ -461,6 +483,7 @@ export class BillingService {
       `SELECT user_id FROM subscriptions
        WHERE status = 'active' AND expires_at > now()
          AND next_reset_at IS NOT NULL AND next_reset_at <= now()
+         AND (reset_grant_limit IS NULL OR reset_grant_count < reset_grant_limit)
        ORDER BY next_reset_at ASC LIMIT $1`,
       [Math.min(5000, Math.max(1, Math.floor(limit)))],
     )
@@ -469,8 +492,10 @@ export class BillingService {
       const didApply = await this.db.tx(async (client) => {
         const row = await one<any>(client, 'SELECT * FROM subscriptions WHERE user_id = $1 FOR UPDATE', [String(item.user_id)])
         if (!row || row.status !== 'active' || !row.expires_at || new Date(row.expires_at).getTime() <= Date.now() || !row.next_reset_at || new Date(row.next_reset_at).getTime() > Date.now()) return false
+        if (row.reset_grant_limit != null && Number(row.reset_grant_count || 0) >= Number(row.reset_grant_limit)) return false
         if (row.last_reset_at && new Date(row.last_reset_at).getTime() >= new Date(row.next_reset_at).getTime()) {
-          await client.query('UPDATE subscriptions SET next_reset_at = $2, version = version + 1, updated_at = now() WHERE id = $1', [row.id, nextShanghaiReset(new Date())])
+          const now = new Date()
+          await client.query('UPDATE subscriptions SET next_reset_at = $2, version = version + 1, updated_at = now() WHERE id = $1', [row.id, nextGrantCycle(new Date(row.next_reset_at), now, row.reset_grant_limit != null)])
           return false
         }
         const scheduled = new Date(row.next_reset_at)
@@ -478,7 +503,7 @@ export class BillingService {
         if (cap <= 0n) return false
         // A delayed worker only needs one catch-up reset. The next event is the
         // first Monday 09:00 after now, avoiding a burst of historical credits.
-        await this.applyReset(client, row, cap, `automatic:${scheduled.toISOString()}`, 'automatic', null, new Date(), true)
+        await this.applyReset(client, row, cap, `cycle:${scheduled.toISOString()}`, 'automatic', null, new Date(), true)
         return true
       })
       if (didApply) applied += 1
@@ -513,8 +538,15 @@ export class BillingService {
   }
 
   private async applyReset(client: DbClient, row: any, cap: bigint, resetKey: string, resetKind: 'automatic' | 'manual' | 'migration', actorUserId: string | null, resetAt: Date, automatic: boolean): Promise<SubscriptionResetResult> {
-    const existingEvent = await one<any>(client, 'SELECT before_remaining_micros, after_remaining_micros, quota_cap_micros, created_at FROM subscription_reset_events WHERE subscription_id = $1 AND reset_key = $2', [row.id, resetKey])
-    const next = automatic ? nextShanghaiReset(new Date()) : (row.next_reset_at ? new Date(row.next_reset_at) : null)
+    const existingEvent = await one<any>(client, 'SELECT before_remaining_micros, after_remaining_micros, quota_cap_micros, grant_number, created_at FROM subscription_reset_events WHERE subscription_id = $1 AND reset_key = $2', [row.id, resetKey])
+    const limit = row.reset_grant_limit == null ? null : Number(row.reset_grant_limit)
+    const currentCount = Number(row.reset_grant_count || 0)
+    const nextCount = currentCount + (existingEvent ? 0 : 1)
+    const exhausted = limit !== null && nextCount >= limit
+    const scheduled = row.next_reset_at ? new Date(row.next_reset_at) : null
+    const next = exhausted ? null : automatic
+      ? nextGrantCycle(scheduled && Number.isFinite(scheduled.getTime()) ? scheduled : resetAt, resetAt, limit !== null)
+      : scheduled
     if (existingEvent) {
       if (automatic && next) {
         await client.query(
@@ -533,6 +565,7 @@ export class BillingService {
         beforeRemainingMicros: bigintValue(existingEvent.before_remaining_micros),
         afterRemainingMicros: bigintValue(existingEvent.after_remaining_micros),
         quotaCapMicros: bigintValue(existingEvent.quota_cap_micros),
+        grantNumber: existingEvent.grant_number == null ? null : Number(existingEvent.grant_number),
         resetAt: existingEvent.created_at ? new Date(existingEvent.created_at).toISOString() : null,
         nextResetAt: next?.toISOString() || null,
       }
@@ -543,17 +576,17 @@ export class BillingService {
     const updated = await client.query(
       `UPDATE subscriptions
        SET remaining_micros = $2, reset_quota_micros = $3,
-           last_reset_at = $4, next_reset_at = $5,
+           last_reset_at = $4, next_reset_at = $5, reset_grant_count = $6,
            reset_version = reset_version + 1, version = version + 1, updated_at = now()
        WHERE id = $1 AND remaining_micros >= reserved_micros`,
-      [row.id, after.toString(), cap.toString(), resetAt, automatic ? next : row.next_reset_at],
+      [row.id, after.toString(), cap.toString(), resetAt, next, nextCount],
     )
     if (updated.rowCount !== 1) throw new Error('套餐额度重置失败')
     if (after !== before) {
-      await client.query(`INSERT INTO subscription_ledger(subscription_id,user_id,kind,remaining_delta_micros,metadata) VALUES($1,$2,'quota_reset',$3,$4)`, [row.id, row.user_id, (after - before).toString(), JSON.stringify({ resetKey, resetKind, cap: cap.toString() })])
+      await client.query(`INSERT INTO subscription_ledger(subscription_id,user_id,kind,remaining_delta_micros,metadata) VALUES($1,$2,'quota_reset',$3,$4)`, [row.id, row.user_id, (after - before).toString(), JSON.stringify({ resetKey, resetKind, cap: cap.toString(), grantNumber: nextCount, grantLimit: limit })])
     }
-    await client.query(`INSERT INTO subscription_reset_events(subscription_id,user_id,reset_key,reset_kind,actor_user_id,before_remaining_micros,after_remaining_micros,quota_cap_micros,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [row.id, row.user_id, resetKey, resetKind, actorUserId, before.toString(), after.toString(), cap.toString(), resetAt])
-    return { applied: true, userId: String(row.user_id), resetKind, resetKey, beforeRemainingMicros: before, afterRemainingMicros: after, quotaCapMicros: cap, resetAt: resetAt.toISOString(), nextResetAt: automatic ? next?.toISOString() || null : row.next_reset_at ? new Date(row.next_reset_at).toISOString() : null }
+    await client.query(`INSERT INTO subscription_reset_events(subscription_id,user_id,reset_key,reset_kind,actor_user_id,before_remaining_micros,after_remaining_micros,quota_cap_micros,grant_number,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [row.id, row.user_id, resetKey, resetKind, actorUserId, before.toString(), after.toString(), cap.toString(), nextCount, resetAt])
+    return { applied: true, userId: String(row.user_id), resetKind, resetKey, beforeRemainingMicros: before, afterRemainingMicros: after, quotaCapMicros: cap, grantNumber: nextCount, resetAt: resetAt.toISOString(), nextResetAt: next?.toISOString() || null }
   }
 
   async priceFor(model: string): Promise<PriceSnapshot | null> {
@@ -957,6 +990,8 @@ export class BillingService {
       planUsedMicros: view.planUsedMicros.toString(),
       planQuota: formatMicros(view.planQuotaMicros),
       planQuotaMicros: view.planQuotaMicros.toString(),
+      planGrantLimit: view.planGrantLimit,
+      planGrantCount: view.planGrantCount,
       planExpiresAt: view.planExpiresAt,
       planNextResetAt: view.planNextResetAt,
       planLastResetAt: view.planLastResetAt,

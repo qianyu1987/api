@@ -188,6 +188,49 @@
 - 发布提交 `61684a0`，标签 `v1.0.92` 已推送。发布前备份 `/opt/relay-station-backups/pre-v1.0.92-agnes-responses-20260925`（547M，41 表/41 COPY + 配置归档）；v1.0.90、v1.0.91 镜像均保留。两 API 副本 v1.0.92 healthy，Gateway/PostgreSQL/Redis healthy，worker timer active，四个线上入口均 200。
 - 发布后真实复测：Luna 非流式及流式均 HTTP 200、标准 Responses、模型 `gpt-5.6-luna`、文本 `OK`，每次 charge 3830 / cost 131 / profit 3699 微元；Terra 流式 HTTP 200、1 个 `response.completed`、模型与文本正确，charge 80005 / cost 16215 / profit 63790 微元。每次测试只提交一次，无重复账单。
 
+## Laya 标签变体实验 v5 与链路复检：2026-09-26 CST
+
+- 链路复检：Mac 端监督进程、SSH master、分类器 `127.0.0.1:19091` 与看板 `127.0.0.1:19095` 均持续运行（09-25 14:48 后无重连事件）；`/healthz` 200 shadow，看板端到端分诊正常（合成文本 coding p≈0.79，203 ms）。
+- 新增 v5 标签实验（v4 强调文字类标签 + 收紧 other 标签为"仅当输入无意义或完全不是文字、代码、图片、视频类请求"）：在 scratch 副本上运行，不影响运行中服务。外部 44 条未核验集 0.3636（16/44，needs_tools 0.5），内置 41 条冒烟集 0.7317 / 0.4634 不变，无回归亦无提升。报告 `/Volumes/brainos/CodexMedia/generated/laya-mlx-shadow/label-variant-v5-20260926.json`。
+- 结论：六个标签措辞变体（0.3182–0.3636）已到上限，text→other 与 coding→other 仍是主要误差；瓶颈在模型粒度与外部集标签质量（代理自标注、来源未核验），不再是提示词措辞。运行默认保持 v0 原始标签，未改任何服务代码、未改宿主配置；线上旁路开关仍关闭（`LAYA_SHADOW*` 为 0），采样管理员 Key 仍待用户指定。
+
+
+## Laya 影子观察启用（管理员范围）与端到端实测：2026-09-26 CST
+
+- 用户把"继续哪条线"交给代理决定；决定：启用线上影子观察，范围限定默认管理员用户（`users.id` `9c95ea6c-9721-450d-8a59-b08f4e4c43d0`，拥有"默认 Key" `sk-relay-nbMikmK`），不采集其他用户；观察结果绝不进入路由/结算。
+- 宿主 `.env` 追加 4 行：`LAYA_SHADOW_ENABLED=true`、`LAYA_SHADOW_SOCKET_PATH=/run/laya-shadow/classifier.sock`、`LAYA_SHADOW_ADMIN_USER_ID`（上述 UUID）、`LAYA_SHADOW_TOKEN`（43 字符，取自 Mac `transport-token`，全程未打印）。变更前备份 `/opt/relay-station-backups/pre-laya-observe-20260925T232751Z/.env`（0600）。
+- `docker compose up -d api` 重建两副本：均 healthy；`/healthz`、`/api/v1/health` 200；容器内各 4 个 `LAYA_SHADOW*` 变量核验。`config.ts` 启动校验通过（开关开启时 socket 路径/token 长度/管理员 ID 缺一即退出）证明参数合法。
+- Mac 端 `tools/laya-shadow/server.py` 增加最小事件日志：每次成功分类向 `$RUNTIME/classifier-events.log` 追加一行 JSON（`ts`/`task_type`/`noul`/`duration_ms`，不记录 prompt 正文，0600，可用 `LAYA_EVENTS_LOG` 覆盖）。杀掉旧分类器后监督进程自动重建传输（`transport_ready attempt 2`：200/401/200 全链路验证）；laya-shadow 11 项单测通过。
+- 端到端实测 1 次（用户授权代理决定，小额付费）：容器内用应用自身 AES-256-GCM 方案解密默认 Key（仅内存，未落盘/未打印），经容器 loopback 发 1 条 `gpt-5.6-luna` 简单文本请求：HTTP 200；`usage_logs` 确认走"超稳定备用"、charge 3805 / cost 124 / profit 3681 微元（`2026-09-25 23:44:16 UTC`）；同一秒 Mac `classifier-events.log` 出现影子分类事件（`task_type=other`、`noul=0.72`、54.7 ms）——容器 Unix socket → 宿主桥接 → SSH 反向转发 → Mac 分类器的生产链路完整闭环。
+- 三态更新：本地原型=完成；线上影子观察=**已启用**（仅默认管理员的纯文本单条消息 ≤2000 字；该 Key 也是本地 CC Switch 默认 Key，用户自身使用文本会经私有链路送入 Mac 本地分类器，不出 Mac）；真实自动路由=未实现、未启用。
+- 备注：宿主 `.env` 的 `ADMIN_PASSWORD` 与管理员用户的 DB 密码哈希不匹配（容器内 argon2 核验为 false，可能经 UI 改过密码）。不影响开关（只依赖 `LAYA_SHADOW*`），但 `/api/admin/laya-shadow` 计数端点需以真实管理员会话访问；计数为副本进程内值，重启归零。
+
+## 价格与月套餐改造生产发布：2026-09-27 CST
+
+- 用户授权发布代码和月套餐规则。生产备份 `/opt/relay-station-backups/pre-v1.0.93-pricing-subscription-20260927/` 已验证可读；旧 `relay-station:v1.0.92` 镜像保留。
+- 本地 23 个测试文件/247 项测试、typecheck、build、diff-check 通过。迁移首次因历史 `media_tasks_queue_idx` 重复创建回滚，修复为幂等索引创建后第二次迁移成功。
+- 两个 API 副本为 `relay-station:v1.0.93` 且 healthy，Gateway/PostgreSQL/Redis healthy，worker timer active；内部和公网健康接口 200，`www.hhtc.top` 首页 200；未带 API Key 的 `/v1/models` 返回 401。
+- 线上 `monthly-149` 为 ¥149、额度 149、`reset_grant_limit=4`，总额度 596；5 个已有订阅保持 `reset_grant_limit IS NULL`。线上 `profit_min_margin_bps=3000`、返利 1000、支付费 0，6 条活跃模型价格未重算。
+- 本次仅部署代码、迁移和套餐新购规则，未发布新模型价格、未修改真实渠道/路由、未做付费业务请求。按启用映射仍有 21 条成本缺失，待补齐有来源成本并确认预览后再发布价格。
+
+## v1.0.94 媒体任务收尾修复与付费业务测试：2026-09-27 CST
+
+- 用户要求执行付费业务测试、推送 Git，并修复短剧创作的图片/视频生成失败。已核对固定生产主机 `101.35.223.148`，两个 API 副本均为 `relay-station:v1.0.94` 且 healthy；旧镜像和备份保留在 `/opt/relay-station-backups/pre-v1.0.94-media-fix-20260927/`。
+- 根因：`media_tasks.next_attempt_at` 为 `NOT NULL`，终态任务收尾却写入 `NULL`，导致 worker 事务回滚、媒体队列无法正常收尾。`src/services/media.ts` 已移除终态写入 `next_attempt_at=NULL`，视频接单状态保留合法时间值；`src/server.ts` 保留真实 worker 异常日志。新增回归断言，避免再次生成该 SQL。
+- 图片真实测试：经公网 `/v1/media/quote` 与 `/v1/images/generations` 使用 1K `gpt-image-2.5`，quote HTTP 200、创建 HTTP 202，任务 `cb100454-ade2-4b50-98c9-fd8296dd136c` 完成并写入持久化素材；扣费 `500000` 微元、实际成本 `100000` 微元。账务只有一笔 `usage_reserve` 和一笔 `usage_settle`，无重复扣费。
+- 视频真实测试：经公网 `/v1/media/quote` 与 `/v1/videos` 使用最低 4 秒 `agnes-video-2.5-flash`，quote HTTP 200、创建 HTTP 202；上游连续返回明确 `video queue is full`，任务无上游任务号、9 次重试后由 API 取消，HTTP 200；一笔 `usage_reserve` 配一笔 `usage_release`，`500000` 微元全部退回。代码/数据库收尾正常，但视频上游当前仍不可接单，不能宣称视频已成功出片；恢复后应重新做一次单次授权测试。
+- 本地验证：23 个测试文件、247 项测试通过；`typecheck`、`build`、`git diff --check` 通过。价格仍未发布重算，未修改真实渠道、模型路由或用户账务。
+
 ## 更新模板
 
 新增记录应包含：日期/时区、用户目标与授权范围、实际原因、修改和提交、测试结果、是否推送、是否部署、两副本版本、备份/回滚位置、线上验证范围和未解决事项。只记非敏感证据。
+
+## GPT TOKEN 价格与月套餐改造：发布前设计与核验（2026-09-27 CST）
+
+- 用户目标：按真实渠道成本、充值 3 倍、支付费、返利和最低现金毛利计算钱包价格；月套餐 ¥149 每次发放 ¥149、30 天内共 4 次。官方实时价格页仍无法核验，因此没有把 OpenAI 快照作为当前官方报价。
+- 本地实现：新增 `src/services/pricing.ts` 及 `/api/admin/pricing/preview`、`/api/admin/pricing/publish`。预览覆盖每个启用模型的全部启用渠道，缺少有来源的渠道成本时阻断发布；完整时取输入/输出/缓存最高成本，按 `ceil(成本×充值倍率/(10000-毛利-手续费-返利))` 计算钱包售价，并在同一事务写入 `model_prices`、`profit_min_margin_bps` 与 `config_audit_logs`。旧订单/账单快照不回溯。
+- 价格护栏：`ProfitService`、模型/固定接口/媒体价格校验均考虑充值倍率、支付手续费和返利；新默认最低毛利为 5000 基点。旧的“OpenAI 快照初始化”入口不再直接写价格，必须转到渠道成本预览并显式确认。
+- 月套餐：`plans`、订单快照、`subscriptions`、`subscription_purchases`、重置事件增加发放次数快照/计数。`monthly-149` 新购买为首发 149 + 3 次周期发放（总 596），第四次后停止；手动和 worker 使用同一周期幂等键。旧订阅的 `reset_grant_limit` 保持 NULL，继续原有规则，不追溯改造。新增套餐利润汇总接口 `/api/admin/profit/subscriptions`，按实际 `usage_logs` 成本核算，不套钱包 3 倍。
+- 发布前验证：本地 23 个测试文件/246 项通过，`npm run typecheck`、`npm run build`、`git diff --check` 通过。随后生产发布结果见上方“价格与月套餐改造生产发布”条目。
+- 线上只读复核（2026-09-27）：生产仍为 `relay-station:v1.0.92`，两副本和健康接口均正常；`profit_min_margin_bps=3000`、支付费 0、返利 1000，活跃渠道 14、渠道成本行 5、活跃模型价格 6。按启用映射核对有 21 条缺少有来源渠道成本，故没有运行 migration、价格发布或重启服务。
+- 价格后续事项：先在后台成本预览中补齐这 21 条缺失项并确认来源，再由管理员确认预览后发布；¥149/596 的套餐不能仅凭钱包模型价格证明 50% 现金毛利。代码与套餐规则已按上方条目发布，旧镜像和备份保留用于回滚。

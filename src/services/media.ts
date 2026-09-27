@@ -143,8 +143,8 @@ export class MediaService {
     const multiplier = Math.max(this.config.walletTopupMultiplierBps,Number(ratio?.bps || 10000))
     const normal = BigInt(price.normal_cost_micros)*BigInt(input.units), actual = BigInt(price.actual_cost_micros)*BigInt(input.units)
     const freeStandard = input.model === 'agnes-image-2.5-flash'
-    let charge = freeStandard ? 0n : mediaPrice(normal > actual ? normal : actual,multiplier,rules.paymentFeeRateBps,rules.affiliateRateBps)
-    const snapshot = { normalCostMicros:normal.toString(),actualCostMicros:actual.toString(),multiplierBps:multiplier,feeBps:rules.paymentFeeRateBps,rebateBps:rules.affiliateRateBps,marginBps:3000,costSource:price.cost_source,priceUpdatedAt:price.updated_at,chargeMicros:charge.toString() }
+    let charge = freeStandard ? 0n : mediaPrice(normal > actual ? normal : actual,multiplier,rules.paymentFeeRateBps,rules.affiliateRateBps,rules.minimumMarginBps)
+    const snapshot = { normalCostMicros:normal.toString(),actualCostMicros:actual.toString(),multiplierBps:multiplier,feeBps:rules.paymentFeeRateBps,rebateBps:rules.affiliateRateBps,marginBps:rules.minimumMarginBps,costSource:price.cost_source,priceUpdatedAt:price.updated_at,chargeMicros:charge.toString() }
     const cash = charge * 10000n / BigInt(multiplier)
     Object.assign(snapshot,{estimatedRevenueMicros:cash.toString(),estimatedFeesMicros:(cash*BigInt(rules.paymentFeeRateBps)/10000n).toString(),estimatedRebateMicros:(cash*BigInt(rules.affiliateRateBps)/10000n).toString(),estimatedProfitMicros:(cash-cash*BigInt(rules.paymentFeeRateBps+rules.affiliateRateBps)/10000n-actual).toString()})
     const giftRow = await db.one<any>('SELECT images_remaining,video_seconds_remaining FROM media_welcome_gifts WHERE user_id=$1',[userId])
@@ -261,7 +261,7 @@ export class MediaService {
       await client.query(`UPDATE media_welcome_gifts SET ${column}=${column}+$2 WHERE user_id=$1`,[task.user_id,gift.units])
     }
     if(success&&content&&contentType)await client.query('INSERT INTO media_task_assets(task_id,content_type,content) VALUES($1,$2,$3) ON CONFLICT(task_id) DO NOTHING',[id,contentType,content])
-    await client.query('UPDATE media_tasks SET status=$2,result_url=$3,error_message=$4,last_retry_code=COALESCE($5,last_retry_code),progress=100,finished_at=now(),lease_until=NULL,uncertain_since=NULL,next_attempt_at=NULL WHERE id=$1 AND status NOT IN (\'completed\',\'failed\')',[id,success?'completed':'failed',success&&content?'stored://media/'+id:url,message,retryCode || null])
+    await client.query('UPDATE media_tasks SET status=$2,result_url=$3,error_message=$4,last_retry_code=COALESCE($5,last_retry_code),progress=100,finished_at=now(),lease_until=NULL,uncertain_since=NULL WHERE id=$1 AND status NOT IN (\'completed\',\'failed\')',[id,success?'completed':'failed',success&&content?'stored://media/'+id:url,message,retryCode || null])
   }
 
   async finish(id:string,success:boolean,url:string|null,message:string|null,content?:Buffer,contentType?:string,retryCode?:string) {
@@ -408,7 +408,7 @@ export class MediaService {
         const videoId=[data.video_id,data.id,data.task_id,data.data?.video_id,data.data?.id,data.data?.task_id].find((value:any)=>typeof value==='string'&&value.length>0)
         if(typeof videoId!=='string'||videoId.length>256)throw new Error('missing video id')
         await this.markMediaSuccess(String(channel.id))
-        const accepted=await this.db.query<any>("UPDATE media_tasks SET upstream_id=$2,status='processing',accepted_at=COALESCE(accepted_at,now()),uncertain_since=NULL,error_message=NULL,lease_until=NULL,next_attempt_at=NULL,next_poll_at=now()+interval '5 seconds' WHERE id=$1 AND status='submitting' AND finished_at IS NULL AND (lease_until IS NULL OR lease_until>now()) RETURNING id",[task.id,videoId])
+        const accepted=await this.db.query<any>("UPDATE media_tasks SET upstream_id=$2,status='processing',accepted_at=COALESCE(accepted_at,now()),uncertain_since=NULL,error_message=NULL,lease_until=NULL,next_attempt_at=now(),next_poll_at=now()+interval '5 seconds' WHERE id=$1 AND status='submitting' AND finished_at IS NULL AND (lease_until IS NULL OR lease_until>now()) RETURNING id",[task.id,videoId])
         if(!accepted.length)return
         return
       }

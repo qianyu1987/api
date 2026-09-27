@@ -93,8 +93,13 @@ def main() -> None:
         answers = compact_answers(agent.predict(text, QUESTIONS))
         latency = (time.perf_counter() - began) * 1000
         latencies.append(latency)
-        predicted_type = answers["task_type"]["choice"]
-        predicted_tools = float(answers["needs_tools"]["value"]) >= 0.5
+        # Defensive: model output may miss a head or its payload; mark as
+        # "unknown" instead of aborting the whole evaluation run.
+        predicted_type = (answers.get("task_type") or {}).get("choice") or "unknown"
+        try:
+            predicted_tools = float((answers.get("needs_tools") or {}).get("value")) >= 0.5
+        except (TypeError, ValueError):
+            predicted_tools = False
         correct_type += predicted_type == expected_type
         correct_tools += predicted_tools == expected_tools
         confusion.setdefault(expected_type, {}).setdefault(predicted_type, 0)

@@ -1,6 +1,6 @@
 # GPT TOKEN / Relay Station 项目长期记忆
 
-最后核对：2026-09-23。这是跨会话交接记录，事实来源为用户指令、当前源码、Git 和实际运维结果。动态状态以重新检查为准；最近发布证据见 [OPERATIONS_LOG.md](OPERATIONS_LOG.md)。
+最后核对：2026-09-27。这是跨会话交接记录，事实来源为用户指令、当前源码、Git 和实际运维结果。动态状态以重新检查为准；最近发布证据见 [OPERATIONS_LOG.md](OPERATIONS_LOG.md)。
 
 ## 项目与范围
 
@@ -86,7 +86,7 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 - 2026-09-25 CC Switch 曾因已打开会话携带 `gpt-6-sol` 而收到“未配置该模型价格”503。生产 `/v1/models` 非计费核验：有 `gpt-5.6-sol`、无 `gpt-6-sol`；本机“默认 Key”和 Codex 持久配置均为 `gpt-5.6-sol`，切回后代理请求连续 200。不要为修复拼写/会话覆盖而凭空复制价格或渠道映射；先使用模型目录中实际存在的 `gpt-5.6-sol`。
 - 2026-09-25 `agnes-3.0-flash` 已可售卖并付费实测通过：`model_prices` 行售价=OpenAI gpt-5-mini 价目 1/3（83334/666667/8334 微元/M），成本=gpt-5-mini 1:1（250000/2000000/25000）；渠道 `Agnes 3.0` 的 `model_map` 已显式 opt-in（路由按 model_map JSONB 匹配，`channel_model_mappings` 表仅用于模型清单/价目初始化——新增渠道两表需同时配置）。公网 1 次最小请求 200，`usage_logs` 确认走 `Agnes 3.0`、扣款 9 微元；**当前成本按 OpenAI 价目 1:1 记账导致小额负毛利，Agnes 真实上游成本待用户提供后修正**。详见运维日志。
 - 2026-09-24 新建渠道 `Agnes 3.0`（专用新 Key，AES 加密入库，可独立轮换/停用）：base_url `https://apihub.agnes-ai.com/v1`，prio 1000，启用；唯一映射 `agnes-3.0-flash -> agnes-3.0-flash`（启用）；审计 `config_audit_logs` 已记录（不含密钥）。变更前备份 `pre-agnes30-channel`。上游直连验证通过（models 200、最小 chat 200）。**未配置 `model_prices`：用户请求该模型暂 503"未配置价格"，补价后即可调用**；经 relay 的付费实测未做。详见运维日志。
-- 2026-09-24 发布 `v1.0.90`（Laya 旁路接入）：两副本 healthy、migration 完成、worker timer active、无前端变更（`app.js?v=1.0.88`）。宿主桥接 + SSH loopback 转发 + api 只读 Unix socket 挂载链路实测打通，api-1/api-2 容器内 200/401/200 shadow（合成文本），SSH master 断开自动恢复。**`LAYA_SHADOW*` 环境变量为 0，开关保持关闭、未采集真实提示**；启用需用户指定管理员 Key 并写宿主 `.env` 后重启 api。独立 44 条代理自标注评测：任务类型 36.36%、工具需求 50%（`independent-report-20260924.json`），证实调参集 73.17% 属过拟合，不构成生产准确率证据。真实自动路由未实现、未启用。Mac 端传输监督进程（`tools/laya-shadow/transport_supervisor.py`，日志在 CodexMedia）在 Mac 重启/长时间睡眠后需重新启动；链路故障只影响 shadow 计数，不影响用户请求。详见运维日志与 `tools/laya-shadow/README.md`。
+- 2026-09-26 Laya 线上影子观察**已启用**（代理按用户授权决定）：宿主 `.env` 追加 4 行 `LAYA_SHADOW*`（开关、socket 路径 `/run/laya-shadow/classifier.sock`、管理员 ID `9c95ea6c…43d0`、43 字符 token），api 两副本重建 healthy；仅观察默认管理员（"默认 Key" 属主，即本地 CC Switch 在用 Key）的纯文本单条请求 ≤2000 字，结果绝不进入路由/结算，文本不出 Mac。端到端实测 1 次（Luna 200、charge 3805 微元），Mac `classifier-events.log` 同秒出现分类事件，全链路闭环。变更前 `.env` 备份 `pre-laya-observe-20260925T232751Z`；`server.py` 新增逐事件日志（无 prompt 正文）。真实自动路由仍未实现。注意：`.env` 的 `ADMIN_PASSWORD` 与管理员 DB 密码哈希已不一致，`/api/admin/laya-shadow` 计数需真实管理员会话查看。详见运维日志。
 - 2026-09-24 后续实测：宿主机 Laya 隧道正常时，api-1/api-2 到各自 loopback 及 backend gateway 的 19092 均 ECONNREFUSED。下一步采用受限 Unix socket 转发/挂载方案，尚未实现；不应直接改为 Docker 网关 TCP 地址或声称容器已接通。
 
 - 2026-09-24 已实测宿主机至 Mac 的临时 SSH 反向传输：服务器仅监听 `127.0.0.1:19092`，构造文本分类鉴权 401/200 正常，测试结束监听已移除。两个生产 API 仍为 v1.0.89 healthy。本证据不包括 API 容器接入、真实采样或部署；可复跑脚本 `tools/laya-shadow/probe_transport.py`，不产生付费请求。
@@ -122,7 +122,30 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 
 本机 `node/npm` 可能不在 PATH；已验证 Node/npm 目录：`/Volumes/brainos/MacStorage/Caches/node-v22.23.2/node-v22.23.2-darwin-arm64/bin`。`/usr/bin/git` 曾被 Xcode license 阻断，可用 `/Library/Developer/CommandLineTools/usr/bin/git`；不要替用户接受许可证。路径不可用时再定位 bundled runtime。
 
+## 价格与月套餐改造（实现与发布，2026-09-27）
+
+- 新增渠道成本预览/事务发布代码：`src/services/pricing.ts`、`ChannelCostService.pricingPreview/publishPricing`，后台接口为 `/api/admin/pricing/preview` 和 `/api/admin/pricing/publish`。预览按启用渠道取最高成本；缺少有来源的渠道成本时发布整体拒绝。发布会记录价格来源、生效时间、成本快照和管理员审计，历史账单快照不变。
+- 钱包价格护栏现在显式使用充值倍率、支付费和返利，最低毛利默认 5000 基点；生产当前设置/价格未因这轮本地改动而改变。旧 `/api/admin/bootstrap/openai-prices` 不再把未经实时核验的 OpenAI 快照直接写入价格表。
+- `monthly-149` 的新订单快照包含 `reset_grant_limit=4`，新购买首发一次并在第 7/14/21 天各发一次；订阅记录 `reset_grant_count`，手动/worker 共用周期幂等键，第四次停止。旧订阅的 limit 保持 NULL 以保留既有规则。套餐使用成本可由 `/api/admin/profit/subscriptions` 按实际 usage 日志核算。
+- 发布前本地验证：247 项测试、typecheck、build、diff-check 全部通过；生产已部署 `v1.0.93`。线上 `profit_min_margin_bps=3000`、返利 1000、支付费 0；6 个活跃模型价格未重算，按启用映射仍有 21 条渠道成本缺失。禁止在完成成本预览前发布价格或声称 ¥149/596 具备 50% 现金毛利。
+
 远程脚本中 `docker compose exec -T` 会读取 stdin。不要让 pg_dump 消耗承载后续脚本的 stdin；无输入操作用 `/dev/null`，验证备份从 dump 文件单独重定向。
+
+## 价格与月套餐改造生产发布：2026-09-27 CST
+
+- 用户授权发布代码和月套餐规则。生产备份 `/opt/relay-station-backups/pre-v1.0.93-pricing-subscription-20260927/` 已验证可读（数据库 dump 约 530 MiB、`.env` 权限 0600）；旧 `relay-station:v1.0.92` 镜像保留。
+- 发布版本 `relay-station:v1.0.93`。迁移首次因历史 schema 的 `media_tasks_queue_idx` 重复创建而回滚，随后将队列索引改为幂等创建并重建镜像；第二次迁移成功。该修复不删除数据或索引。
+- 两个 API 副本、Gateway、PostgreSQL、Redis 均 healthy，`relay-station-worker.timer` active；内部 `/healthz`、`/api/v1/health` 及公网 `api.hhtc.top` 健康接口 200，`www.hhtc.top` 首页 200。未带 API Key 的 `/v1/models` 返回预期 401。
+- 线上 `monthly-149` 已为价格 149、首发额度 149、`reset_grant_limit=4`（总额度 596）；5 个已有订阅仍为 `reset_grant_limit IS NULL`，保留旧规则。线上 `profit_min_margin_bps` 仍为 3000、返利 1000、支付费 0；6 条活跃模型价格未发布重算。
+- 本地验证为 23 个测试文件/247 项测试通过，typecheck、build、diff-check 通过。此次只部署代码、迁移和套餐新购规则，未发布新模型价格、未改真实渠道/路由、未做付费业务请求。
+- 未解决：按启用映射仍有 21 条渠道成本缺失；待后台补齐可审计来源并确认预览后，才能单独发布价格和 50% 毛利护栏。不得把当前价格称为 OpenAI 官方实时价格。
+
+## v1.0.94 媒体修复与付费验证：2026-09-27
+
+- 生产已运行 `relay-station:v1.0.94`，两个 API 副本 healthy。媒体 worker 的终态 SQL 不再把 `media_tasks.next_attempt_at` 写成 NULL；视频接单后保留合法下一次轮询时间，worker 异常继续记录真实错误。
+- 付费图片验证通过：1K `gpt-image-2.5` 任务完成并持久化结果，扣费 500000 微元、成本 100000 微元；预扣/结算各一笔，无重复账单。
+- 付费视频验证未出片：4 秒 `agnes-video-2.5-flash` 创建成功进入队列，但上游明确返回 `video queue is full`，无上游任务编号；重试后通过 API 取消，冻结额度全部释放。应用收尾和退款正常，视频上游恢复前不能称为已修复完成。
+- 本地 23 个测试文件/247 项通过，typecheck、build、diff-check 通过。媒体修复备份为 `/opt/relay-station-backups/pre-v1.0.94-media-fix-20260927/`；价格发布仍受 21 条缺失渠道成本阻断，未修改价格或真实路由。
 
 ## 用户偏好与维护约定
 
