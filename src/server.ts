@@ -11,7 +11,13 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { PassThrough, Readable } from 'node:stream'
 import { StringDecoder } from 'node:string_decoder'
-import { loadConfig, type AppConfig } from './config.js'
+import {
+  ENTERPRISE_TOPUP_MINIMUM_MICROS,
+  ENTERPRISE_TOPUP_MULTIPLIER_BPS,
+  MONTHLY_DISPLAY_MULTIPLIER_BPS,
+  loadConfig,
+  type AppConfig,
+} from './config.js'
 import { Database } from './db/index.js'
 import { RedisStore } from './db/redis.js'
 import { AuthService, type PublicUser } from './services/auth.js'
@@ -141,6 +147,113 @@ function cleanText(value: unknown, name: string, max = 256): string {
   const text = String(value ?? '').trim()
   if (!text || text.length > max) throw new Error(`${name}无效`)
   return text
+}
+
+const PRICE_COMPARISON_MODELS = [
+  { id: 'gpt-6-astra', displayName: 'Astra' },
+  { id: 'gpt-5.6-sol', displayName: 'Sol' },
+  { id: 'gpt-5.6-terra', displayName: 'Terra' },
+  { id: 'gpt-5.6-luna', displayName: 'Luna' },
+] as const
+
+const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000
+
+export function shanghaiDayBounds(now: Date = new Date()): { from: Date; to: Date } {
+  const local = new Date(now.getTime() + SHANGHAI_OFFSET_MS)
+  const fromTime = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) - SHANGHAI_OFFSET_MS
+  return { from: new Date(fromTime), to: new Date(fromTime + 24 * 60 * 60 * 1000) }
+}
+
+function roundedDivision(numerator: bigint, denominator: bigint): bigint {
+  if (numerator < 0n || denominator <= 0n) throw new Error('价格参数无效')
+  return (numerator + denominator / 2n) / denominator
+}
+
+function validMultiplier(value: unknown, fallback: number): number {
+  const multiplier = Number(value)
+  return Number.isInteger(multiplier) && multiplier >= 10000 && multiplier <= 100000 ? multiplier : fallback
+}
+
+function modelRate(row: any, part: 'input' | 'output' | 'cache'): bigint | null {
+  const value = row?.[`${part}_sell_micros_per_million`] ?? row?.[`${part}_sell_micros`]
+  const text = String(value ?? '')
+  return /^\d+$/.test(text) ? BigInt(text) : null
+}
+
+export function buildModelPriceComparison(rows: any[], effectiveDiscountBps: number, walletMultiplierBps: number) {
+  const discountBps = Math.max(0, Math.min(9900, Number.isInteger(effectiveDiscountBps) ? effectiveDiscountBps : 0))
+  const walletMultiplier = validMultiplier(walletMultiplierBps, 30000)
+  const monthlyMultiplier = MONTHLY_DISPLAY_MULTIPLIER_BPS
+  const enterpriseMultiplier = ENTERPRISE_TOPUP_MULTIPLIER_BPS
+  const indexed = new Map(rows.map((row) => [String(row.model_pattern), row]))
+  const unavailableRate = () => ({ standardMicros: null, walletEffectiveMicros: null, monthlyEffectiveMicros: null, enterpriseEffectiveMicros: null })
+  const displayRate = (rate: bigint) => {
+    const numerator = rate * BigInt(10000 - discountBps)
+    return {
+      standardMicros: roundedDivision(numerator, 10000n).toString(),
+      walletEffectiveMicros: roundedDivision(numerator, BigInt(walletMultiplier)).toString(),
+      monthlyEffectiveMicros: roundedDivision(numerator, BigInt(monthlyMultiplier)).toString(),
+      enterpriseEffectiveMicros: roundedDivision(numerator, BigInt(enterpriseMultiplier)).toString(),
+    }
+  }
+  return {
+    unit: 'CNY_PER_MILLION_TOKENS',
+    walletMultiplierBps: walletMultiplier,
+    monthlyMultiplierBps: monthlyMultiplier,
+    enterpriseMultiplierBps: enterpriseMultiplier,
+    models: PRICE_COMPARISON_MODELS.map((model) => {
+      const row = indexed.get(model.id)
+      const input = modelRate(row, 'input')
+      const output = modelRate(row, 'output')
+      const cache = modelRate(row, 'cache')
+      const available = Boolean(row?.active) && input !== null && input > 0n && output !== null && output > 0n && cache !== null && cache > 0n
+      return {
+        ...model,
+        available,
+        input: available ? displayRate(input!) : unavailableRate(),
+        output: available ? displayRate(output!) : unavailableRate(),
+        cache: available ? displayRate(cache!) : unavailableRate(),
+      }
+    }),
+  }
+}
+
+function optionalLeadText(value: unknown, name: string, max: number): string | null {
+  if (value === undefined || value === null || String(value).trim() === '') return null
+  const result = String(value).trim()
+  if (result.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(result)) {
+    throw Object.assign(new Error(`${name}无效或超过 ${max} 个字符`), { statusCode: 400 })
+  }
+  return result
+}
+
+export function normalizeEnterpriseLeadInput(body: any): { contactName: string; contactMethod: string; desiredSiteName: string | null; note: string | null } {
+  const contactName = optionalLeadText(body?.contactName, '联系人', 80)
+  const contactMethod = optionalLeadText(body?.contactMethod, '联系方式', 160)
+  if (!contactName) throw Object.assign(new Error('请填写联系人'), { statusCode: 400 })
+  if (!contactMethod) throw Object.assign(new Error('请填写联系方式'), { statusCode: 400 })
+  return {
+    contactName,
+    contactMethod,
+    desiredSiteName: optionalLeadText(body?.desiredSiteName, '期望站点名称', 120),
+    note: optionalLeadText(body?.note, '需求说明', 2000),
+  }
+}
+
+function publicEnterpriseLead(row: any): Record<string, unknown> | null {
+  if (!row) return null
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    contactName: String(row.contact_name),
+    contactMethod: String(row.contact_method),
+    desiredSiteName: row.desired_site_name == null ? null : String(row.desired_site_name),
+    note: row.note == null ? null : String(row.note),
+    ...(row.username === undefined ? {} : { username: String(row.username) }),
+    ...(row.email === undefined ? {} : { email: row.email == null ? null : String(row.email) }),
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  }
 }
 
 async function settingInt(db: Database, key: string, fallback: number): Promise<number> {
@@ -484,6 +597,11 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       logoUrl: values.site_logo_url || '/assets/gpt-token-mark-192.png',
       apiBaseUrl: `${config.publicBaseUrl.replace(/\/$/, '')}/v1`,
       walletTopupMultiplierBps: config.walletTopupMultiplierBps,
+      enterpriseOffer: {
+        code: 'enterprise',
+        multiplierBps: config.enterpriseTopupMultiplierBps,
+        minimumAmountMicros: String(config.enterpriseTopupMinimumMicros),
+      },
     }
   })
 
@@ -560,15 +678,27 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.get('/api/me/overview', async (request, reply) => {
     reply.header('Cache-Control', 'private, no-store')
     const user = await requireSession(request, reply); if (!user) return
-    const balance = await billing.balance(user.id)
-    const [discount, totals] = await Promise.all([
+    const day = shanghaiDayBounds()
+    const [balance, discount, globalDiscount, totals, todayUsage, modelPrices] = await Promise.all([
+      billing.balance(user.id),
       db.one<any>('SELECT token_discount_bps FROM users WHERE id = $1', [user.id]),
+      db.one<any>("SELECT value FROM app_settings WHERE key='global_token_discount_bps'"),
       db.one<any>(`SELECT
         (SELECT COALESCE(SUM(wl.amount_micros),0)::text FROM wallet_ledger wl WHERE wl.user_id=$1 AND wl.kind='wallet_topup') AS total_topup_credit_micros,
         (SELECT COALESCE(SUM(COALESCE(o.paid_amount_micros,o.amount_micros)),0)::text FROM orders o WHERE o.user_id=$1 AND o.kind='wallet_topup' AND o.status='paid') AS total_topup_paid_micros,
         (SELECT COALESCE(SUM(COALESCE(o.paid_amount_micros,o.amount_micros)),0)::text FROM orders o WHERE o.user_id=$1 AND o.kind IN ('wallet_topup','subscription','subscription_purchase') AND o.status='paid') AS total_paid_micros`, [user.id]),
+      db.one<any>(`SELECT COUNT(*)::text AS requests,
+        COALESCE(SUM(charge_micros) FILTER (WHERE status <> 'pending'),0)::text AS charge_micros
+        FROM usage_logs WHERE user_id=$1 AND started_at >= $2 AND started_at < $3`, [user.id, day.from, day.to]),
+      db.query<any>(`SELECT model_pattern,active,
+        input_sell_micros,input_sell_micros_per_million,
+        output_sell_micros,output_sell_micros_per_million,
+        cache_sell_micros,cache_sell_micros_per_million
+        FROM model_prices WHERE model_pattern = ANY($1::text[])`, [PRICE_COMPARISON_MODELS.map((item) => item.id)]),
     ])
     const discountBps = Math.max(0, Math.min(9900, Number(discount?.token_discount_bps || 0)))
+    const globalDiscountBps = Math.max(0, Math.min(9900, Number(globalDiscount?.value || 0)))
+    const effectiveTokenDiscountBps = Math.max(discountBps, globalDiscountBps)
     const totalTopupCreditMicros = String(totals?.total_topup_credit_micros || '0')
     const totalTopupPaidMicros = String(totals?.total_topup_paid_micros || '0')
     const totalPaidMicros = String(totals?.total_paid_micros || '0')
@@ -583,8 +713,54 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         totalPaid: formatMicros(BigInt(totalPaidMicros)),
       },
       tokenDiscountBps: discountBps, tokenDiscountPercent: discountBps / 100,
+      effectiveTokenDiscountBps,
+      todayUsage: {
+        timezone: 'Asia/Shanghai',
+        from: day.from.toISOString(),
+        to: day.to.toISOString(),
+        requests: Number(todayUsage?.requests || 0),
+        chargeMicros: String(todayUsage?.charge_micros || '0'),
+      },
+      enterpriseOffer: {
+        code: 'enterprise',
+        multiplierBps: config.enterpriseTopupMultiplierBps,
+        minimumAmountMicros: String(config.enterpriseTopupMinimumMicros),
+      },
+      modelPriceComparison: buildModelPriceComparison(modelPrices, effectiveTokenDiscountBps, config.walletTopupMultiplierBps),
       walletTopupMultiplierBps: config.walletTopupMultiplierBps, apiBaseUrl: `${config.publicBaseUrl}/v1`, downloads: { chatgpt: config.chatgptDownloadUrl, ccswitch: config.ccswitchDownloadUrl }, mailConfigured: mail.configured,
     }
+  })
+  app.get('/api/me/enterprise-site-lead', async (request, reply) => {
+    reply.header('Cache-Control', 'private, no-store')
+    const user = await requireSession(request, reply); if (!user) return
+    const row = await db.one<any>(`SELECT id,user_id,contact_name,contact_method,desired_site_name,note,created_at,updated_at
+      FROM enterprise_site_leads WHERE user_id=$1`, [user.id])
+    return { item: publicEnterpriseLead(row) }
+  })
+  app.post('/api/me/enterprise-site-lead', { config: { rateLimit: { max: 10, timeWindow: '10 minutes' } } }, async (request, reply) => {
+    reply.header('Cache-Control', 'private, no-store')
+    const user = await requireSession(request, reply); if (!user) return
+    try {
+      const input = normalizeEnterpriseLeadInput(request.body)
+      const row = await db.one<any>(`INSERT INTO enterprise_site_leads(user_id,contact_name,contact_method,desired_site_name,note)
+        VALUES($1,$2,$3,$4,$5)
+        ON CONFLICT(user_id) DO UPDATE SET
+          contact_name=excluded.contact_name,contact_method=excluded.contact_method,
+          desired_site_name=excluded.desired_site_name,note=excluded.note,updated_at=now()
+        RETURNING id,user_id,contact_name,contact_method,desired_site_name,note,created_at,updated_at`,
+      [user.id, input.contactName, input.contactMethod, input.desiredSiteName, input.note])
+      return { item: publicEnterpriseLead(row) }
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
+  app.get('/api/admin/enterprise-leads', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    reply.header('Cache-Control', 'private, no-store')
+    const limit = boundedLimit((request.query as any)?.limit, 100, 500)
+    const rows = await db.query<any>(`SELECT l.id,l.user_id,l.contact_name,l.contact_method,l.desired_site_name,l.note,
+      l.created_at,l.updated_at,u.username,u.email
+      FROM enterprise_site_leads l JOIN users u ON u.id=l.user_id
+      ORDER BY l.updated_at DESC,l.id DESC LIMIT $1`, [limit])
+    return { items: rows.map((row) => publicEnterpriseLead(row)) }
   })
   app.get('/api/me/balance', async (request, reply) => {
     reply.header('Cache-Control', 'private, no-store')
@@ -739,15 +915,16 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const kind = body.kind === 'subscription' ? 'subscription' : 'wallet_topup'
       const method = normalizeNewOrderPaymentMethod(body.paymentMethod)
       const planId = kind === 'subscription' ? String(body.planId || '') : null
+      const offerCode = body.offerCode
       if (kind === 'subscription' && !planId) throw new Error('请选择套餐')
       let amountMicros: bigint | undefined
       if (kind === 'wallet_topup') {
         try { amountMicros = BigInt(String(body.amountMicros ?? body.amount ?? 0)) } catch { throw new Error('金额格式无效') }
       }
-      created = await orders.create(user.id, { kind, amountMicros, planId, paymentMethod: method })
+      created = await orders.create(user.id, { kind, amountMicros, planId, paymentMethod: method, offerCode })
       const gateway = await optionalPaymentGateway(config)
       if (!gateway) throw Object.assign(new Error('支付渠道尚未配置'), { statusCode: 503 })
-      const native = await gateway.createNativeOrder({ orderId: created.orderNo, description: kind === 'subscription' ? 'GPT TOKEN 月套餐' : 'GPT TOKEN 钱包充值', amountMicros: created.amountMicros.toString(), paymentMethod: method, expiresAt: created.expiresAt })
+      const native = await gateway.createNativeOrder({ orderId: created.orderNo, description: kind === 'subscription' ? 'GPT TOKEN 月套餐' : created.topupOfferCode === 'enterprise' ? 'GPT TOKEN 企业钱包充值' : 'GPT TOKEN 钱包充值', amountMicros: created.amountMicros.toString(), paymentMethod: method, expiresAt: created.expiresAt })
       await orders.attachNativePayment(created.id, { providerOrderId: native.providerOrderId, codeUrl: native.codeUrl })
       let qrImage: string | undefined
       try {
@@ -766,6 +943,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         amount: publicMoney(created.amountMicros),
         walletCreditAmount: created.walletCreditMicros === null ? null : publicMoney(created.walletCreditMicros),
         topupMultiplierBps: created.topupMultiplierBps,
+        offerCode: created.topupOfferCode,
         payment: { ...native, ...(qrImage ? { qrImage } : {}) },
       }
     } catch (error) {
@@ -802,11 +980,11 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     }
   })
 
-  app.get('/api/orders', async (request, reply) => { const user = await requireSession(request, reply); return user ? { items: await db.query<any>('SELECT id, order_no, kind, amount_micros, paid_amount_micros, wallet_credit_micros, topup_multiplier_bps, payment_method, status, qr_code_url, created_at, paid_at, expires_at FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100', [user.id]) } : undefined })
+  app.get('/api/orders', async (request, reply) => { const user = await requireSession(request, reply); return user ? { items: await db.query<any>('SELECT id, order_no, kind, amount_micros, paid_amount_micros, wallet_credit_micros, topup_multiplier_bps, topup_offer_code, payment_method, status, qr_code_url, created_at, paid_at, expires_at FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100', [user.id]) } : undefined })
   app.get('/api/me/orders/:id', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
     const id = String((request.params as any).id || '')
-    let row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,wallet_credit_micros,topup_multiplier_bps,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
+    let row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,wallet_credit_micros,topup_multiplier_bps,topup_offer_code,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
     if (!row) { reply.code(404).send({ error: { message: '订单不存在' } }); return }
     // A callback may be delayed or missed. The customer poll is a fast,
     // rate-limited recovery path; the worker remains the background fallback.
@@ -822,7 +1000,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       }
     }
     await orders.reconcileCredit(id)
-    row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,wallet_credit_micros,topup_multiplier_bps,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
+    row = await db.one<any>('SELECT id,order_no,kind,amount_micros,paid_amount_micros,wallet_credit_micros,topup_multiplier_bps,topup_offer_code,payment_method,payment_provider,status,qr_code_url,provider_order_id,created_at,paid_at,expires_at,closed_at,failure_code,plan_name_snapshot,plan_quota_micros,plan_duration_days FROM orders WHERE id=$1 AND user_id=$2', [id, user.id])
     const credit = await orders.getCreditState(id, user.id)
     return { ...row, ...credit, amount: publicMoney(row.amount_micros), paidAmount: row.paid_amount_micros ? publicMoney(row.paid_amount_micros) : null, walletCreditAmount: row.wallet_credit_micros ? publicMoney(row.wallet_credit_micros) : null }
   })

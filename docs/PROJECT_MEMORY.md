@@ -81,6 +81,7 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 
 ## 最近上游运行事件
 
+- 2026-09-27 只读复核四个公开 GPT 模型：四条 `model_prices` 均启用，Astra/Sol/Terra 在最近 24 小时分别有 214/493/16 次成功请求；Luna 只有 2 次简单 `/chat/completions` 成功，同时 305 次复杂 `/responses` 因 `no_compatible_upstream` 被拒。Luna 仍只有“超稳定备用”映射到 `agnes-3.0-flash`，不是原生 Luna，只能用于无工具、无附件、无多轮状态的简单文本。对 10 个候选渠道的非计费 `/models` 探测均返回 200 JSON；其中“优惠”的 Astra/Terra 与“best”的 Sol 映射目标已不在当前目录，属于待清理的过期映射，其他原生主路由仍有近期 200。多数原生渠道尚未补齐可审计渠道级成本，不得把模型级 CSV 价格当成所有渠道成本已配置。此次未修改生产配置、路由、价格或账务，也未发起新的付费生成。
 - 2026-09-25 发布 v1.0.92：修复 Luna 经 Agnes 备用处理 `/responses` 时上游生成 `stream=null` 的 400。现在平台先转换为 `/chat/completions`，仅转发合法布尔 `stream`，再将流式/非流式结果转换回标准 Responses。真实测试中 Terra 与 Luna 的非流式/流式请求均 200、返回 `OK`；Luna 初始失败账单为 0，成功请求分别独立结算。备份 `pre-v1.0.92-agnes-responses-20260925`，两个 API 副本及依赖健康。
 - 2026-09-25 发布 v1.0.91：Terra 原生路由加入上游目录明确支持的 `稳定pro`、`高价稳定pro`，保留“优惠”及 Agnes 备用；Luna 没有原生上游，按公共低价档映射“超稳定备用”的 `agnes-3.0-flash`，且仅允许简单文本兼容降级。Terra/Luna 的 Agnes 渠道成本已按同一上游成本补齐，模型目录同时列出 Sol/Terra/Luna，两个 API 副本及依赖健康。发布前备份 `pre-v1.0.91-terra-luna-20260925`；未做付费生成测试。
 - 2026-09-25 CC Switch 曾因已打开会话携带 `gpt-6-sol` 而收到“未配置该模型价格”503。生产 `/v1/models` 非计费核验：有 `gpt-5.6-sol`、无 `gpt-6-sol`；本机“默认 Key”和 Codex 持久配置均为 `gpt-5.6-sol`，切回后代理请求连续 200。不要为修复拼写/会话覆盖而凭空复制价格或渠道映射；先使用模型目录中实际存在的 `gpt-5.6-sol`。

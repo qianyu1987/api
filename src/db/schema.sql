@@ -440,6 +440,7 @@ CREATE TABLE IF NOT EXISTS orders (
   -- Immutable promotion terms for wallet top-ups. Existing rows default to
   -- 1:1; new rows snapshot the configured multiplier when created.
   topup_multiplier_bps INTEGER NOT NULL DEFAULT 10000,
+  topup_offer_code TEXT NOT NULL DEFAULT 'standard',
   wallet_credit_micros BIGINT,
   payment_method TEXT NOT NULL DEFAULT 'wechat',
   payment_provider TEXT NOT NULL DEFAULT 'wechat_native',
@@ -461,6 +462,11 @@ CREATE TABLE IF NOT EXISTS orders (
   CHECK (order_type IN ('wallet_topup', 'subscription', 'subscription_purchase')),
   CHECK (amount_micros > 0),
   CONSTRAINT orders_topup_multiplier_bps_check CHECK (topup_multiplier_bps BETWEEN 10000 AND 100000),
+  CONSTRAINT orders_topup_offer_code_check CHECK (topup_offer_code IN ('standard', 'enterprise')),
+  CONSTRAINT orders_enterprise_offer_terms_check CHECK (
+    topup_offer_code <> 'enterprise'
+    OR (kind = 'wallet_topup' AND topup_multiplier_bps = 50000 AND amount_micros >= 498000000)
+  ),
   CONSTRAINT orders_wallet_credit_micros_check CHECK (wallet_credit_micros IS NULL OR wallet_credit_micros > 0),
   CHECK (payment_method IN ('wechat', 'alipay', 'wechat_native', 'alipay_precreate')),
   CHECK (payment_provider IN ('wechat', 'alipay', 'wechat_native', 'alipay_precreate')),
@@ -478,6 +484,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS orders_provider_order_unique ON orders (paymen
 CREATE UNIQUE INDEX IF NOT EXISTS orders_provider_trade_unique ON orders (payment_provider, provider_trade_id) WHERE provider_trade_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS orders_user_cursor_idx ON orders (user_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS orders_status_expiry_idx ON orders (status, expires_at, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS enterprise_site_leads (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE RESTRICT,
+  contact_name TEXT NOT NULL,
+  contact_method TEXT NOT NULL,
+  desired_site_name TEXT,
+  note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (char_length(trim(contact_name)) BETWEEN 1 AND 80),
+  CHECK (char_length(trim(contact_method)) BETWEEN 1 AND 160),
+  CHECK (desired_site_name IS NULL OR char_length(trim(desired_site_name)) BETWEEN 1 AND 120),
+  CHECK (note IS NULL OR char_length(trim(note)) BETWEEN 1 AND 2000)
+);
+CREATE INDEX IF NOT EXISTS enterprise_site_leads_updated_idx ON enterprise_site_leads (updated_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS payment_events (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -868,6 +890,9 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'orders_sync_aliases' AND tgrelid = 'orders'::regclass) THEN
     CREATE TRIGGER orders_sync_aliases BEFORE INSERT OR UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION relay_sync_order_aliases();
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'enterprise_site_leads_set_updated_at' AND tgrelid = 'enterprise_site_leads'::regclass) THEN
+    CREATE TRIGGER enterprise_site_leads_set_updated_at BEFORE UPDATE ON enterprise_site_leads FOR EACH ROW EXECUTE FUNCTION relay_set_updated_at();
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'affiliate_commissions_sync_aliases' AND tgrelid = 'affiliate_commissions'::regclass) THEN
     CREATE TRIGGER affiliate_commissions_sync_aliases BEFORE INSERT OR UPDATE ON affiliate_commissions FOR EACH ROW EXECUTE FUNCTION relay_sync_affiliate_aliases();
   END IF;
@@ -909,9 +934,20 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_name_snapshot TEXT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_quota_micros BIGINT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS plan_duration_days SMALLINT;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS topup_multiplier_bps INTEGER NOT NULL DEFAULT 10000;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS topup_offer_code TEXT NOT NULL DEFAULT 'standard';
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet_credit_micros BIGINT;
 ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_topup_multiplier_bps_check;
 ALTER TABLE orders ADD CONSTRAINT orders_topup_multiplier_bps_check CHECK (topup_multiplier_bps BETWEEN 10000 AND 100000);
+UPDATE orders SET topup_offer_code = 'standard' WHERE topup_offer_code IS NULL OR topup_offer_code NOT IN ('standard', 'enterprise');
+ALTER TABLE orders ALTER COLUMN topup_offer_code SET DEFAULT 'standard';
+ALTER TABLE orders ALTER COLUMN topup_offer_code SET NOT NULL;
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_topup_offer_code_check;
+ALTER TABLE orders ADD CONSTRAINT orders_topup_offer_code_check CHECK (topup_offer_code IN ('standard', 'enterprise'));
+ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_enterprise_offer_terms_check;
+ALTER TABLE orders ADD CONSTRAINT orders_enterprise_offer_terms_check CHECK (
+  topup_offer_code <> 'enterprise'
+  OR (kind = 'wallet_topup' AND topup_multiplier_bps = 50000 AND amount_micros >= 498000000)
+);
 ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_wallet_credit_micros_check;
 ALTER TABLE orders ADD CONSTRAINT orders_wallet_credit_micros_check CHECK (wallet_credit_micros IS NULL OR wallet_credit_micros > 0);
 

@@ -1,9 +1,10 @@
 (() => {
-  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null, walletAdjustUserId: null, overviewTimer: null, topupMultiplierBps: 30000, channelCostData: null, selectedCostChannel: null, selectedCostModel: null }
+  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null, walletAdjustUserId: null, overviewTimer: null, topupMultiplierBps: 30000, enterpriseOffer: null, channelCostData: null, selectedCostChannel: null, selectedCostModel: null }
   const $ = (selector) => document.querySelector(selector)
   const $$ = (selector) => [...document.querySelectorAll(selector)]
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
   const date = (value) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
+  const shanghaiDate = (value) => value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
   const toMicros = (value) => {
     try { return BigInt(String(typeof value === 'object' && value !== null ? value.micros : value ?? 0)) } catch { return 0n }
   }
@@ -48,6 +49,113 @@
       const credit = (paid * bps) / 10000n
       hint.textContent = '支付 ' + money({ micros: paid }) + '，钱包到账 ' + money({ micros: credit })
     } catch { hint.textContent = '支付金额将按当前充值倍率计入钱包' }
+  }
+  const multiplierLabel = (bps, fallback) => {
+    const parsed = Number(bps)
+    const value = Number.isFinite(parsed) && parsed >= 10000 ? parsed / 10000 : fallback
+    return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')
+  }
+  function applyEnterpriseOffer(offer) {
+    const multiplierBps = Number(offer?.multiplierBps)
+    const minimumAmountMicros = toMicros(offer?.minimumAmountMicros)
+    if (Number.isInteger(multiplierBps) && multiplierBps >= 10000 && multiplierBps <= 100000 && minimumAmountMicros > 0n) {
+      state.enterpriseOffer = { code: String(offer?.code || 'enterprise'), multiplierBps, minimumAmountMicros: String(minimumAmountMicros) }
+    } else {
+      state.enterpriseOffer = null
+      const minimumNode = $('#enterprise-overview-minimum'); if (minimumNode) minimumNode.textContent = '—'
+      const ratioNode = $('#enterprise-overview-ratio'); if (ratioNode) ratioNode.textContent = '—'
+      const formula = $('#enterprise-recharge-formula'); if (formula) formula.textContent = '企业方案暂不可用'
+      const input = $('#enterprise-topup-form [name="amount"]'); if (input) input.disabled = true
+      const button = $('#enterprise-topup-form [type="submit"]'); if (button) button.disabled = true
+      const hint = $('#enterprise-topup-hint'); if (hint) hint.textContent = '请稍后刷新企业充值方案。'
+      const error = $('#enterprise-topup-error'); if (error) error.textContent = '企业充值配置暂不可用，请稍后刷新。'
+      return
+    }
+    const configured = state.enterpriseOffer
+    const minimum = toMicros(configured.minimumAmountMicros)
+    const credit = minimum * BigInt(configured.multiplierBps) / 10000n
+    const ratio = '1:' + multiplierLabel(configured.multiplierBps, 5)
+    const minimumNode = $('#enterprise-overview-minimum'); if (minimumNode) minimumNode.textContent = money({ micros: minimum })
+    const ratioNode = $('#enterprise-overview-ratio'); if (ratioNode) ratioNode.textContent = ratio
+    const formula = $('#enterprise-recharge-formula'); if (formula) formula.textContent = money({ micros: minimum }) + ' → ' + money({ micros: credit })
+    const input = $('#enterprise-topup-form [name="amount"]')
+    if (input) {
+      input.disabled = false
+      input.min = microsToYuan(minimum)
+      if (!input.value || (() => { try { return yuanToMicros(input.value) < minimum } catch { return true } })()) input.value = microsToYuan(minimum)
+    }
+    const button = $('#enterprise-topup-form [type="submit"]'); if (button) button.disabled = false
+    updateEnterpriseTopupHint()
+  }
+  function updateEnterpriseTopupHint() {
+    const input = $('#enterprise-topup-form [name="amount"]'); const hint = $('#enterprise-topup-hint'); const error = $('#enterprise-topup-error')
+    if (!input || !hint || !error) return
+    if (!state.enterpriseOffer) { hint.textContent = '正在读取企业充值方案…'; return }
+    const minimum = toMicros(state.enterpriseOffer.minimumAmountMicros)
+    try {
+      const paid = yuanToMicros(input.value)
+      if (paid % 10000n !== 0n) {
+        hint.textContent = '企业充值金额需精确到分'
+        error.textContent = '充值金额最多保留两位小数。'
+        return
+      }
+      if (paid < minimum) {
+        hint.textContent = '企业充值最低 ' + money({ micros: minimum })
+        error.textContent = '请输入不少于 ' + money({ micros: minimum }) + ' 的充值金额。'
+        return
+      }
+      const credit = paid * BigInt(state.enterpriseOffer.multiplierBps) / 10000n
+      hint.textContent = '支付 ' + money({ micros: paid }) + '，钱包到账 ' + money({ micros: credit })
+      error.textContent = ''
+    } catch {
+      hint.textContent = '填写金额后查看企业钱包到账额度'
+      error.textContent = input.value ? '请输入有效的充值金额，最多保留两位小数。' : ''
+    }
+  }
+  const comparisonModels = [
+    ['gpt-6-astra', 'Astra'],
+    ['gpt-5.6-sol', 'Sol'],
+    ['gpt-5.6-terra', 'Terra'],
+    ['gpt-5.6-luna', 'Luna']
+  ]
+  const priceUnavailable = () => '<span class="price-unavailable">暂不可用</span>'
+  function personalPriceCell(rate, comparison) {
+    if (!rate || rate.monthlyEffectiveMicros == null || rate.walletEffectiveMicros == null) return priceUnavailable()
+    return '<div class="price-value"><div><strong>' + money({ micros: rate.monthlyEffectiveMicros }) + '</strong><span class="recommended-tag">个人推荐</span></div><small>月卡折算 1/' + multiplierLabel(comparison.monthlyMultiplierBps, 4) + '</small><span>普通钱包 ' + money({ micros: rate.walletEffectiveMicros }) + ' · 1/' + multiplierLabel(comparison.walletMultiplierBps, 3) + '</span></div>'
+  }
+  function enterprisePriceCell(rate, comparison) {
+    if (!rate || rate.enterpriseEffectiveMicros == null) return priceUnavailable()
+    return '<div class="price-value enterprise-value"><strong>' + money({ micros: rate.enterpriseEffectiveMicros }) + '</strong><small>企业钱包折算 · 1/' + multiplierLabel(comparison.enterpriseMultiplierBps, 5) + '</small></div>'
+  }
+  function comparisonRows(comparison, tier) {
+    const byId = new Map((comparison?.models || []).map((model) => [model.id, model]))
+    return comparisonModels.map(([id, fallbackName]) => {
+      const model = byId.get(id) || { id, displayName: fallbackName, available: false }
+      const cell = tier === 'enterprise' ? enterprisePriceCell : personalPriceCell
+      const parts = model.available === false ? [priceUnavailable(), priceUnavailable(), priceUnavailable()] : ['input', 'output', 'cache'].map((part) => cell(model[part], comparison))
+      return '<tr><th scope="row"><strong>' + esc(model.displayName || model.name || fallbackName) + '</strong><small>' + esc(id) + '</small></th><td>' + parts[0] + '</td><td>' + parts[1] + '</td><td>' + parts[2] + '</td></tr>'
+    }).join('')
+  }
+  function renderOverviewPricing(data) {
+    const usage = data.todayUsage || {}
+    $('#today-request-count').textContent = usage.requests == null ? '—' : integer(usage.requests) + ' 次'
+    $('#today-charge-total').textContent = usage.chargeMicros == null ? '—' : money({ micros: usage.chargeMicros })
+    const usageRange = usage.from && usage.to ? '北京时间 ' + shanghaiDate(usage.from) + ' 至 ' + shanghaiDate(usage.to) : '按北京时间自然日统计'
+    $('.today-usage').title = usageRange
+    applyEnterpriseOffer(data.enterpriseOffer)
+    const comparison = data.modelPriceComparison
+    if (!comparison?.models) {
+      const unavailable = comparisonModels.map(([id, name]) => '<tr><th scope="row"><strong>' + esc(name) + '</strong><small>' + esc(id) + '</small></th><td colspan="3">' + priceUnavailable() + '</td></tr>').join('')
+      $('#personal-price-table').innerHTML = unavailable
+      $('#enterprise-price-table').innerHTML = unavailable
+      $('#personal-price-error').textContent = '价格暂未加载，请稍后刷新。'
+      return
+    }
+    $('#personal-price-table').innerHTML = comparisonRows(comparison, 'personal')
+    $('#enterprise-price-table').innerHTML = comparisonRows(comparison, 'enterprise')
+    $('#personal-price-error').textContent = ''
+    const note = $('#personal-price-note')
+    note.textContent = '月卡 1/' + multiplierLabel(comparison.monthlyMultiplierBps, 4) + ' 为四次额度全部使用后的折算价，未使用额度不结转。普通钱包按 1/' + multiplierLabel(comparison.walletMultiplierBps, 3) + ' 对照；页面价格保留两位小数，实际账务按精确微元结算。'
   }
   const integer = (value) => String(toMicros(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   const margin = (cost, sell) => {
@@ -193,18 +301,22 @@
       const history = data.history || {}
       const historyCredit = $('#history-topup-credit'); if (historyCredit) historyCredit.textContent = money({ micros: history.totalTopupCreditMicros || '0' })
       const historyPaid = $('#history-paid'); if (historyPaid) historyPaid.textContent = money({ micros: history.totalPaidMicros || '0' })
-      const discountPercent = Number(data.tokenDiscountPercent || 0)
+      const discountPercent = data.effectiveTokenDiscountBps == null ? Number(data.tokenDiscountPercent || 0) : Number(data.effectiveTokenDiscountBps) / 100
       $('#token-discount').textContent = discountPercent > 0 ? discountPercent + '% off（实际支付 ' + (100 - discountPercent) + '%）' : '无折扣（原价）'
       $('#plan-expiry').textContent = data.balance.planExpiresAt ? new Date(data.balance.planExpiresAt).toLocaleDateString('zh-CN') : '未开通'
       const resetNode = $('#plan-reset')
       if (resetNode) resetNode.textContent = data.balance.planNextResetAt ? new Date(data.balance.planNextResetAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
       $('#api-base').textContent = data.apiBaseUrl; $('#account-state').textContent = data.balance.isValid ? '有效' : '需充值'
       const progress = $('#overview-plan-progress'); if (progress) progress.innerHTML = planProgressMarkup(data.balance)
+      renderOverviewPricing(data)
       $('#chatgpt-link').href = data.downloads.chatgpt; $('#ccswitch-link').href = data.downloads.ccswitch
       $('#quick-config').textContent = 'Base URL: ' + data.apiBaseUrl + '\nAuthorization: Bearer sk-relay-…'
       const guideBase = $('#guide-api-base'); if (guideBase) guideBase.textContent = data.apiBaseUrl
-      renderUsage('#recent-usage', (await api('/api/me/usage?limit=5')).items, true)
-    } catch (error) { toast(error.message, true) }
+      try { renderUsage('#recent-usage', (await api('/api/me/usage?limit=5')).items, true) } catch (usageError) { $('#recent-usage').innerHTML = '<tr><td colspan="5" class="empty">最近调用加载失败，请稍后重试</td></tr>'; toast(usageError.message, true) }
+    } catch (error) {
+      const pricingError = $('#personal-price-error'); if (pricingError) pricingError.textContent = '价格与今日用量加载失败，请稍后刷新。'
+      toast(error.message, true)
+    }
   }
   async function loadKeys() {
     try {
@@ -236,12 +348,41 @@
     } catch (error) { toast(error.message, true) } finally { pending(button, false) }
   }
   async function loadRecharge() {
-    try {
-      const [plans, overview] = await Promise.all([api('/api/plans'), api('/api/me/overview')])
+    const [plansResult, overviewResult] = await Promise.allSettled([api('/api/plans'), api('/api/me/overview')])
+    if (overviewResult.status === 'fulfilled') {
+      const overview = overviewResult.value
       applyTopupMultiplier(overview.walletTopupMultiplierBps)
+      applyEnterpriseOffer(overview.enterpriseOffer)
       const progress = $('#recharge-plan-progress'); if (progress) progress.innerHTML = planProgressMarkup(overview.balance)
-      $('#plans').innerHTML = plans.items.length ? plans.items.map((plan) => '<div class="plan-option"><div><strong>' + esc(plan.name) + '</strong><small>30 天有效 · 每月 4 次额度 · 每次可消费额度 ' + money({ micros: plan.quota_micros }) + '</small><small class="plan-price">套餐价 ' + money({ micros: plan.price_micros }) + '</small></div><button class="button secondary buy-plan" type="button" data-id="' + esc(plan.id) + '" data-amount="' + esc(plan.price_micros) + '">购买套餐</button></div>').join('') : '<p class="empty">管理员尚未配置套餐</p>'
-    } catch (error) { toast(error.message, true) }
+    } else {
+      applyEnterpriseOffer(null)
+      const progress = $('#recharge-plan-progress'); if (progress) progress.innerHTML = '<div class="plan-progress empty-progress"><div><strong>套餐额度</strong><span>加载失败，请稍后重试</span></div></div>'
+    }
+    if (plansResult.status === 'fulfilled') {
+      const plans = plansResult.value
+      $('#plans').innerHTML = plans.items.length ? plans.items.map((plan) => '<div class="plan-option"><div><strong>' + esc(plan.name) + '</strong><small>30 天有效 · 立即发放，之后第 7、14、21 天各发放一次 · 每次可消费额度 ' + money({ micros: plan.quota_micros }) + '</small><small class="plan-price">套餐价 ' + money({ micros: plan.price_micros }) + '</small></div><button class="button secondary buy-plan" type="button" data-id="' + esc(plan.id) + '" data-amount="' + esc(plan.price_micros) + '">购买套餐</button></div>').join('') : '<p class="empty">管理员尚未配置套餐</p>'
+    } else {
+      $('#plans').innerHTML = '<p class="empty">套餐加载失败，请稍后重试</p>'
+    }
+    await loadEnterpriseLead()
+    const failed = [overviewResult, plansResult].find((result) => result.status === 'rejected')
+    if (failed) toast(failed.reason?.message || '充值信息加载失败', true)
+  }
+  async function loadEnterpriseLead() {
+    const form = $('#enterprise-lead-form'); const status = $('#enterprise-lead-status'); const error = $('#enterprise-lead-error')
+    if (!form || !status || !error) return
+    if (form.dataset.loaded === 'true') return
+    status.textContent = '正在读取已保存的信息…'; error.textContent = ''
+    try {
+      const data = await api('/api/me/enterprise-site-lead')
+      const item = data.item
+      if (form.dataset.dirty !== 'true') for (const name of ['contactName', 'contactMethod', 'desiredSiteName', 'note']) form.elements.namedItem(name).value = item?.[name] || ''
+      form.dataset.loaded = 'true'
+      status.textContent = item ? '已保存 · 最近更新 ' + date(item.updatedAt) : '尚未提交联系信息。'
+    } catch (loadError) {
+      status.textContent = ''
+      error.textContent = loadError.message + '，请稍后重新进入本页。'
+    }
   }
   function renderPayment(data) {
     const payment = data.payment || {}; const provider = '微信'; const raw = payment.qrCode || payment.codeUrl || ''
@@ -250,6 +391,7 @@
     $('#payment-result').classList.remove('hidden')
     const creditNote = data.walletCreditAmount ? '支付 ' + money(data.amount) + '，钱包到账 ' + money(data.walletCreditAmount) + '。' : ''
     $('#payment-result').innerHTML = '<div class="payment-layout">' + (image ? '<img class="payment-qr" src="' + esc(image) + '" alt="' + provider + '支付二维码">' : '') + '<div class="payment-details"><strong id="payment-status">订单已创建</strong><p id="payment-status-note">请使用' + provider + (image ? '扫描二维码' : '打开支付链接') + '完成支付。' + creditNote + '到账后余额会自动更新。</p>' + (codeUrl ? '<div class="copy-line"><code id="payment-code">' + esc(codeUrl) + '</code><button type="button" class="small-button" data-copy="payment-code">复制支付链接</button></div>' : '<p class="form-error">支付渠道未返回二维码，请稍后重试。</p>') + '</div></div>'
+    $('#payment-result').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     if (data.orderId) {
       const started = Date.now(); let paymentPollInFlight = false; const timer = setInterval(async () => {
         if (Date.now() - started > 31 * 60 * 1000) return clearInterval(timer)
@@ -351,9 +493,9 @@
       return editor + table(['方法', '路径 / 规格', '模型', '单位', '售价', '状态', '操作'], rows, '尚未配置固定接口价格')
     }
     if (tab === 'plans') {
-      const editor = form('plan', [field('code', '套餐代码', 'monthly-149', 'text', 'required'), field('name', '套餐名称', '月套餐', 'text', 'required'), field('priceYuan', '售价（元）', '149.00', 'text', 'required'), field('quotaYuan', '周期额度（元）', '149.00', 'text', 'required'), field('displayOrder', '排序', '10', 'number', 'min="0"'), check('active', '可购买'), '<p class="admin-note wide">套餐有效期 30 天；每周一 09:00（北京时间）恢复周期额度至上限，未用额度不结转。</p>'], '保存套餐')
-      const rows = items.map((item) => '<tr><td><strong>' + esc(item.name) + '</strong><small class="subline">' + esc(item.code) + '</small></td><td>' + money({ micros: item.price_micros }) + '</td><td>' + money({ micros: item.quota_micros }) + '</td><td>周期重置</td><td>30 天</td><td><span class="state ' + (item.active && item.enabled ? 'good' : 'bad') + '">' + (item.active && item.enabled ? '启用' : '停用') + '</span></td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="plan" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button danger-button admin-delete" type="button" data-kind="plan" data-id="' + esc(item.id) + '">停用</button></td></tr>')
-      return '<div class="admin-toolbar"><p>独立购买、支付入账和套餐优先扣费均已启用。</p><button class="button secondary" type="button" data-bootstrap="monthly-plan">初始化 ¥149 月套餐</button></div>' + editor + table(['套餐', '售价', '可消费额度', '毛利率', '有效期', '状态', '操作'], rows, '尚未配置套餐')
+      const editor = form('plan', [field('code', '套餐代码', 'monthly-149', 'text', 'required'), field('name', '套餐名称', '月套餐', 'text', 'required'), field('priceYuan', '售价（元）', '149.00', 'text', 'required'), field('quotaYuan', '周期额度（元）', '149.00', 'text', 'required'), field('displayOrder', '排序', '10', 'number', 'min="0"'), check('active', '可购买'), '<p class="admin-note wide">套餐有效期 30 天；新购买立即发放首期额度，第 7、14、21 天各发放一期，共 4 次，未用额度不结转。</p>'], '保存套餐')
+      const rows = items.map((item) => '<tr><td><strong>' + esc(item.name) + '</strong><small class="subline">' + esc(item.code) + '</small></td><td>' + money({ micros: item.price_micros }) + '</td><td>' + money({ micros: item.quota_micros }) + '</td><td>购买日 + 第 7 / 14 / 21 天</td><td>30 天</td><td><span class="state ' + (item.active && item.enabled ? 'good' : 'bad') + '">' + (item.active && item.enabled ? '启用' : '停用') + '</span></td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="plan" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button danger-button admin-delete" type="button" data-kind="plan" data-id="' + esc(item.id) + '">停用</button></td></tr>')
+      return '<div class="admin-toolbar"><p>独立购买、支付入账和套餐优先扣费均已启用；新购月套餐按购买日开始四期发放。</p><button class="button secondary" type="button" data-bootstrap="monthly-plan">初始化 ¥149 月套餐</button></div>' + editor + table(['套餐', '售价', '单期可消费额度', '发放规则', '有效期', '状态', '操作'], rows, '尚未配置套餐')
     }
     if (tab === 'users-discount') tab = 'users'
     if (tab === 'users') {
@@ -372,13 +514,21 @@
       const conversion = (data.conversions || []).map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>已完成</td></tr>')
       return editor + '<div><p class="admin-section-title">佣金流水</p>' + table(['时间', '邀请人', '被邀请人', '充值', '比例', '返利'], commission, '暂无佣金流水') + '</div><div><p class="admin-section-title">兑换流水</p>' + table(['时间', '用户', '兑换金额', '状态'], conversion, '暂无兑换流水') + '</div>'
     }
+    if (tab === 'enterprise-leads') {
+      const rows = items.map((item) => '<tr><td><strong>' + esc(item.username || '—') + '</strong><small class="subline">' + esc(item.email || '未填写邮箱') + '</small></td><td><strong>' + esc(item.contactName) + '</strong></td><td><span class="wrap-text contact-value">' + esc(item.contactMethod) + '</span></td><td><span class="wrap-text">' + esc(item.desiredSiteName || '—') + '</span></td><td><span class="wrap-text lead-note">' + esc(item.note || '—') + '</span></td><td>' + date(item.updatedAt) + '<small class="subline">提交 ' + date(item.createdAt) + '</small></td></tr>')
+      return '<p class="notice">注册用户提交或更新独立站搭建需求后会显示在这里。联系信息仅供管理员跟进。</p>' + table(['用户', '联系人', '联系方式', '期望站点', '需求说明', '更新时间'], rows, '暂无企业独立站线索')
+    }
     if (tab === 'orders') return table(['时间', '用户', '类型', '金额', '方式', '支付状态', '到账状态', '订单号', '操作'], items.map((item) => {
       const creditLabel = item.creditStatus === 'credited' ? (item.kind === 'wallet_topup' ? '已到账' : '套餐已生效') : item.creditStatus === 'pending' ? '待支付' : item.creditStatus === 'inconsistent' ? '到账异常' : '不适用'
       const creditClass = item.creditStatus === 'credited' ? 'good' : item.creditStatus === 'inconsistent' ? 'bad' : ''
       const creditAmount = item.creditedAmountMicros ? '<small class="subline">' + money({ micros: item.creditedAmountMicros }) + ' · ' + date(item.creditedAt) + '</small>' : ''
       const creditAudit = item.credit_reconciled_at ? '<small class="subline">补账审计：' + date(item.credit_reconciled_at) + ' · ' + esc(item.credit_reconciled_by || '系统自动') + '</small>' : ''
       const action = item.creditStatus === 'inconsistent' ? '<button class="small-button" type="button" data-order-reconcile="' + esc(item.id) + '">重新核对</button>' : '—'
-      return '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td>' + esc(item.kind) + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>' + esc(item.payment_method) + '</td><td><span class="state ' + (item.status === 'paid' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td><span class="state ' + creditClass + '">' + creditLabel + '</span><small class="subline">' + esc(item.creditMessage || '') + '</small>' + creditAmount + creditAudit + '</td><td><code>' + esc(item.order_no) + '</code></td><td>' + action + '</td></tr>'
+      const offerCode = item.topup_offer_code || item.topupOfferCode
+      const typeLabel = item.kind === 'wallet_topup' ? (offerCode === 'enterprise' ? '企业充值' : '普通充值') : item.kind
+      const offerRatio = multiplierLabel(item.topup_multiplier_bps, offerCode === 'enterprise' ? 5 : 3)
+      const offerLabel = item.kind === 'wallet_topup' ? '<small class="subline">' + (offerCode === 'enterprise' ? '企业钱包 1:' : '普通钱包 1:') + offerRatio + '</small>' : ''
+      return '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td><strong>' + esc(typeLabel) + '</strong>' + offerLabel + '</td><td>' + money({ micros: item.amount_micros }) + '</td><td>' + esc(item.payment_method) + '</td><td><span class="state ' + (item.status === 'paid' ? 'good' : 'bad') + '">' + esc(item.status) + '</span></td><td><span class="state ' + creditClass + '">' + creditLabel + '</span><small class="subline">' + esc(item.creditMessage || '') + '</small>' + creditAmount + creditAudit + '</td><td><code>' + esc(item.order_no) + '</code></td><td>' + action + '</td></tr>'
     }))
     if (tab === 'admin-usage') {
       const rows = items.map((item) => '<tr><td>' + date(item.created_at) + '</td><td>' + esc(item.username) + '</td><td><code>' + esc(item.request_id) + '</code></td><td>' + esc(item.requested_model) + (item.upstream_model && item.upstream_model !== item.requested_model ? '<small class="subline">上游 ' + esc(item.upstream_model) + '</small>' : '') + '</td><td>' + esc(item.final_channel_name_snapshot || '—') + '</td><td>' + money({ micros: item.charge_micros }) + '</td><td>' + money({ micros: item.cost_micros }) + ' / ' + money({ micros: item.profit_micros }) + (item.fallbackCostPending ? '<small class="subline">兜底成本待核实 · 利润为估算</small>' : '') + '</td><td><button class="small-button admin-attempts" type="button" data-id="' + esc(item.request_id) + '">链路</button></td></tr>')
@@ -404,8 +554,9 @@
     }
     state.adminTab = tab
     $$('.admin-tabs .tab').forEach((node) => node.classList.toggle('active', node.dataset.adminTab === tab))
-    const endpoints = { 'media-admin': '/api/admin/media', overview: '/api/admin/overview', channels: '/api/admin/channels', 'channel-costs': '/api/admin/channel-costs', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', settings: '/api/admin/settings' }
-    try { $('#admin-content').innerHTML = renderAdmin(tab, await api(endpoints[tab])); if (tab === 'channel-costs') { const editor = $('[data-admin-form="channel-cost"]'); if (state.selectedCostChannel && (state.channelCostData.channels || []).some(c => c.id === state.selectedCostChannel)) setFormValue(editor, 'channelId', state.selectedCostChannel); refreshChannelCostEditor(true) } } catch (error) { toast(error.message, true) }
+    const endpoints = { 'media-admin': '/api/admin/media', overview: '/api/admin/overview', channels: '/api/admin/channels', 'channel-costs': '/api/admin/channel-costs', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', 'enterprise-leads': '/api/admin/enterprise-leads', settings: '/api/admin/settings' }
+    $('#admin-content').innerHTML = '<p class="empty">正在加载…</p>'
+    try { $('#admin-content').innerHTML = renderAdmin(tab, await api(endpoints[tab])); if (tab === 'channel-costs') { const editor = $('[data-admin-form="channel-cost"]'); if (state.selectedCostChannel && (state.channelCostData.channels || []).some(c => c.id === state.selectedCostChannel)) setFormValue(editor, 'channelId', state.selectedCostChannel); refreshChannelCostEditor(true) } } catch (error) { $('#admin-content').innerHTML = '<p class="empty">加载失败，请稍后重试</p>'; toast(error.message, true) }
   }
 
   let galleryKind = ''
@@ -806,9 +957,34 @@
   })
   $('#topup-form').addEventListener('submit', async (event) => {
     event.preventDefault(); const button = event.currentTarget.querySelector('[type="submit"]'); const data = new FormData(event.currentTarget); pending(button, true, '正在创建…')
-    try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'wallet_topup', amountMicros: yuanToMicros(data.get('amount')).toString(), paymentMethod: 'wechat' }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }
+    try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'wallet_topup', offerCode: 'standard', amountMicros: yuanToMicros(data.get('amount')).toString(), paymentMethod: 'wechat' }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }
   })
   $('#topup-form [name="amount"]').addEventListener('input', updateTopupCreditHint)
+  $('#enterprise-topup-form').addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const form = event.currentTarget; const button = form.querySelector('[type="submit"]'); const error = $('#enterprise-topup-error')
+    try {
+      const amountMicros = yuanToMicros(new FormData(form).get('amount'))
+      if (!state.enterpriseOffer) throw new Error('企业充值配置暂不可用，请稍后刷新')
+      if (amountMicros % 10000n !== 0n) throw new Error('企业充值金额最多保留两位小数')
+      if (amountMicros < toMicros(state.enterpriseOffer.minimumAmountMicros)) throw new Error('企业充值最低 ' + money({ micros: state.enterpriseOffer.minimumAmountMicros }))
+      error.textContent = ''; pending(button, true, '正在创建…')
+      renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'wallet_topup', offerCode: 'enterprise', amountMicros: amountMicros.toString(), paymentMethod: 'wechat' }) }))
+    } catch (submitError) { error.textContent = submitError.message; toast(submitError.message, true) } finally { pending(button, false) }
+  })
+  $('#enterprise-topup-form [name="amount"]').addEventListener('input', updateEnterpriseTopupHint)
+  $('#enterprise-lead-form').addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const form = event.currentTarget; const data = Object.fromEntries(new FormData(form).entries()); const button = form.querySelector('[type="submit"]'); const error = $('#enterprise-lead-error'); const status = $('#enterprise-lead-status')
+    error.textContent = ''; pending(button, true, '保存中…')
+    try {
+      const result = await api('/api/me/enterprise-site-lead', { method: 'POST', body: JSON.stringify(data) })
+      form.dataset.loaded = 'true'; form.dataset.dirty = 'false'
+      status.textContent = '已保存 · 最近更新 ' + date(result.item?.updatedAt || new Date().toISOString())
+      toast('联系信息已保存')
+    } catch (submitError) { error.textContent = submitError.message } finally { pending(button, false) }
+  })
+  $('#enterprise-lead-form').addEventListener('input', (event) => { event.currentTarget.dataset.dirty = 'true' })
   $('#plans').addEventListener('click', async (event) => {
     const button = event.target.closest('.buy-plan'); if (!button) return; pending(button, true, '正在创建…')
     try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'subscription', planId: button.dataset.id, amountMicros: button.dataset.amount, paymentMethod: 'wechat' }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }

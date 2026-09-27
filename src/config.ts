@@ -1,5 +1,9 @@
 import { randomBytes } from 'node:crypto'
 
+export const ENTERPRISE_TOPUP_MULTIPLIER_BPS = 50000
+export const ENTERPRISE_TOPUP_MINIMUM_MICROS = 498000000
+export const MONTHLY_DISPLAY_MULTIPLIER_BPS = 40000
+
 export type PaymentConfig = {
   wechat: {
     appId: string
@@ -47,6 +51,8 @@ export type AppConfig = {
   usageRetentionDays: number
   defaultAffiliateRateBps: number
   walletTopupMultiplierBps: number
+  enterpriseTopupMultiplierBps: number
+  enterpriseTopupMinimumMicros: number
   chatgptDownloadUrl: string
   ccswitchDownloadUrl: string
   smtp: SmtpConfig
@@ -147,6 +153,8 @@ export function loadConfig(): AppConfig {
     // A wallet top-up is a promotional credit: paying ¥1 currently adds ¥3
     // to the API wallet. The payment order still records the amount paid.
     walletTopupMultiplierBps: nonNegativeInt('WALLET_TOPUP_MULTIPLIER_BPS', 30000),
+    enterpriseTopupMultiplierBps: ENTERPRISE_TOPUP_MULTIPLIER_BPS,
+    enterpriseTopupMinimumMicros: ENTERPRISE_TOPUP_MINIMUM_MICROS,
     chatgptDownloadUrl: text('CHATGPT_DOWNLOAD_URL', 'https://openai.com/zh-Hans-CN/codex/'),
     ccswitchDownloadUrl: text('CCSWITCH_DOWNLOAD_URL', 'https://ccswitch.io/zh/'),
     smtp: {

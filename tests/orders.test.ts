@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import { normalizeNewOrderPaymentMethod, OrderService, topupCreditAmount } from '../src/services/orders.js'
+import { normalizeNewOrderPaymentMethod, normalizeTopupOfferCode, OrderService, topupCreditAmount } from '../src/services/orders.js'
 
 type PaymentEvent = {
   provider: string
@@ -11,12 +11,13 @@ type PaymentEvent = {
 
 function result(rows: any[] = []) { return { rows, rowCount: rows.length } }
 
-function callbackHarness() {
+function callbackHarness(overrides: Record<string, unknown> = {}) {
   const order: any = {
     id: 'order-1', order_no: 'RSORDER1', user_id: 'user-1', kind: 'wallet_topup',
     payment_provider: 'wechat_native', payment_method: 'wechat', amount_micros: '10000',
-    topup_multiplier_bps: 30000,
+    topup_multiplier_bps: 30000, topup_offer_code: 'standard',
     currency: 'CNY', provider_trade_id: null, status: 'pending', expires_at: null,
+    ...overrides,
   }
   const events: PaymentEvent[] = []
   const walletLedger: unknown[][] = []
@@ -62,6 +63,55 @@ describe('wallet top-up promotion', () => {
     expect(topupCreditAmount(1250000n, 15000)).toBe(1875000n)
     expect(() => topupCreditAmount(1000000n, 9999)).toThrow('充值倍率无效')
   })
+
+  test('snapshots the enterprise offer and credits ¥2490 for a ¥498 payment', async () => {
+    let inserted: unknown[] = []
+    const db = { one: vi.fn(async (sql: string, values: unknown[]) => {
+      expect(sql).toContain('topup_offer_code')
+      inserted = values
+      return {
+        id: 'order-enterprise', order_no: values[0], kind: 'wallet_topup', amount_micros: values[3],
+        topup_multiplier_bps: values[9], topup_offer_code: values[10], payment_method: values[11],
+        plan_id: null, plan_reset_grant_limit: null, expires_at: values[13],
+      }
+    }) }
+    const service = new OrderService(db as any, {} as any, {
+      walletTopupMultiplierBps: 30000,
+      enterpriseTopupMultiplierBps: 50000,
+      enterpriseTopupMinimumMicros: 498000000,
+    } as any)
+
+    const created = await service.create('user-1', {
+      kind: 'wallet_topup', amountMicros: 498000000n, paymentMethod: 'wechat', offerCode: 'enterprise',
+    })
+    expect(created).toMatchObject({ topupOfferCode: 'enterprise', topupMultiplierBps: 50000, walletCreditMicros: 2490000000n })
+    expect(inserted[9]).toBe(50000)
+    expect(inserted[10]).toBe('enterprise')
+  })
+
+  test('rejects invalid or undersized enterprise offers and ignores a client multiplier', async () => {
+    const rows: unknown[][] = []
+    const db = { one: vi.fn(async (_sql: string, values: unknown[]) => {
+      rows.push(values)
+      return { id: 'order-standard', order_no: values[0], kind: 'wallet_topup', amount_micros: values[3], topup_multiplier_bps: values[9], topup_offer_code: values[10], payment_method: values[11], plan_id: null, plan_reset_grant_limit: null, expires_at: values[13] }
+    }) }
+    const service = new OrderService(db as any, {} as any, {
+      walletTopupMultiplierBps: 30000,
+      enterpriseTopupMultiplierBps: 50000,
+      enterpriseTopupMinimumMicros: 498000000,
+    } as any)
+
+    await expect(service.create('user-1', { kind: 'wallet_topup', amountMicros: 497990000n, paymentMethod: 'wechat', offerCode: 'enterprise' })).rejects.toThrow('企业充值最低金额为 498 元')
+    await expect(service.create('user-1', { kind: 'wallet_topup', amountMicros: 498000001n, paymentMethod: 'wechat', offerCode: 'enterprise' })).rejects.toThrow('支付金额必须精确到分')
+    expect(() => normalizeTopupOfferCode('vip')).toThrow('充值方案无效')
+
+    const created = await service.create('user-1', {
+      kind: 'wallet_topup', amountMicros: 1000000n, paymentMethod: 'wechat', offerCode: 'standard', topupMultiplierBps: 99000,
+    } as any)
+    expect(created.topupMultiplierBps).toBe(30000)
+    expect(created.walletCreditMicros).toBe(3000000n)
+    expect(rows).toHaveLength(1)
+  })
 })
 
 describe('payment callback settlement', () => {
@@ -95,6 +145,26 @@ describe('payment callback settlement', () => {
     expect(walletLedger[0]?.[1]).toBe('30000')
     expect(JSON.parse(String(walletLedger[0]?.[5]))).toMatchObject({ paidAmountMicros: '10000', creditedAmountMicros: '30000', topupMultiplierBps: 30000 })
     await expect(service.applyVerifiedCallback({ ...payment, eventId: 'evt-no-trade', transactionId: null })).rejects.toThrow('支付交易号缺失')
+  })
+
+  test('credits an enterprise callback at 1:5 and never duplicates credit or referral', async () => {
+    const { service, events, affiliate, walletLedger } = callbackHarness({
+      amount_micros: '498000000', topup_multiplier_bps: 50000, topup_offer_code: 'enterprise',
+    })
+    const payment = {
+      provider: 'wechat' as const, eventId: 'evt-enterprise', orderNo: 'RSORDER1', transactionId: 'trade-enterprise',
+      status: 'paid' as const, amountFen: 49800, currency: 'CNY',
+    }
+
+    await expect(service.applyVerifiedCallback(payment)).resolves.toEqual({ accepted: true, alreadyProcessed: false, orderId: 'order-1' })
+    await expect(service.applyVerifiedCallback(payment)).resolves.toEqual({ accepted: true, alreadyProcessed: true, orderId: 'order-1' })
+    expect(events).toHaveLength(1)
+    expect(affiliate.creditForTopup).toHaveBeenCalledTimes(1)
+    expect(walletLedger).toHaveLength(1)
+    expect(walletLedger[0]?.[1]).toBe('2490000000')
+    expect(JSON.parse(String(walletLedger[0]?.[5]))).toMatchObject({
+      paidAmountMicros: '498000000', creditedAmountMicros: '2490000000', topupMultiplierBps: 50000, topupOfferCode: 'enterprise',
+    })
   })
 })
 
