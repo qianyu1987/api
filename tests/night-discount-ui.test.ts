@@ -36,6 +36,7 @@ describe('night discount account UI', () => {
     expect(styles).toContain('[data-night-discount-status="active"]')
     expect(styles).toContain('@media (max-width: 980px)')
     expect(styles).toContain('@media (max-width: 600px)')
+    expect(styles).toContain('.content { min-width: 0; }')
     expect(styles).toContain('.night-discount-details { grid-template-columns: 1fr; }')
   })
 

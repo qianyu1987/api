@@ -312,6 +312,12 @@ function responseHeader(headers: Record<string, string | string[] | undefined>, 
   return null
 }
 
+const blockedRelayResponseHeaders = new Set(['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie', 'x-request-id'])
+
+export function shouldForwardRelayResponseHeader(name: string): boolean {
+  return !blockedRelayResponseHeaders.has(name.toLowerCase())
+}
+
 function upstreamErrorDetails(payload: any): { code: string; summary: string } {
   if (!payload || typeof payload !== 'object') return { code: 'upstream_http_error', summary: '上游返回错误' }
   const error = payload.error && typeof payload.error === 'object' ? payload.error : payload
@@ -1765,7 +1771,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       reply.hijack()
       reply.raw.statusCode = response.statusCode
       reply.raw.setHeader('X-Request-Id', requestId)
-      for (const [key, value] of Object.entries(responseHeaders)) if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.raw.setHeader(key, value as any)
+      for (const [key, value] of Object.entries(responseHeaders)) if (shouldForwardRelayResponseHeader(key) && value !== undefined) reply.raw.setHeader(key, value as any)
       const decoder = new StringDecoder('utf8')
       const publicStream = relay.responseAdapter === 'agnes_responses'
         ? new AgnesResponsesSse(model)
@@ -1876,7 +1882,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         .catch((error) => app.log.warn({ err: error, requestId }, 'failed to record relay attempts'))
     }
     reply.code(response.statusCode)
-    for (const [key, value] of Object.entries(responseHeaders)) if (!['content-encoding', 'content-length', 'transfer-encoding', 'connection', 'set-cookie'].includes(key.toLowerCase()) && value !== undefined) reply.header(key, value as any)
+    for (const [key, value] of Object.entries(responseHeaders)) if (shouldForwardRelayResponseHeader(key) && value !== undefined) reply.header(key, value as any)
     // Billing above always receives the unmodified upstream metadata.
     const successfulAgnesResponse = relay.responseAdapter === 'agnes_responses'
       && response.statusCode >= 200 && response.statusCode < 300 && parsedResponse

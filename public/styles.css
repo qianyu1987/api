@@ -8,6 +8,7 @@
  .balance-history{display:flex;flex-wrap:wrap;gap:14px;margin-top:14px;color:var(--muted);font-size:12px}.balance-history span{display:flex;gap:5px;align-items:baseline}.balance-history strong{color:var(--ink);font-size:14px;font-variant-numeric:tabular-nums}
 
 /* Price comparison and enterprise offer: dense, scan-first account surfaces. */
+.content { min-width: 0; }
 .price-comparison { margin-top: 28px; padding: 24px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
 .price-section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 28px; margin-bottom: 18px; }
 .price-section-heading h3, .enterprise-offer h3, .enterprise-recharge-heading h3 { margin: 0; font-size: 19px; letter-spacing: 0; }

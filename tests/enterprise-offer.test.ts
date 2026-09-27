@@ -6,10 +6,17 @@ import {
   normalizeEnterpriseLeadInput,
   shanghaiDayBounds,
   shanghaiNightDiscountWindow,
+  shouldForwardRelayResponseHeader,
   type RelayApp,
 } from '../src/server.js'
 
 describe('enterprise price comparison', () => {
+  test('preserves the relay billing request id instead of forwarding the upstream id', () => {
+    expect(shouldForwardRelayResponseHeader('x-request-id')).toBe(false)
+    expect(shouldForwardRelayResponseHeader('X-Request-ID')).toBe(false)
+    expect(shouldForwardRelayResponseHeader('openai-request-id')).toBe(true)
+  })
+
   test('uses the Beijing calendar day at the UTC boundary', () => {
     expect(shanghaiDayBounds(new Date('2026-09-27T15:59:59.999Z'))).toEqual({
       from: new Date('2026-09-26T16:00:00.000Z'),
