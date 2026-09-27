@@ -342,6 +342,17 @@ export function tierRates(price: PriceSnapshot, inputTokens: bigint): TokenRates
   return tiers[0] || price
 }
 
+function unsupportedGpt6SolServiceTier(headers: Record<string, unknown> | undefined): string | null {
+  if (!headers) return null
+  for (const [name, value] of Object.entries(headers)) {
+    const normalized = name.toLowerCase().replace(/^x-/, '').replace(/^openai-/, '').replace(/_/g, '-')
+    if (normalized !== 'service-tier' && normalized !== 'service_tier') continue
+    const text = Array.isArray(value) ? value.join(',') : String(value ?? '')
+    if (text.trim()) return text.slice(0, 64)
+  }
+  return null
+}
+
 /** Apply a per-user token discount while preserving provider cost rates. */
 export function applyTokenDiscount(price: PriceSnapshot, discountBps: bigint): PriceSnapshot {
   if (discountBps < 0n || discountBps > 9900n) throw new Error('用户折扣必须为 0-99%')
@@ -847,9 +858,12 @@ export class BillingService {
     }
   }
 
-  async priceForRequest(method: string, path: string, model: string, payload: Record<string, unknown> = {}): Promise<PriceSnapshot | null> {
+  async priceForRequest(method: string, path: string, model: string, payload: Record<string, unknown> = {}, headers?: Record<string, unknown>): Promise<PriceSnapshot | null> {
     if (model === 'gpt-6-sol' && ['fast', 'priority'].includes(String(payload.service_tier || '').toLowerCase())) {
       throw Object.assign(new Error('gpt-6-sol Fast/priority 服务档尚未完成单独价格与成本验证，已阻止转发'), { statusCode: 422 })
+    }
+    if (model === 'gpt-6-sol' && unsupportedGpt6SolServiceTier(headers)) {
+      throw Object.assign(new Error('gpt-6-sol 不支持通过请求头选择未计价服务档，已阻止转发'), { statusCode: 422 })
     }
     const fixed = await this.fixedPriceFor(method, path, model, payload)
     if (fixed) {

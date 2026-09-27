@@ -224,6 +224,15 @@ describe('billing invariants', () => {
     await expect(billing.priceForRequest('POST', '/v1/responses', 'gpt-6-sol', {}))
       .rejects.toMatchObject({ statusCode: 409 })
   })
+
+  test('rejects gpt-6-sol service-tier request headers before routing', async () => {
+    const billing = new (await import('../src/services/billing.js')).BillingService({
+      query: async () => [],
+    } as any)
+    await expect(billing.priceForRequest('POST', '/v1/responses', 'gpt-6-sol', {}, {
+      'x-service-tier': 'fast',
+    })).rejects.toMatchObject({ statusCode: 422 })
+  })
 })
 
 describe('night discount reservation guard', () => {

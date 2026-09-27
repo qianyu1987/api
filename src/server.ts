@@ -1788,7 +1788,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     let price: PriceSnapshot | null = null
     if (!isMetadata) {
       try {
-        price = await billing.priceForRequest(request.method, requestPath, model, parsed)
+        price = await billing.priceForRequest(request.method, requestPath, model, parsed, request.headers as Record<string, unknown>)
       } catch (error) {
         reply.code(errorStatus(error)).send({ error: { message: (error as Error).message, type: 'pricing_not_configured' } }); return
       }
