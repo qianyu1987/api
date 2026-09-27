@@ -32,7 +32,7 @@ import { parseSseUsage, usageFromPayload } from './lib/usage.js'
 import { isPublicFallbackModel, PublicModelSse, rewritePublicModel } from './lib/public-model.js'
 import { AgnesResponsesSse, chatToResponses } from './lib/agnes-adapter.js'
 import { decodeResponseBuffer, decodeResponseStream } from './lib/response-compression.js'
-import { ProfitService } from './services/profit.js'
+import { ProfitService, shanghaiNightDiscountWindow } from './services/profit.js'
 import { fallbackCostAlerts, fallbackCostPending, pendingFallbackCostSql } from './lib/cost-status.js'
 import { mediaUploadType } from './lib/media-upload.js'
 import { MediaService } from './services/media.js'
@@ -151,6 +151,7 @@ function cleanText(value: unknown, name: string, max = 256): string {
 
 const PRICE_COMPARISON_MODELS = [
   { id: 'gpt-6-astra', displayName: 'Astra' },
+  { id: 'gpt-6-sol', displayName: 'Sol 6' },
   { id: 'gpt-5.6-sol', displayName: 'Sol' },
   { id: 'gpt-5.6-terra', displayName: 'Terra' },
   { id: 'gpt-5.6-luna', displayName: 'Luna' },
@@ -162,6 +163,36 @@ export function shanghaiDayBounds(now: Date = new Date()): { from: Date; to: Dat
   const local = new Date(now.getTime() + SHANGHAI_OFFSET_MS)
   const fromTime = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate()) - SHANGHAI_OFFSET_MS
   return { from: new Date(fromTime), to: new Date(fromTime + 24 * 60 * 60 * 1000) }
+}
+
+export { shanghaiNightDiscountWindow } from './services/profit.js'
+
+function nightDiscountView(profitOverview: any, personalDiscountBps = 0, globalDiscountOverride?: number, now: Date = new Date()) {
+  const window = shanghaiNightDiscountWindow(now)
+  const enabled = profitOverview.nightDiscountEnabled === true
+  const configuredDiscountBps = Math.max(0, Math.min(9900, Number(profitOverview.nightDiscountBps || 0)))
+  const maxSafeDiscountBps = Math.max(0, Math.min(9900, Number(profitOverview.maxDiscountBps || 0)))
+  const active = enabled && window.active
+  const appliedDiscountBps = active ? Math.min(configuredDiscountBps, maxSafeDiscountBps) : 0
+  const globalDiscountBps = Math.max(0, Math.min(9900, Number(globalDiscountOverride ?? profitOverview.globalDiscountBps ?? 0)))
+  return {
+    timezone: 'Asia/Shanghai',
+    start: '00:00',
+    end: '04:00',
+    enabled,
+    configuredDiscountBps,
+    discountBps: configuredDiscountBps,
+    active,
+    appliedDiscountBps,
+    currentDiscountBps: appliedDiscountBps,
+    effectiveTokenDiscountBps: Math.max(personalDiscountBps, globalDiscountBps, appliedDiscountBps),
+    maxSafeDiscountBps,
+    minimumMarginBps: Number(profitOverview.minimumMarginBps || 0),
+    protectionApplied: active && appliedDiscountBps < configuredDiscountBps,
+    startsAt: window.startsAt,
+    endsAt: window.endsAt,
+    nextTransitionAt: window.nextTransitionAt,
+  }
 }
 
 function roundedDivision(numerator: bigint, denominator: bigint): bigint {
@@ -571,7 +602,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const normal=BigInt(yuanInput(b.normalCostYuan,'常规成本')),actual=BigInt(yuanInput(b.actualCostYuan,'实际成本'))
     const source=cleanText(b.costSource,'成本来源',512)
     if(!source)throw Object.assign(new Error('请填写已核实成本来源'),{statusCode:400})
-    const rules=await profit.overview();mediaPrice(normal>actual?normal:actual,config.walletTopupMultiplierBps,rules.paymentFeeRateBps,rules.affiliateRateBps,rules.minimumMarginBps)
+    const rules=await profit.overview();mediaPrice(normal>actual?normal:actual,rules.walletTopupMultiplierBps,rules.paymentFeeRateBps,rules.affiliateRateBps,rules.minimumMarginBps)
     return db.tx(async client=>{
       const channel=await client.query("SELECT id,base_url FROM channels WHERE id=$1 AND deleted_at IS NULL AND base_url IN ('https://apihub.agnes-ai.com/v1','https://cdn.yyapi.cloud/v1','https://ripp.best/v1')",[b.channelId]);if(!channel.rows.length)throw Object.assign(new Error('请选择已允许的媒体渠道'),{statusCode:400})
       const expected=b.model==='gpt-image-2'?'https://cdn.yyapi.cloud/v1':b.model==='gpt-image-2.5'?'https://ripp.best/v1':'https://apihub.agnes-ai.com/v1';if(channel.rows[0].base_url!==expected)throw Object.assign(new Error('该规格与所选媒体渠道不匹配'),{statusCode:400})
@@ -679,7 +710,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     reply.header('Cache-Control', 'private, no-store')
     const user = await requireSession(request, reply); if (!user) return
     const day = shanghaiDayBounds()
-    const [balance, discount, globalDiscount, totals, todayUsage, modelPrices] = await Promise.all([
+    const [balance, discount, globalDiscount, totals, todayUsage, modelPrices, profitOverview] = await Promise.all([
       billing.balance(user.id),
       db.one<any>('SELECT token_discount_bps FROM users WHERE id = $1', [user.id]),
       db.one<any>("SELECT value FROM app_settings WHERE key='global_token_discount_bps'"),
@@ -695,10 +726,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         output_sell_micros,output_sell_micros_per_million,
         cache_sell_micros,cache_sell_micros_per_million
         FROM model_prices WHERE model_pattern = ANY($1::text[])`, [PRICE_COMPARISON_MODELS.map((item) => item.id)]),
+      profit.overview(),
     ])
     const discountBps = Math.max(0, Math.min(9900, Number(discount?.token_discount_bps || 0)))
     const globalDiscountBps = Math.max(0, Math.min(9900, Number(globalDiscount?.value || 0)))
-    const effectiveTokenDiscountBps = Math.max(discountBps, globalDiscountBps)
+    const nightDiscount = nightDiscountView(profitOverview, discountBps, globalDiscountBps)
+    const effectiveTokenDiscountBps = nightDiscount.effectiveTokenDiscountBps
     const totalTopupCreditMicros = String(totals?.total_topup_credit_micros || '0')
     const totalTopupPaidMicros = String(totals?.total_topup_paid_micros || '0')
     const totalPaidMicros = String(totals?.total_paid_micros || '0')
@@ -714,6 +747,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       },
       tokenDiscountBps: discountBps, tokenDiscountPercent: discountBps / 100,
       effectiveTokenDiscountBps,
+      nightDiscount,
       todayUsage: {
         timezone: 'Asia/Shanghai',
         from: day.from.toISOString(),
@@ -1356,25 +1390,25 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       ORDER BY u.created_at DESC LIMIT 200`, values) }
   })
   app.patch('/api/admin/users/:id/discount', async (request, reply) => {
-    if (!await requireAdmin(request, reply)) return
+    const actor = await requireAdmin(request, reply); if (!actor) return
     const raw = (request.body as any)?.discountBps
     const discountBps = Number(raw)
     if (!Number.isInteger(discountBps) || discountBps < 0 || discountBps > 99) {
       reply.code(400).send({ error: { message: '折扣必须为 0-99 的百分比' } }); return
     }
     const userId = String((request.params as any).id)
-    const current = await db.one<any>('SELECT id, token_discount_bps FROM users WHERE id=$1', [userId])
-    if (!current) { reply.code(404).send({ error: { message: '用户不存在' } }); return }
-    const currentDiscountPercent = Math.max(0, Math.min(99, Number(current.token_discount_bps || 0) / 100))
-    // Lowering an existing risky discount is always allowed. The margin guard
-    // only applies when an administrator increases the effective discount.
-    if (discountBps > currentDiscountPercent) {
-      const rules = await profit.overview()
-      const worst = await db.one<any>(`SELECT min(input_sell_micros) AS sell, max(input_cost_micros) AS cost FROM model_prices WHERE active`)
-      if (worst?.sell && worst?.cost) requireWalletMinimumMargin(BigInt(String(worst.cost)), (BigInt(String(worst.sell)) * BigInt(100 - discountBps)) / 100n, rules, '用户折扣')
-    }
-    const row = await db.one<any>('UPDATE users SET token_discount_bps=$1,updated_at=now() WHERE id=$2 RETURNING id,username,token_discount_bps', [discountBps * 100, userId])
-    return { id: String(row.id), username: row.username, discountBps: Number(row.token_discount_bps) / 100 }
+    return db.tx(async (client) => {
+      await client.query('LOCK TABLE channels, channel_model_mappings, channel_model_costs, model_prices, app_settings, users IN SHARE ROW EXCLUSIVE MODE')
+      const current = (await client.query<any>('SELECT id, token_discount_bps FROM users WHERE id=$1 FOR UPDATE', [userId])).rows[0]
+      if (!current) throw Object.assign(new Error('用户不存在'), { statusCode: 404 })
+      const currentDiscountPercent = Math.max(0, Math.min(99, Number(current.token_discount_bps || 0) / 100))
+      // Lowering an existing risky discount is always allowed. The margin guard
+      // only applies when an administrator increases the effective discount.
+      if (discountBps > currentDiscountPercent) await profit.validateDiscount(discountBps * 100, client)
+      const row = (await client.query<any>('UPDATE users SET token_discount_bps=$1,updated_at=now() WHERE id=$2 RETURNING id,username,token_discount_bps', [discountBps * 100, userId])).rows[0]
+      await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'user_token_discount',$2,$3,$4)`, [actor.id, userId, JSON.stringify({ tokenDiscountBps: Number(current.token_discount_bps || 0) }), JSON.stringify({ tokenDiscountBps: Number(row.token_discount_bps || 0) })])
+      return { id: String(row.id), username: row.username, discountBps: Number(row.token_discount_bps) / 100 }
+    })
   })
   app.post('/api/admin/users/:id/wallet-adjustment', async (request, reply) => {
     const actor = await requireAdmin(request, reply); if (!actor) return
@@ -1499,23 +1533,30 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     return { settings, commissions, conversions }
   })
   app.patch('/api/admin/affiliate/settings', async (request, reply) => {
-    if (!await requireAdmin(request, reply)) return
+    const actor = await requireAdmin(request, reply); if (!actor) return
     const b = (request.body || {}) as any
     const enabled = b.enabled !== false
     const rateBps = Number(b.rateBps)
     if (!Number.isInteger(rateBps) || rateBps < 0 || rateBps > 10000) { reply.code(400).send({ error: { message: '返利比例应为 0-10000 基点' } }); return }
-    const rules = await profit.overview()
-    const worst = await db.one<any>(`SELECT min(input_sell_micros) AS sell, max(input_cost_micros) AS cost FROM model_prices WHERE active`)
-    if (worst?.sell && worst?.cost) requireWalletMinimumMargin(BigInt(String(worst.cost)), (BigInt(String(worst.sell)) * BigInt(10000 - rateBps)) / 10000n, rules, '返利比例')
-    await db.tx(async (client) => {
-      await client.query(`INSERT INTO app_settings(key,value) VALUES('affiliate_enabled',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()`, [String(enabled)])
-      await client.query(`INSERT INTO app_settings(key,value) VALUES('affiliate_rate_bps',$1) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=now()`, [String(rateBps)])
+    const nextEffectiveRate = enabled ? rateBps : 0
+    return db.tx(async (client) => {
+      await client.query('LOCK TABLE channels, channel_model_mappings, channel_model_costs, model_prices, app_settings, users IN SHARE ROW EXCLUSIVE MODE')
+      const current = await profit.overview(client)
+      if (nextEffectiveRate > current.affiliateRateBps) await profit.validateUpdate({ affiliateEnabled: enabled, affiliateRateBps: rateBps }, client)
+      const before = await client.query(`SELECT key,value FROM app_settings WHERE key IN ('affiliate_enabled','affiliate_rate_bps') ORDER BY key FOR UPDATE`)
+      await client.query(`INSERT INTO app_settings(key,setting_key,value,value_json) VALUES('affiliate_enabled','affiliate.enabled',$1,to_jsonb($1::text)) ON CONFLICT(key) DO UPDATE SET value=excluded.value,value_json=excluded.value_json,updated_at=now()`, [String(enabled)])
+      await client.query(`INSERT INTO app_settings(key,setting_key,value,value_json) VALUES('affiliate_rate_bps','affiliate.rate_bps',$1,to_jsonb($1::text)) ON CONFLICT(key) DO UPDATE SET value=excluded.value,value_json=excluded.value_json,updated_at=now()`, [String(rateBps)])
+      await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'affiliate_settings','global',$2,$3)`, [actor.id, JSON.stringify(before.rows), JSON.stringify({ enabled, rateBps })])
+      return { enabled, rateBps }
     })
-    return { enabled, rateBps }
   })
   app.get('/api/admin/settings', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
-    return { items: await db.query<any>('SELECT key, value, updated_at FROM app_settings ORDER BY key'), mail: mail.status, profit: await profit.overview() }
+    const [items, profitOverview] = await Promise.all([
+      db.query<any>('SELECT key, value, updated_at FROM app_settings ORDER BY key'),
+      profit.overview(),
+    ])
+    return { items, mail: mail.status, profit: profitOverview, nightDiscount: nightDiscountView(profitOverview) }
   })
   app.patch('/api/admin/settings/profit', async (request, reply) => {
     const actor = await requireAdmin(request, reply)
@@ -1523,6 +1564,19 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     try {
       const result = await profit.update((request.body || {}) as any, actor.id)
       return result
+    } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
+  app.patch('/api/admin/settings/night-discount', async (request, reply) => {
+    const actor = await requireAdmin(request, reply)
+    if (!actor) return
+    try {
+      const body = (request.body || {}) as any
+      if (typeof body.enabled !== 'boolean') throw Object.assign(new Error('深夜折扣开关必须为布尔值'), { statusCode: 400 })
+      if (!Number.isInteger(body.discountBps) || body.discountBps < 0 || body.discountBps > 9900) {
+        throw Object.assign(new Error('深夜折扣必须为 0-9900 整数基点'), { statusCode: 400 })
+      }
+      const result = await profit.updateNightDiscount({ enabled: body.enabled, discountBps: body.discountBps }, actor.id)
+      return { nightDiscount: nightDiscountView(result), profit: result }
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
   app.put('/api/admin/settings/site', async (request, reply) => {
@@ -1552,6 +1606,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       const b = request.body as any
       const key = cleanText(b.key, '设置键', 128)
       if (key === 'affiliate_enabled' || key === 'affiliate_rate_bps') throw new Error('返利设置请使用专用接口')
+      if (['profit_min_margin_bps', 'payment_fee_rate_bps', 'global_token_discount_bps', 'night_token_discount_enabled', 'night_token_discount_bps'].includes(key)) throw new Error('利润与折扣设置请使用专用接口')
       await db.query(`INSERT INTO app_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=now()`, [key, String(b.value).slice(0, 2000)])
       return { ok: true }
     } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }

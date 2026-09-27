@@ -17,8 +17,13 @@ describe('media pricing and input',()=>{
  })
  test('keeps standard images free while preserving their upstream cost snapshot',async()=>{
   const s=new MediaService({one:vi.fn(async(sql:string)=>sql.includes('media_prices')?{enabled:true,channel_enabled:true,cost_source:'Agnes',normal_cost_micros:'100',actual_cost_micros:'80',channel_id:'channel'}:null),query:vi.fn(async()=>[])} as any,{walletTopupMultiplierBps:30000} as any)
-  const q=await s.quote('user',{kind:'image',engine:'standard',prompt:'test',size:'1K'})
+ const q=await s.quote('user',{kind:'image',engine:'standard',prompt:'test',size:'1K'})
   expect(q.chargeMicros).toBe('0');expect(q.snapshot).toMatchObject({freeStandard:true,actualCostMicros:'80'})
+ })
+ test('uses at least the enterprise 5x multiplier for paid media quotes',async()=>{
+  const s=new MediaService({one:vi.fn(async(sql:string)=>sql.includes('media_prices')?{enabled:true,channel_enabled:true,cost_source:'provider invoice',normal_cost_micros:'100',actual_cost_micros:'80',channel_id:'channel'}:null),query:vi.fn(async()=>[])} as any,{walletTopupMultiplierBps:30000} as any)
+  const q=await s.quote('user',{kind:'image',engine:'pro',prompt:'test',size:'1K'})
+  expect(q.chargeMicros).toBe('1250');expect(q.snapshot).toMatchObject({multiplierBps:50000,marginBps:5000,rebateBps:1000})
  })
  test.each([{kind:'video',size:'1080P'},{kind:'video',seconds:13},{kind:'video',mode:'reference'},{kind:'video',mode:'text',images:['https://example.com/a']},{kind:'video',mode:'keyframe'},{kind:'image',size:'100K'},{kind:'image',n:2},{kind:'image',images:['http://localhost/a']}])('rejects unsupported request %j',p=>{expect(()=>validateMedia({prompt:'test',...p})).toThrow()})
  test('only accepts HTTPS result links',()=>{expect(mediaResultUrl({data:[{url:'https://example.com/x.png'}]})).toBe('https://example.com/x.png');expect(mediaResultUrl({url:'javascript:alert(1)'})).toBeNull();expect(mediaResultUrl({metadata:{url:'https://example.com/video.mp4'}})).toBe('https://example.com/video.mp4')})

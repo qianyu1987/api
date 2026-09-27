@@ -5,6 +5,7 @@ import {
   buildModelPriceComparison,
   normalizeEnterpriseLeadInput,
   shanghaiDayBounds,
+  shanghaiNightDiscountWindow,
   type RelayApp,
 } from '../src/server.js'
 
@@ -20,6 +21,22 @@ describe('enterprise price comparison', () => {
     })
   })
 
+  test('uses a half-open Beijing midnight-to-04:00 night window', () => {
+    expect(shanghaiNightDiscountWindow(new Date('2026-09-27T15:59:59.999Z')).active).toBe(false)
+    expect(shanghaiNightDiscountWindow(new Date('2026-09-27T16:00:00.000Z'))).toMatchObject({
+      active: true,
+      startsAt: '2026-09-27T16:00:00.000Z',
+      endsAt: '2026-09-27T20:00:00.000Z',
+      nextTransitionAt: '2026-09-27T20:00:00.000Z',
+    })
+    expect(shanghaiNightDiscountWindow(new Date('2026-09-27T19:59:59.999Z')).active).toBe(true)
+    expect(shanghaiNightDiscountWindow(new Date('2026-09-27T20:00:00.000Z'))).toMatchObject({
+      active: false,
+      startsAt: '2026-09-28T16:00:00.000Z',
+      nextTransitionAt: '2026-09-28T16:00:00.000Z',
+    })
+  })
+
   test('applies the effective discount and rounds each display rate half-up', () => {
     const comparison = buildModelPriceComparison([{
       model_pattern: 'gpt-6-astra', active: true,
@@ -31,7 +48,7 @@ describe('enterprise price comparison', () => {
       unit: 'CNY_PER_MILLION_TOKENS', walletMultiplierBps: 30000,
       monthlyMultiplierBps: 40000, enterpriseMultiplierBps: 50000,
     })
-    expect(comparison.models).toHaveLength(4)
+    expect(comparison.models).toHaveLength(5)
     expect(comparison.models[0]).toMatchObject({
       id: 'gpt-6-astra', displayName: 'Astra', available: true,
       input: {
@@ -39,7 +56,10 @@ describe('enterprise price comparison', () => {
         monthlyEffectiveMicros: '21862500', enterpriseEffectiveMicros: '17490000',
       },
     })
-    expect(comparison.models[3]).toMatchObject({
+    expect(comparison.models[1]).toMatchObject({
+      id: 'gpt-6-sol', displayName: 'Sol 6', available: false,
+    })
+    expect(comparison.models[4]).toMatchObject({
       id: 'gpt-5.6-luna', displayName: 'Luna', available: false,
       input: { standardMicros: null, walletEffectiveMicros: null, monthlyEffectiveMicros: null, enterpriseEffectiveMicros: null },
     })
@@ -47,7 +67,7 @@ describe('enterprise price comparison', () => {
       model_pattern: 'gpt-5.6-luna', active: true,
       input_sell_micros_per_million: '2', output_sell_micros_per_million: '2', cache_sell_micros_per_million: '2',
     }], 0, 30000)
-    expect(rounded.models[3].input.walletEffectiveMicros).toBe('1')
+    expect(rounded.models[4].input.walletEffectiveMicros).toBe('1')
   })
 
   test('does not advertise active rows whose token prices are zero', () => {
@@ -57,7 +77,7 @@ describe('enterprise price comparison', () => {
       output_sell_micros_per_million: '2000000',
       cache_sell_micros_per_million: '0',
     }], 0, 30000)
-    expect(comparison.models[2]).toMatchObject({
+    expect(comparison.models[3]).toMatchObject({
       id: 'gpt-5.6-terra', available: false,
       cache: { standardMicros: null, walletEffectiveMicros: null, monthlyEffectiveMicros: null, enterpriseEffectiveMicros: null },
     })
@@ -139,7 +159,36 @@ describe('enterprise API', () => {
       todayUsage: { timezone: 'Asia/Shanghai', requests: 7, chargeMicros: '1234567' },
       enterpriseOffer: { code: 'enterprise', multiplierBps: 50000, minimumAmountMicros: '498000000' },
       modelPriceComparison: { walletMultiplierBps: 30000, monthlyMultiplierBps: 40000, enterpriseMultiplierBps: 50000 },
+      nightDiscount: {
+        enabled: false, configuredDiscountBps: 0, active: false, appliedDiscountBps: 0,
+        effectiveTokenDiscountBps: 2500, timezone: 'Asia/Shanghai', start: '00:00', end: '04:00',
+      },
     })
+  })
+
+  test('validates and returns the dedicated audited night-discount admin contract', async () => {
+    role = 'admin'
+    const update = vi.spyOn(services.profit, 'updateNightDiscount').mockResolvedValue({
+      nightDiscountEnabled: true,
+      nightDiscountBps: 1500,
+      globalDiscountBps: 500,
+      maxDiscountBps: 2000,
+      minimumMarginBps: 5000,
+    } as any)
+    const response = await services.app.inject({
+      method: 'PATCH', url: '/api/admin/settings/night-discount', headers,
+      payload: { enabled: true, discountBps: 1500 },
+    })
+    expect(response.statusCode).toBe(200)
+    expect(update).toHaveBeenCalledWith({ enabled: true, discountBps: 1500 }, 'user-1')
+    expect(response.json().nightDiscount).toMatchObject({ enabled: true, configuredDiscountBps: 1500, maxSafeDiscountBps: 2000 })
+
+    const invalid = await services.app.inject({
+      method: 'PATCH', url: '/api/admin/settings/night-discount', headers,
+      payload: { enabled: 'true', discountBps: 1500 },
+    })
+    expect(invalid.statusCode).toBe(400)
+    expect(update).toHaveBeenCalledTimes(1)
   })
 
   test('requires login, upserts the caller lead and isolates the admin list', async () => {

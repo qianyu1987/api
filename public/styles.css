@@ -36,6 +36,29 @@
 .price-note { margin: 12px 0 0; color: var(--muted); font-size: 12px; }
 .price-comparison > .form-error:empty { display: none; }
 
+.night-discount-card { margin-top: 18px; overflow: hidden; border: 1px solid #245c59; border-radius: 8px; background: #102d31; color: #effbf8; }
+.night-discount-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 22px 24px 18px; }
+.night-discount-heading h3 { margin: 0; font-size: 21px; letter-spacing: 0; }
+.night-discount-heading p { max-width: 66ch; margin: 6px 0 0; color: #c2dbd7; font-size: 13px; }
+.night-discount-status { display: inline-flex; align-items: center; flex: none; min-height: 28px; padding: 4px 9px; border: 1px solid rgba(203, 232, 226, .28); border-radius: 999px; background: rgba(203, 232, 226, .1); color: #d5ebe7; font-size: 12px; font-weight: 750; }
+.night-discount-content { display: grid; grid-template-columns: minmax(220px, .72fr) minmax(0, 1.28fr); border-top: 1px solid rgba(203, 232, 226, .18); border-bottom: 1px solid rgba(203, 232, 226, .18); }
+.night-discount-rate { display: grid; align-content: center; min-height: 148px; padding: 22px 24px; border-right: 1px solid rgba(203, 232, 226, .18); font-variant-numeric: tabular-nums; }
+.night-discount-rate > span { color: #a9c8c3; font-size: 11px; }
+.night-discount-rate strong { margin-top: 5px; color: #f3c66b; font-size: 42px; line-height: 1; }
+.night-discount-rate small { margin-top: 11px; color: #d7ebe7; font-size: 12px; font-weight: 650; }
+.night-discount-details { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; }
+.night-discount-details div { display: grid; align-content: center; min-width: 0; padding: 22px; border-right: 1px solid rgba(203, 232, 226, .14); }
+.night-discount-details div:last-child { border-right: 0; }
+.night-discount-details dt { color: #9dbab7; font-size: 11px; line-height: 1.45; }
+.night-discount-details dd { margin: 6px 0 0; color: #f2fbf9; font-size: 15px; font-weight: 720; line-height: 1.45; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.night-discount-protection { margin: 0; padding: 13px 24px 15px; color: #b9d7d1; font-size: 12px; }
+.night-discount-card[data-night-discount-status="active"] { border-color: #c99a42; }
+.night-discount-card[data-night-discount-status="active"] .night-discount-status { border-color: #dfb351; background: #f3c66b; color: #2d260f; }
+.night-discount-card[data-night-discount-status="waiting"] .night-discount-status { border-color: #77bdb4; background: #dff1ed; color: #075b58; }
+.night-discount-card[data-night-discount-status="disabled"] .night-discount-rate strong,
+.night-discount-card[data-night-discount-status="unavailable"] .night-discount-rate strong { color: #9dbab7; font-size: 32px; }
+.night-discount-admin-note strong { color: var(--ink); }
+
 .enterprise-offer { margin-top: 18px; overflow: hidden; border: 1px solid #164f4c; border-radius: 8px; background: #102d31; color: #effbf8; }
 .enterprise-offer-copy { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 22px 24px 18px; }
 .enterprise-offer-copy p { max-width: 68ch; margin: 6px 0 0; color: #c2dbd7; font-size: 13px; }
@@ -79,10 +102,17 @@
 @media (max-width: 980px) {
   .price-section-heading, .enterprise-offer-copy { align-items: stretch; flex-direction: column; }
   .today-usage { align-self: flex-start; }
+  .night-discount-content { grid-template-columns: 1fr; }
+  .night-discount-rate { min-height: 0; border-right: 0; border-bottom: 1px solid rgba(203, 232, 226, .18); }
   .enterprise-offer-copy .enterprise-cta { align-self: flex-start; }
   .enterprise-recharge-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 800px) {
+  .night-discount-heading { align-items: flex-start; flex-direction: column; gap: 14px; padding: 20px 18px 16px; }
+  .night-discount-rate { padding: 20px 18px; }
+  .night-discount-rate strong { font-size: 36px; }
+  .night-discount-details div { padding: 18px; }
+  .night-discount-protection { padding: 12px 18px 14px; }
   .price-comparison { margin-top: 22px; padding: 18px 0; }
   .price-section-heading, .price-note, .price-comparison > .form-error { margin-right: 18px; margin-left: 18px; }
   .price-section-heading { gap: 14px; }
@@ -99,4 +129,9 @@
   .enterprise-formula { justify-items: start; }
   .enterprise-formula strong { font-size: 22px; }
   .enterprise-recharge-grid { gap: 12px; }
+}
+@media (max-width: 600px) {
+  .night-discount-details { grid-template-columns: 1fr; }
+  .night-discount-details div { border-right: 0; border-bottom: 1px solid rgba(203, 232, 226, .14); }
+  .night-discount-details div:last-child { border-bottom: 0; }
 }

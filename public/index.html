@@ -6,7 +6,7 @@
   <meta name="description" content="GPT TOKEN 提供 OpenAI 兼容 API 接入、统一 Key 与用量管理。查看接入指南和钱包充值优惠。">
   <meta name="theme-color" content="#12342f">
   <title>GPT TOKEN | OpenAI 兼容 API 控制台</title>
-  <link rel="stylesheet" href="/styles.css?v=1.0.95">
+  <link rel="stylesheet" href="/styles.css?v=1.0.96">
   <link rel="stylesheet" href="/styles-extra.css?v=1.0.61">
   <link rel="stylesheet" href="/styles-auth.css">
   <link rel="stylesheet" href="/styles-password.css">
@@ -104,15 +104,34 @@
           <div class="info-block"><div><span class="label">Token 折扣</span><strong id="token-discount">无折扣</strong></div><div><span class="label">套餐到期</span><strong id="plan-expiry">未开通</strong></div><div><span class="label">下次重置</span><strong id="plan-reset">—</strong></div><div><span class="label">API Base URL</span><div class="copy-line"><code id="api-base">--</code><button class="small-button" type="button" data-copy="api-base">复制</button></div></div><div><span class="label">账户状态</span><strong class="ok" id="account-state">有效</strong></div></div>
         </div>
         <div id="overview-plan-progress"></div>
+        <section id="night-discount-card" class="night-discount-card" data-night-discount-status="unavailable" aria-labelledby="night-discount-title" aria-describedby="night-discount-protection">
+          <header class="night-discount-heading">
+            <div><h3 id="night-discount-title">深夜 Token 折扣</h3><p><span id="night-discount-summary">正在读取折扣配置与当前状态…</span> · 北京时间 00:00-04:00</p></div>
+            <span id="night-discount-status" class="night-discount-status" role="status">暂不可用</span>
+          </header>
+          <div class="night-discount-content">
+            <div class="night-discount-rate">
+              <span>当前实际折扣</span>
+              <strong id="night-discount-applied">—</strong>
+              <small id="night-discount-countdown" role="timer">状态倒计时 —</small>
+            </div>
+            <dl class="night-discount-details">
+              <div><dt>配置折扣</dt><dd id="night-discount-configured">—</dd></div>
+              <div><dt>当前账号最终折扣</dt><dd id="night-discount-effective">—</dd></div>
+              <div><dt>固定时段</dt><dd>每日 00:00-04:00</dd></div>
+            </dl>
+          </div>
+          <p id="night-discount-protection" class="night-discount-protection">实际折扣受最低利润保护，以服务端结算结果为准。</p>
+        </section>
         <section class="price-comparison" aria-labelledby="personal-price-title" aria-describedby="personal-price-note">
           <header class="price-section-heading">
-            <div><h3 id="personal-price-title">四模型价格对比</h3><p>月卡折算价与普通钱包价格同表对照，金额均为每百万 Token。</p></div>
+            <div><h3 id="personal-price-title">五模型价格对比</h3><p>月卡折算价与普通钱包价格同表对照，金额均为每百万 Token。</p></div>
             <dl class="today-usage" aria-label="今日调用汇总">
               <div><dt>今日调用</dt><dd id="today-request-count">--</dd></div>
               <div><dt>今日实际扣费</dt><dd id="today-charge-total">--</dd></div>
             </dl>
           </header>
-          <div class="table-wrap price-table-wrap" role="region" aria-label="个人四模型价格对比" tabindex="0">
+          <div class="table-wrap price-table-wrap" role="region" aria-label="个人五模型价格对比" tabindex="0">
             <table class="price-table">
               <thead><tr><th scope="col">模型</th><th scope="col">输入</th><th scope="col">输出</th><th scope="col">缓存读取</th></tr></thead>
               <tbody id="personal-price-table"><tr><td colspan="4" class="empty">正在加载价格…</td></tr></tbody>
@@ -126,7 +145,7 @@
             <div><h3 id="enterprise-offer-title">企业充值，获得更低折算价</h3><p>单次充值满 <strong id="enterprise-overview-minimum">--</strong>，按 <strong id="enterprise-overview-ratio">--</strong> 到账，可重复充值并叠加到现有钱包。</p></div>
             <button class="button enterprise-cta" type="button" data-go="recharge">查看企业充值</button>
           </div>
-          <div class="table-wrap enterprise-price-wrap" role="region" aria-label="企业四模型价格对比" tabindex="0">
+          <div class="table-wrap enterprise-price-wrap" role="region" aria-label="企业五模型价格对比" tabindex="0">
             <table class="price-table enterprise-price-table">
               <thead><tr><th scope="col">企业模型价</th><th scope="col">输入</th><th scope="col">输出</th><th scope="col">缓存读取</th></tr></thead>
               <tbody id="enterprise-price-table"><tr><td colspan="4" class="empty">正在加载企业价格…</td></tr></tbody>
@@ -237,6 +256,6 @@
       </div>
     </form>
   </dialog>
-  <script src="/app.js?v=1.0.95" defer></script>
+  <script src="/app.js?v=1.0.96" defer></script>
 </body>
 </html>

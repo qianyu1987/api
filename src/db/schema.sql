@@ -811,6 +811,12 @@ ON CONFLICT (key) DO NOTHING;
 INSERT INTO app_settings(key, setting_key, value, value_json)
 VALUES ('global_token_discount_bps', 'profit.global_token_discount_bps', '0', to_jsonb('0'::text))
 ON CONFLICT (key) DO NOTHING;
+INSERT INTO app_settings(key, setting_key, value, value_json)
+VALUES ('night_token_discount_enabled', 'profit.night_discount_enabled', 'false', 'false'::jsonb)
+ON CONFLICT (key) DO NOTHING;
+INSERT INTO app_settings(key, setting_key, value, value_json)
+VALUES ('night_token_discount_bps', 'profit.night_discount_bps', '0', to_jsonb('0'::text))
+ON CONFLICT (key) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS config_audit_logs (
   id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

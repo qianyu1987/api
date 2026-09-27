@@ -14,9 +14,8 @@ export class ChannelCostService {
 
   private async previewWith(client: Database | any, rules: PricingRules): Promise<PricingPreview> {
     const [channels, prices, costs] = await Promise.all([
-      query<any>(client, `SELECT c.id,c.name,c.priority,c.enabled,c.deleted_at,c.model_map,m.requested_model
-        FROM channels c LEFT JOIN channel_model_mappings m ON m.channel_id=c.id AND m.enabled=true
-        WHERE c.deleted_at IS NULL AND c.enabled=true ORDER BY c.priority,c.name,c.id`),
+      query<any>(client, `SELECT c.id,c.name,c.priority,c.enabled,c.deleted_at,c.model_map
+        FROM channels c WHERE c.deleted_at IS NULL AND c.enabled=true ORDER BY c.priority,c.name,c.id`),
       query<any>(client, `SELECT * FROM model_prices WHERE active=true ORDER BY model_pattern`),
       query<any>(client, `SELECT * FROM channel_model_costs WHERE price_effective_at IS NULL OR price_effective_at <= now()`),
     ])

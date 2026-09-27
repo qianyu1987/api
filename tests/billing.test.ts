@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   allocateSettlementCharge,
   applyTokenDiscount,
@@ -8,6 +8,7 @@ import {
   nextSubscriptionReset,
   nextGrantCycle,
   calculatePrice,
+  guardTokenPrice,
   tierRates,
   type PriceSnapshot,
 } from '../src/services/billing.js'
@@ -86,6 +87,55 @@ describe('billing invariants', () => {
     expect(discounted.inputCostMicrosPerMillion).toBe(price.inputCostMicrosPerMillion)
   })
 
+  test('clamps the maximum discount against 5x wallet cash and 272K channel cost', () => {
+    const guarded = guardTokenPrice({
+      price: { ...price, inputSellMicrosPerMillion: 1_200n, outputSellMicrosPerMillion: 1_200n, cacheSellMicrosPerMillion: 1_200n,
+        inputCostMicrosPerMillion: 100n, outputCostMicrosPerMillion: 100n, cacheCostMicrosPerMillion: 100n },
+      rules: { minimumMarginBps: 3000, paymentFeeRateBps: 0, affiliateRateBps: 1000, walletTopupMultiplierBps: 50000 },
+      personalDiscountBps: 0, globalDiscountBps: 0, nightDiscountBps: 2500, nightDiscountActive: true,
+      channelCosts: [{ channelId: 'channel-1', model: 'gpt-test', inputMicros: '100', outputMicros: '100', cacheMicros: '100', highContextMultiplierBps: 12000, source: 'invoice', effectiveAt: null }],
+      coverageComplete: true,
+    })
+    expect(guarded.guard).toMatchObject({ requestedDiscountBps: 2500, appliedDiscountBps: 1666, maxSafeDiscountBps: 1666, protectionApplied: true, baselineSafe: true })
+    expect(guarded.price.inputSellMicrosPerMillion).toBe(1_000n)
+  })
+
+  test('removes the night-only increase when an enabled channel cost is missing', () => {
+    const guarded = guardTokenPrice({
+      price: { ...price, inputSellMicrosPerMillion: 10_000_000n, outputSellMicrosPerMillion: 20_000_000n, cacheSellMicrosPerMillion: 5_000_000n },
+      rules: { minimumMarginBps: 3000, paymentFeeRateBps: 0, affiliateRateBps: 1000, walletTopupMultiplierBps: 50000 },
+      personalDiscountBps: 500, globalDiscountBps: 0, nightDiscountBps: 2500, nightDiscountActive: true,
+      channelCosts: [], coverageComplete: false,
+    })
+    expect(guarded.guard).toMatchObject({ requestedDiscountBps: 2500, appliedDiscountBps: 500, protectionApplied: true, protectionReason: 'enabled_channel_cost_missing' })
+  })
+
+  test('freezes the guarded selling rate without repricing historical snapshots', () => {
+    const guarded = guardTokenPrice({
+      price: { ...price, inputSellMicrosPerMillion: 10_000_000n, outputSellMicrosPerMillion: 20_000_000n, cacheSellMicrosPerMillion: 5_000_000n },
+      rules: { minimumMarginBps: 3000, paymentFeeRateBps: 0, affiliateRateBps: 1000, walletTopupMultiplierBps: 50000 },
+      personalDiscountBps: 0, globalDiscountBps: 0, nightDiscountBps: 1000, nightDiscountActive: true,
+      channelCosts: [], coverageComplete: true,
+    })
+    const snapshot = serializePriceSnapshot(guarded.price, { input: 1n, output: 1n, cache: 0n, reportedTotal: 2n }, {
+      model: 'gpt-test', requestPath: '/v1/responses', requestMethod: 'POST',
+    })
+    const restored = deserializePriceSnapshot(snapshot).price
+    expect(restored.cashGuard).toMatchObject({ appliedDiscountBps: 1000, walletTopupMultiplierBps: 50000 })
+    expect(restored.inputSellMicrosPerMillion).toBe(9_000_000n)
+  })
+
+  test('preserves an existing personal discount when the baseline is already below the target', () => {
+    const guarded = guardTokenPrice({
+      price,
+      rules: { minimumMarginBps: 3000, paymentFeeRateBps: 0, affiliateRateBps: 1000, walletTopupMultiplierBps: 50000 },
+      personalDiscountBps: 500, globalDiscountBps: 0, nightDiscountBps: 2500, nightDiscountActive: true,
+      channelCosts: [], coverageComplete: true,
+    })
+    expect(guarded.guard).toMatchObject({ baselineSafe: false, requestedDiscountBps: 2500, appliedDiscountBps: 500, protectionApplied: true, protectionReason: 'baseline_below_minimum_margin' })
+    expect(guarded.price.inputSellMicrosPerMillion).toBe(950_000n)
+  })
+
   test('formats balance with exact micro-yuan fields for UI and clients', async () => {
     const { BillingService } = await import('../src/services/billing.js')
     expect(BillingService.formatBalance({
@@ -132,6 +182,54 @@ describe('billing invariants', () => {
     await expect(billing.fixedPriceFor('POST', '/v1/images/generations', 'gpt-image-1', {
       size: '1024x1024', quality: 'medium', n: 1,
     })).rejects.toThrow('规格尚未配置价格')
+  })
+})
+
+describe('night discount reservation guard', () => {
+  afterEach(() => vi.useRealTimers())
+
+  test('keeps an existing personal discount and removes only unsafe night contribution', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-09-27T17:00:00.000Z'))
+    let storedSnapshot: any = null
+    const client = {
+      query: vi.fn(async (sql: string, values: any[] = []) => {
+        if (sql.includes('SELECT id, token_discount_bps FROM users')) return { rows: [{ id: 'user-1', token_discount_bps: 500 }], rowCount: 1 }
+        if (sql.includes('SELECT * FROM billing_reservations')) return { rows: [], rowCount: 0 }
+        if (sql.includes('SELECT key,value FROM app_settings')) return { rows: [
+          { key: 'profit_min_margin_bps', value: '3000' }, { key: 'payment_fee_rate_bps', value: '0' },
+          { key: 'affiliate_enabled', value: 'true' }, { key: 'affiliate_rate_bps', value: '1000' },
+          { key: 'global_token_discount_bps', value: '0' }, { key: 'night_token_discount_enabled', value: 'true' },
+          { key: 'night_token_discount_bps', value: '2500' },
+        ], rowCount: 7 }
+        if (sql.includes('MAX(topup_multiplier_bps)')) return { rows: [{ multiplier: 50000 }], rowCount: 1 }
+        if (sql.includes('SELECT id,model_map FROM channels')) return { rows: [{ id: 'channel-1', model_map: { 'gpt-test': 'gpt-test' } }], rowCount: 1 }
+        if (sql.includes('SELECT * FROM channel_model_costs')) return { rows: [{
+          channel_id: 'channel-1', model_pattern: 'gpt-test', input_cost_micros_per_million: '500000',
+          output_cost_micros_per_million: '1000000', cache_cost_micros_per_million: '250000',
+          high_context_multiplier_bps: 10000, price_source: 'provider invoice', price_effective_at: null,
+        }], rowCount: 1 }
+        if (sql.includes('FROM subscriptions WHERE user_id')) return { rows: [], rowCount: 0 }
+        if (sql.includes('SELECT balance_micros, reserved_micros FROM wallets')) return { rows: [{ balance_micros: '1000000000', reserved_micros: '0' }], rowCount: 1 }
+        if (sql.includes('INSERT INTO billing_reservations')) {
+          storedSnapshot = JSON.parse(String(values[6]))
+          return { rows: [{ request_id: values[0], user_id: values[1], estimated_micros: values[3], plan_reserved_micros: values[4], wallet_reserved_micros: values[5], status: 'reserved' }], rowCount: 1 }
+        }
+        return { rows: [], rowCount: 1 }
+      }),
+    }
+    const db = { tx: (action: (tx: any) => Promise<any>) => action(client) }
+    const { BillingService } = await import('../src/services/billing.js')
+    const billing = new BillingService(db as any)
+    await expect(billing.reserve({
+      userId: 'user-1', requestId: 'request-1', model: 'gpt-test', payload: { messages: [{ role: 'user', content: 'hello' }], max_tokens: 16 },
+      requestPath: '/v1/chat/completions', requestMethod: 'POST', price,
+    })).resolves.toMatchObject({ requestId: 'request-1', status: 'reserved' })
+    expect(storedSnapshot.cashGuard).toMatchObject({
+      nightDiscountActive: true, requestedDiscountBps: 2500, appliedDiscountBps: 500,
+      baselineSafe: false, protectionApplied: true, protectionReason: 'baseline_below_minimum_margin',
+    })
+    expect(storedSnapshot.discountBps).toBe('500')
   })
 })
 

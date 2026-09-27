@@ -5,8 +5,8 @@ describe('cash-margin pricing preview', () => {
   const rules = { minimumMarginBps: 5000, paymentFeeRateBps: 0, affiliateRateBps: 1000, walletTopupMultiplierBps: 30000 }
 
   test('uses the conservative cash-margin formula and rounds up', () => {
-    expect(requiredWalletSell(1_000_000n, rules)).toBe(7_500_000n)
-    expect(requiredWalletSell(1n, rules)).toBe(8n)
+    expect(requiredWalletSell(1_000_000n, rules)).toBe(12_500_000n)
+    expect(requiredWalletSell(1n, rules)).toBe(13n)
   })
 
   test('takes maximum costs across active routes and blocks missing sourced costs', () => {
@@ -40,5 +40,37 @@ describe('cash-margin pricing preview', () => {
     expect(result.ready).toBe(true)
     expect(result.models[0]).toMatchObject({ inputCostMicrosPerMillion: '300', outputCostMicrosPerMillion: '400', cacheCostMicrosPerMillion: '60' })
     expect(result.models[0].sources).toEqual(['账单 A', '账单 B'])
+  })
+
+  test('prefers a model-specific channel cost over a wildcard cost', () => {
+    const result = buildPricingPreview({
+      rules,
+      prices: [{ model_pattern: 'gpt-test', active: true }],
+      channels: [{ id: 'a', name: '混合成本', enabled: true, deleted_at: null, model_map: { 'gpt-test': 'upstream' } }],
+      costs: [
+        { channel_id: 'a', model_pattern: '*', input_cost_micros_per_million: '10', output_cost_micros_per_million: '20', cache_cost_micros_per_million: '5', high_context_multiplier_bps: 10000, price_source: '通配成本' },
+        { channel_id: 'a', model_pattern: 'gpt-test', input_cost_micros_per_million: '300', output_cost_micros_per_million: '400', cache_cost_micros_per_million: '60', high_context_multiplier_bps: 10000, price_source: '模型专属成本' },
+      ],
+    })
+    expect(result.ready).toBe(true)
+    expect(result.models[0]).toMatchObject({
+      inputCostMicrosPerMillion: '300',
+      outputCostMicrosPerMillion: '400',
+      cacheCostMicrosPerMillion: '60',
+      sources: ['模型专属成本'],
+    })
+  })
+
+  test('prices from the highest 272K+ channel cost with at least the enterprise 5x multiplier', () => {
+    const result = buildPricingPreview({
+      rules,
+      prices: [{ model_pattern: 'gpt-test', active: true }],
+      channels: [{ id: 'a', name: '高上下文', enabled: true, deleted_at: null, model_map: { 'gpt-test': 'upstream' } }],
+      costs: [{ channel_id: 'a', model_pattern: 'gpt-test', input_cost_micros_per_million: '300', output_cost_micros_per_million: '400', cache_cost_micros_per_million: '60', high_context_multiplier_bps: 12000, price_source: '账单' }],
+    })
+    expect(result.models[0]).toMatchObject({
+      standardInputCostMicrosPerMillion: '300', highContextInputCostMicrosPerMillion: '360',
+      inputCostMicrosPerMillion: '360', inputSellMicrosPerMillion: '4500',
+    })
   })
 })

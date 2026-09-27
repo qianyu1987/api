@@ -139,8 +139,8 @@ export class MediaService {
     const settings = Object.fromEntries((await db.query<any>('SELECT key,value FROM app_settings')).map(r=>[r.key,r.value]))
     const rules = profitRules(settings)
     // Use the largest historical recharge ratio, not just today's promotion.
-    const ratio = await db.one<any>(`SELECT COALESCE(max(topup_multiplier_bps),10000)::int AS bps FROM orders WHERE user_id=$1 AND kind='wallet_topup' AND status='paid'`,[userId])
-    const multiplier = Math.max(this.config.walletTopupMultiplierBps,Number(ratio?.bps || 10000))
+    const ratio = await db.one<any>(`SELECT COALESCE(max(topup_multiplier_bps),10000)::int AS bps FROM orders WHERE kind='wallet_topup' AND status='paid'`)
+    const multiplier = Math.max(rules.walletTopupMultiplierBps,this.config.walletTopupMultiplierBps,Number(ratio?.bps || 10000))
     const normal = BigInt(price.normal_cost_micros)*BigInt(input.units), actual = BigInt(price.actual_cost_micros)*BigInt(input.units)
     const freeStandard = input.model === 'agnes-image-2.5-flash'
     let charge = freeStandard ? 0n : mediaPrice(normal > actual ? normal : actual,multiplier,rules.paymentFeeRateBps,rules.affiliateRateBps,rules.minimumMarginBps)

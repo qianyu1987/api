@@ -1,10 +1,32 @@
 import { Database, one, type DbClient } from '../db/index.js'
 import { applyChannelCost, snapshotChannelCost, type ChannelCostSnapshot } from '../lib/channel-cost.js'
 import { calculateUsageMoney, estimatedRequestTokens, type TokenRates, type UsageTokens, formatMicros } from '../lib/money.js'
+import { ENTERPRISE_TOPUP_MULTIPLIER_BPS } from '../config.js'
+import { effectiveDiscountBps, isShanghaiNightDiscountActive, profitRules } from './profit.js'
+import { requiredWalletSell, worstWalletTopupMultiplier, type PricingRules } from './pricing.js'
 
 export type BillingMode = 'token' | 'fixed'
 
 export type PricingTier = TokenRates & { thresholdTokens: bigint; label?: string }
+
+export type CashGuardSnapshot = PricingRules & {
+  personalDiscountBps: number
+  globalDiscountBps: number
+  nightDiscountBps: number
+  nightDiscountActive: boolean
+  requestedDiscountBps: number
+  appliedDiscountBps: number
+  maxSafeDiscountBps: number
+  protectionApplied: boolean
+  protectionReason: string | null
+  coverageComplete: boolean
+  baselineSafe: boolean
+  worstCosts: {
+    inputMicrosPerMillion: string
+    outputMicrosPerMillion: string
+    cacheMicrosPerMillion: string
+  }
+}
 
 export type PriceSnapshot = TokenRates & {
   fixedSellMicros: bigint
@@ -18,6 +40,7 @@ export type PriceSnapshot = TokenRates & {
   priceEffectiveAt?: string | null
   fxRateCnyMicros?: bigint | null
   discountBps?: bigint
+  cashGuard?: CashGuardSnapshot
   channelCosts?: ChannelCostSnapshot[]
   appliedChannelCost?: ChannelCostSnapshot
   pricingTiers?: PricingTier[]
@@ -42,6 +65,7 @@ export type StoredPriceSnapshot = {
   priceEffectiveAt: string | null
   fxRateCnyMicros: string | null
   discountBps: string
+  cashGuard?: CashGuardSnapshot
   channelCosts?: ChannelCostSnapshot[]
   appliedChannelCost?: ChannelCostSnapshot
   rates: {
@@ -309,6 +333,111 @@ export function applyTokenDiscount(price: PriceSnapshot, discountBps: bigint): P
     })) }
 }
 
+type TokenPart = 'input' | 'output' | 'cache'
+
+const tokenParts: TokenPart[] = ['input', 'output', 'cache']
+
+function rateFor(price: TokenRates, part: TokenPart, kind: 'Sell' | 'Cost'): bigint {
+  return price[`${part}${kind}MicrosPerMillion` as keyof TokenRates] as bigint
+}
+
+function worstTokenCosts(price: PriceSnapshot, channelCosts: ChannelCostSnapshot[]): Record<TokenPart, bigint> {
+  const result = Object.fromEntries(tokenParts.map((part) => [part, rateFor(price, part, 'Cost')])) as Record<TokenPart, bigint>
+  for (const tier of price.pricingTiers || []) {
+    for (const part of tokenParts) {
+      const cost = rateFor(tier, part, 'Cost')
+      if (cost > result[part]) result[part] = cost
+    }
+  }
+  for (const cost of channelCosts) {
+    const multiplier = Number.isInteger(cost.highContextMultiplierBps) && cost.highContextMultiplierBps >= 10_000
+      ? cost.highContextMultiplierBps
+      : 10_000
+    for (const part of tokenParts) {
+      const raw = bigintValue(cost[`${part}Micros` as keyof ChannelCostSnapshot])
+      const high = (raw * BigInt(multiplier) + 9_999n) / 10_000n
+      if (high > result[part]) result[part] = high
+    }
+  }
+  return result
+}
+
+function safeDiscountForRate(sell: bigint, required: bigint): { maxDiscountBps: number; baselineSafe: boolean } {
+  if (sell <= 0n) return { maxDiscountBps: required === 0n ? 9900 : 0, baselineSafe: required === 0n }
+  if (required > sell) return { maxDiscountBps: 0, baselineSafe: false }
+  const retained = (required * 10_000n + sell - 1n) / sell
+  return { maxDiscountBps: Math.max(0, Math.min(9900, 10_000 - Number(retained))), baselineSafe: true }
+}
+
+export function guardTokenPrice(input: {
+  price: PriceSnapshot
+  rules: PricingRules
+  personalDiscountBps: number
+  globalDiscountBps: number
+  nightDiscountBps: number
+  nightDiscountActive: boolean
+  channelCosts: ChannelCostSnapshot[]
+  coverageComplete: boolean
+}): { price: PriceSnapshot; guard: CashGuardSnapshot } {
+  const costs = worstTokenCosts(input.price, input.channelCosts)
+  const constraints: Array<{ maxDiscountBps: number; baselineSafe: boolean }> = []
+  for (const rates of [input.price, ...(input.price.pricingTiers || [])]) {
+    for (const part of tokenParts) constraints.push(safeDiscountForRate(
+      rateFor(rates, part, 'Sell'),
+      requiredWalletSell(costs[part], input.rules),
+    ))
+  }
+  const baselineSafe = constraints.every((constraint) => constraint.baselineSafe)
+  const maxSafeDiscountBps = constraints.length ? Math.min(...constraints.map((constraint) => constraint.maxDiscountBps)) : 0
+  const requestedDiscountBps = effectiveDiscountBps(
+    input.personalDiscountBps,
+    input.globalDiscountBps,
+    input.nightDiscountActive ? input.nightDiscountBps : 0,
+  )
+  const requestedWithoutNight = effectiveDiscountBps(input.personalDiscountBps, input.globalDiscountBps)
+  const nightAddsDiscount = input.nightDiscountActive && input.nightDiscountBps > requestedWithoutNight
+  const canApplyNightDiscount = input.coverageComplete && baselineSafe
+  // Existing personal/global discounts predate this feature. The night offer
+  // may never make those calls less safe, but it must not retroactively change
+  // their established price semantics either.
+  const appliedDiscountBps = !nightAddsDiscount
+    ? requestedWithoutNight
+    : canApplyNightDiscount
+      ? Math.max(requestedWithoutNight, Math.min(requestedDiscountBps, maxSafeDiscountBps))
+      : requestedWithoutNight
+  const protectionApplied = nightAddsDiscount && appliedDiscountBps < requestedDiscountBps
+  const protectionReason = !input.coverageComplete && protectionApplied
+    ? 'enabled_channel_cost_missing'
+    : !baselineSafe && protectionApplied
+      ? 'baseline_below_minimum_margin'
+      : appliedDiscountBps < requestedDiscountBps
+      ? 'minimum_margin'
+      : null
+  const guard: CashGuardSnapshot = {
+    ...input.rules,
+    personalDiscountBps: input.personalDiscountBps,
+    globalDiscountBps: input.globalDiscountBps,
+    nightDiscountBps: input.nightDiscountBps,
+    nightDiscountActive: input.nightDiscountActive,
+    requestedDiscountBps,
+    appliedDiscountBps,
+    maxSafeDiscountBps,
+    protectionApplied,
+    protectionReason,
+    coverageComplete: input.coverageComplete,
+    baselineSafe,
+    worstCosts: {
+      inputMicrosPerMillion: costs.input.toString(),
+      outputMicrosPerMillion: costs.output.toString(),
+      cacheMicrosPerMillion: costs.cache.toString(),
+    },
+  }
+  return {
+    price: { ...applyTokenDiscount(input.price, BigInt(appliedDiscountBps)), cashGuard: guard, channelCosts: input.channelCosts },
+    guard,
+  }
+}
+
 export function estimatePrice(price: PriceSnapshot, payload: Record<string, unknown>, mode: BillingMode = price.billingMode || 'token'): { usage: UsageTokens; chargeMicros: bigint; costMicros: bigint } {
   const usage = estimatedRequestTokens(payload)
   return { usage, ...calculatePrice(price, usage, mode) }
@@ -326,6 +455,7 @@ export function serializePriceSnapshot(price: PriceSnapshot, estimatedUsage: Usa
     priceEffectiveAt: price.priceEffectiveAt || null,
     fxRateCnyMicros: price.fxRateCnyMicros?.toString() || null,
     discountBps: (price.discountBps || 0n).toString(),
+    cashGuard: price.cashGuard,
     channelCosts: price.channelCosts,
     appliedChannelCost: price.appliedChannelCost,
     rates: {
@@ -372,6 +502,7 @@ export function deserializePriceSnapshot(value: unknown, fallback?: PriceSnapsho
       ? fallback?.fxRateCnyMicros || null
       : bigintValue(snapshot.fxRateCnyMicros),
     discountBps: bigintValue(snapshot.discountBps ?? fallback?.discountBps),
+    cashGuard: snapshot.cashGuard || fallback?.cashGuard,
     channelCosts: snapshot.channelCosts,
     appliedChannelCost: snapshot.appliedChannelCost,
     inputSellMicrosPerMillion: bigintValue(rates.inputSellMicrosPerMillion ?? fallback?.inputSellMicrosPerMillion),
@@ -676,13 +807,54 @@ export class BillingService {
         if (String(existing.user_id) !== input.userId) throw new Error('请求编号已被占用')
         return reservationResult(existing)
       }
-      const globalSetting = await one<any>(client, "SELECT value FROM app_settings WHERE key = 'global_token_discount_bps'")
-      const personalDiscount = bigintValue(user.token_discount_bps)
-      const globalDiscount = bigintValue(globalSetting?.value)
-      const effectivePrice = applyTokenDiscount(input.price, personalDiscount > globalDiscount ? personalDiscount : globalDiscount)
+      const settingsRows = await client.query(`SELECT key,value FROM app_settings WHERE key IN (
+        'profit_min_margin_bps','payment_fee_rate_bps','affiliate_enabled','affiliate_rate_bps',
+        'global_token_discount_bps','night_token_discount_enabled','night_token_discount_bps'
+      )`)
+      const settings = Object.fromEntries(settingsRows.rows.map((row: any) => [String(row.key), String(row.value)]))
+      const paidMultiplier = await one<any>(client, `SELECT COALESCE(MAX(topup_multiplier_bps),0) AS multiplier
+        FROM orders WHERE status='paid' AND kind='wallet_topup'`)
+      const walletTopupMultiplierBps = worstWalletTopupMultiplier(
+        ENTERPRISE_TOPUP_MULTIPLIER_BPS,
+        paidMultiplier?.multiplier,
+      )
+      const rules = profitRules(settings, walletTopupMultiplierBps)
+      const personalDiscount = Math.max(0, Math.min(9900, Number(user.token_discount_bps || 0)))
+      const globalDiscount = rules.globalDiscountBps
+      const nightDiscountActive = rules.nightDiscountEnabled && isShanghaiNightDiscountActive(new Date())
+      let effectivePrice: PriceSnapshot
       if (mode === 'token') {
-        const costs = await client.query(`SELECT * FROM channel_model_costs WHERE (model_pattern=$1 OR model_pattern='*') AND (price_effective_at IS NULL OR price_effective_at <= now())`, [input.model])
-        effectivePrice.channelCosts = costs.rows.map(snapshotChannelCost)
+        const [routes, costs] = await Promise.all([
+          client.query(`SELECT id,model_map FROM channels c
+            WHERE c.enabled=true AND c.deleted_at IS NULL
+              AND ((c.model_map ? $1) OR (c.model_map ? '*'))`, [input.model]),
+          client.query(`SELECT * FROM channel_model_costs
+            WHERE (model_pattern=$1 OR model_pattern='*')
+              AND (price_effective_at IS NULL OR price_effective_at <= now())`, [input.model]),
+        ])
+        const selectedCosts: any[] = []
+        let coverageComplete = routes.rows.length > 0
+        for (const route of routes.rows) {
+          const routeCosts = costs.rows.filter((row: any) => String(row.channel_id) === String(route.id))
+          const selected = routeCosts.find((row: any) => String(row.model_pattern) === input.model)
+            || routeCosts.find((row: any) => String(row.model_pattern) === '*')
+          if (!selected || !String(selected.price_source || '').trim()) coverageComplete = false
+          if (selected) selectedCosts.push(selected)
+        }
+        const snapshots = selectedCosts.map(snapshotChannelCost)
+        const guarded = guardTokenPrice({
+          price: input.price,
+          rules,
+          personalDiscountBps: personalDiscount,
+          globalDiscountBps: globalDiscount,
+          nightDiscountBps: rules.nightDiscountBps,
+          nightDiscountActive,
+          channelCosts: snapshots,
+          coverageComplete,
+        })
+        effectivePrice = guarded.price
+      } else {
+        effectivePrice = applyTokenDiscount(input.price, BigInt(effectiveDiscountBps(personalDiscount, globalDiscount)))
       }
       estimate = estimatePrice(effectivePrice, input.payload, mode)
       if (estimate.chargeMicros <= 0n) throw new Error('售价配置必须大于 0，禁止无价格调用')

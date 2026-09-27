@@ -1,5 +1,5 @@
 (() => {
-  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null, walletAdjustUserId: null, overviewTimer: null, topupMultiplierBps: 30000, enterpriseOffer: null, channelCostData: null, selectedCostChannel: null, selectedCostModel: null }
+  const state = { registering: false, user: null, usageCursor: null, adminTab: 'overview', revealKeyId: null, walletAdjustUserId: null, overviewTimer: null, nightDiscountTimer: null, nightDiscount: null, nightDiscountTransitionRequested: null, topupMultiplierBps: 30000, enterpriseOffer: null, channelCostData: null, selectedCostChannel: null, selectedCostModel: null }
   const $ = (selector) => document.querySelector(selector)
   const $$ = (selector) => [...document.querySelectorAll(selector)]
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char])
@@ -114,6 +114,7 @@
   }
   const comparisonModels = [
     ['gpt-6-astra', 'Astra'],
+    ['gpt-6-sol', 'Sol 6'],
     ['gpt-5.6-sol', 'Sol'],
     ['gpt-5.6-terra', 'Terra'],
     ['gpt-5.6-luna', 'Luna']
@@ -156,6 +157,97 @@
     $('#personal-price-error').textContent = ''
     const note = $('#personal-price-note')
     note.textContent = '月卡 1/' + multiplierLabel(comparison.monthlyMultiplierBps, 4) + ' 为四次额度全部使用后的折算价，未使用额度不结转。普通钱包按 1/' + multiplierLabel(comparison.walletMultiplierBps, 3) + ' 对照；页面价格保留两位小数，实际账务按精确微元结算。'
+  }
+  const discountBps = (value) => {
+    const parsed = Number(value)
+    return Number.isInteger(parsed) && parsed >= 0 && parsed <= 10000 ? parsed : null
+  }
+  const discountPercent = (bps) => {
+    const parsed = discountBps(bps)
+    if (parsed == null) return null
+    return (parsed / 100).toFixed(2).replace(/\.?0+$/, '') + '%'
+  }
+  const discountSummary = (bps) => {
+    const parsed = discountBps(bps); const percent = discountPercent(parsed)
+    return parsed == null ? '—' : parsed === 0 ? '无折扣 · 实付 100%' : '优惠 ' + percent + ' · 实付 ' + discountPercent(10000 - parsed)
+  }
+  const transitionTime = (value) => {
+    if (!value) return null
+    const parsed = new Date(value)
+    return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null
+  }
+  function normalizeNightDiscount(data) {
+    if (!data || typeof data !== 'object' || typeof data.enabled !== 'boolean') return null
+    const configuredDiscountBps = discountBps(data.configuredDiscountBps ?? data.discountBps)
+    if (configuredDiscountBps == null) return null
+    const enabled = data.enabled === true
+    if (enabled && typeof data.active !== 'boolean') return null
+    return {
+      enabled,
+      active: enabled && data.active === true,
+      configuredDiscountBps,
+      appliedDiscountBps: discountBps(data.appliedDiscountBps ?? data.currentDiscountBps),
+      effectiveTokenDiscountBps: discountBps(data.effectiveTokenDiscountBps),
+      minimumMarginBps: discountBps(data.minimumMarginBps),
+      protectionApplied: data.protectionApplied === true,
+      nextTransitionAt: transitionTime(data.nextTransitionAt || (data.active ? data.endsAt : data.startsAt)),
+    }
+  }
+  function clearNightDiscountTimer() {
+    if (state.nightDiscountTimer) clearInterval(state.nightDiscountTimer)
+    state.nightDiscountTimer = null
+  }
+  const countdownText = (milliseconds) => {
+    const seconds = Math.max(0, Math.ceil(milliseconds / 1000))
+    const hours = Math.floor(seconds / 3600)
+    const minutes = Math.floor((seconds % 3600) / 60)
+    return String(hours).padStart(2, '0') + ':' + String(minutes).padStart(2, '0') + ':' + String(seconds % 60).padStart(2, '0')
+  }
+  function updateNightDiscountCountdown() {
+    const current = state.nightDiscount; const node = $('#night-discount-countdown')
+    if (!node || !current?.enabled || !current.nextTransitionAt) { if (node) node.textContent = '状态倒计时 —'; return }
+    const remaining = new Date(current.nextTransitionAt).getTime() - Date.now()
+    const prefix = current.active ? '距结束 ' : '距开始 '
+    if (remaining > 0) { node.textContent = prefix + countdownText(remaining); return }
+    node.textContent = '状态更新中…'
+    clearNightDiscountTimer()
+    if (state.nightDiscountTransitionRequested === current.nextTransitionAt) return
+    state.nightDiscountTransitionRequested = current.nextTransitionAt
+    loadOverview()
+  }
+  function startNightDiscountTimer() {
+    clearNightDiscountTimer()
+    updateNightDiscountCountdown()
+    const current = state.nightDiscount
+    if (!current?.enabled || !current.nextTransitionAt || new Date(current.nextTransitionAt).getTime() <= Date.now()) return
+    if (!document.hidden && $('#view-overview')?.classList.contains('active-view')) state.nightDiscountTimer = setInterval(updateNightDiscountCountdown, 1000)
+  }
+  function renderNightDiscount(raw, overviewEffectiveDiscountBps = null, errorMessage = '') {
+    const current = normalizeNightDiscount(raw); const card = $('#night-discount-card')
+    const previousTransition = state.nightDiscount?.nextTransitionAt || null
+    state.nightDiscount = current
+    if (previousTransition !== current?.nextTransitionAt) state.nightDiscountTransitionRequested = null
+    if (!card) return
+    const status = !current ? 'unavailable' : !current.enabled ? 'disabled' : current.active ? 'active' : 'waiting'
+    card.dataset.nightDiscountStatus = status
+    const statusLabels = { unavailable: '暂不可用', disabled: '当前关闭', waiting: '等待时段', active: '正在生效' }
+    $('#night-discount-status').textContent = statusLabels[status]
+    $('#night-discount-configured').textContent = current ? discountSummary(current.configuredDiscountBps) : '—'
+    $('#night-discount-applied').textContent = current?.active && current.appliedDiscountBps != null ? discountPercent(current.appliedDiscountBps) : current ? '未生效' : '—'
+    const effective = current?.effectiveTokenDiscountBps ?? discountBps(overviewEffectiveDiscountBps)
+    $('#night-discount-effective').textContent = discountSummary(effective)
+    const summaries = {
+      unavailable: errorMessage || '服务端尚未返回完整配置，当前不会推测折扣。',
+      disabled: '管理员当前未启用，固定时段内也不会自动生效。',
+      waiting: '已启用，进入固定时段后由服务端确认实际折扣。',
+      active: '时段折扣正在结算，实际减免以服务端返回为准。',
+    }
+    $('#night-discount-summary').textContent = summaries[status]
+    const minimumMargin = current ? discountPercent(current.minimumMarginBps) : null
+    $('#night-discount-protection').textContent = current?.protectionApplied
+      ? '最低利润保护已介入：当前实际折扣低于配置值，以服务端结算结果为准。'
+      : '最低利润保护' + (minimumMargin ? '线为 ' + minimumMargin : '') + '；实际折扣不会突破保护线，以服务端结算结果为准。'
+    startNightDiscountTimer()
   }
   const integer = (value) => String(toMicros(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
   const margin = (cost, sell) => {
@@ -287,6 +379,7 @@
     if (view === 'downloads') loadDownloads()
     if (view === 'admin') loadAdmin(state.adminTab)
     if (state.overviewTimer) { clearInterval(state.overviewTimer); state.overviewTimer = null }
+    if (view !== 'overview') clearNightDiscountTimer()
     if (view === 'overview' && !document.hidden) state.overviewTimer = setInterval(() => loadOverview(), 30000)
   }
   async function loadOverview() {
@@ -308,12 +401,14 @@
       if (resetNode) resetNode.textContent = data.balance.planNextResetAt ? new Date(data.balance.planNextResetAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'
       $('#api-base').textContent = data.apiBaseUrl; $('#account-state').textContent = data.balance.isValid ? '有效' : '需充值'
       const progress = $('#overview-plan-progress'); if (progress) progress.innerHTML = planProgressMarkup(data.balance)
+      renderNightDiscount(data.nightDiscount, data.effectiveTokenDiscountBps)
       renderOverviewPricing(data)
       $('#chatgpt-link').href = data.downloads.chatgpt; $('#ccswitch-link').href = data.downloads.ccswitch
       $('#quick-config').textContent = 'Base URL: ' + data.apiBaseUrl + '\nAuthorization: Bearer sk-relay-…'
       const guideBase = $('#guide-api-base'); if (guideBase) guideBase.textContent = data.apiBaseUrl
       try { renderUsage('#recent-usage', (await api('/api/me/usage?limit=5')).items, true) } catch (usageError) { $('#recent-usage').innerHTML = '<tr><td colspan="5" class="empty">最近调用加载失败，请稍后重试</td></tr>'; toast(usageError.message, true) }
     } catch (error) {
+      renderNightDiscount(null, null, '深夜折扣状态加载失败，请稍后刷新。')
       const pricingError = $('#personal-price-error'); if (pricingError) pricingError.textContent = '价格与今日用量加载失败，请稍后刷新。'
       toast(error.message, true)
     }
@@ -539,11 +634,18 @@
       return table(['时间', '用户', '类型', '执行者', '重置前', '重置后', '周期标识'], rows, '暂无套餐重置记录')
     }
     if (tab === 'settings') {
-      const settings = Object.fromEntries(items.map((item) => [item.key, item.value])); const smtp = data.mail || {}; const profit = data.profit || {}
+      const settings = Object.fromEntries(items.map((item) => [item.key, item.value])); const smtp = data.mail || {}; const profit = data.profit || {}; const night = data.nightDiscount || {}
       const siteEditor = form('site-settings', [field('name', '站点名称', settings.site_name || 'GPT TOKEN', 'text', 'required'), field('title', '浏览器标题', settings.site_title || 'GPT TOKEN | OpenAI 兼容 API 控制台', 'text', 'required'), field('logoUrl', 'Logo 地址', settings.site_logo_url || '/assets/gpt-token-mark-192.png', 'text', 'required'), '<p class="admin-note wide">Logo 已本地托管。SMTP 密码、上游 Key 和用户 API Key 不会出现在本页面、数据库或日志。</p>'], '保存站点设置')
       const profitEditor = form('profit-settings', [field('minimumMarginBps', '最低毛利率（基点，3000 = 30%）', String(profit.minimumMarginBps ?? settings.profit_min_margin_bps ?? 3000), 'number', 'min="0" max="9999" required'), field('paymentFeeRateBps', '支付手续费率（基点）', String(profit.paymentFeeRateBps ?? settings.payment_fee_rate_bps ?? 0), 'number', 'min="0" max="10000" required'), field('globalDiscountBps', '全局减免比例（基点，1000 = 10%）', String(profit.globalDiscountBps ?? settings.global_token_discount_bps ?? 0), 'number', 'min="0" max="9900" required'), '<div class="admin-note wide">当前安全上限：<strong>' + ((Number(profit.maxDiscountBps || 0)) / 100) + '%</strong>。折扣、支付手续费和返利合计后必须达到最低毛利线；用户售价不按上下文长度分层。</div>'], '保存利润设置')
+      const configuredNightBps = discountBps(night.configuredDiscountBps ?? night.discountBps)
+      const nightInputValue = configuredNightBps == null ? '' : (configuredNightBps / 100).toFixed(2).replace(/\.?0+$/, '')
+      const nightEditor = form('night-discount-settings', [
+        field('discountPercent', '深夜减免比例（%）', nightInputValue, 'number', 'min="0" max="99" step="0.01" placeholder="请明确填写折扣" required'),
+        check('enabled', '启用每日 00:00-04:00 深夜折扣', night.enabled === true),
+        '<div class="admin-note wide night-discount-admin-note">当前配置：<strong>' + (configuredNightBps == null ? '未设置' : discountSummary(configuredNightBps)) + '</strong> · 当前实际：<strong>' + (night.active === true ? discountSummary(night.appliedDiscountBps) : '未生效') + '</strong> · 安全上限：<strong>' + (discountPercent(night.maxSafeDiscountBps) || '待服务端核算') + '</strong>。保存时服务端会再次执行最低利润保护；关闭后固定时段也不会生效。</div>',
+      ], '保存深夜折扣')
       const blockers = (profit.blockers || []).slice(0, 6).map((item) => '<li>' + esc(item.model + ' · ' + item.tier + ' · ' + item.part + '：' + (item.reason || '低于安全上限')) + '</li>').join('')
-      return '<div class="settings-status"><div><span class="label">邮件服务</span><strong>' + (smtp.configured ? '已配置' : '未配置') + '</strong></div><div><span class="label">SMTP 主机</span><strong>' + esc(smtp.host || '—') + '</strong></div><div><span class="label">发件地址</span><strong>' + esc(smtp.from || '—') + '</strong></div><div><span class="label">TLS</span><strong>' + (smtp.secure ? '已启用' : '未启用') + '</strong></div></div>' + profitEditor + (blockers ? '<div class="notice"><strong>风险配置</strong><ul>' + blockers + '</ul></div>' : '') + siteEditor
+      return '<div class="settings-status"><div><span class="label">邮件服务</span><strong>' + (smtp.configured ? '已配置' : '未配置') + '</strong></div><div><span class="label">SMTP 主机</span><strong>' + esc(smtp.host || '—') + '</strong></div><div><span class="label">发件地址</span><strong>' + esc(smtp.from || '—') + '</strong></div><div><span class="label">TLS</span><strong>' + (smtp.secure ? '已启用' : '未启用') + '</strong></div></div>' + profitEditor + nightEditor + (blockers ? '<div class="notice"><strong>风险配置</strong><ul>' + blockers + '</ul></div>' : '') + siteEditor
     }
     return table([], [])
   }
@@ -635,10 +737,18 @@
   async function submitAdmin(editor) {
     const kind = editor.dataset.adminForm; const payload = Object.fromEntries(new FormData(editor).entries())
     for (const checkbox of editor.querySelectorAll('input[type="checkbox"]')) payload[checkbox.name] = checkbox.checked
+    if (kind === 'night-discount-settings') {
+      const value = String(payload.discountPercent ?? '').trim()
+      if (!/^\d+(?:\.\d{1,2})?$/.test(value)) throw new Error('深夜折扣需填写 0-99，最多两位小数')
+      const percent = Number(value)
+      if (!Number.isFinite(percent) || percent < 0 || percent > 99) throw new Error('深夜折扣需填写 0-99%')
+      payload.discountBps = Math.round(percent * 100)
+      delete payload.discountPercent
+    }
     if (kind === 'channel') { try { payload.modelMap = JSON.parse(payload.modelMap || '{}') } catch { throw new Error('模型映射必须是合法 JSON') } }
     if (kind === 'fixed-price' && editor.dataset.manualSell !== 'true') delete payload.sellYuan
-    const endpoints = { 'media-price': '/api/admin/media/prices', channel: '/api/admin/channels', 'channel-cost': '/api/admin/channel-costs', price: '/api/admin/prices', 'fixed-price': '/api/admin/fixed-prices', plan: '/api/admin/plans', 'affiliate-settings': '/api/admin/affiliate/settings', 'site-settings': '/api/admin/settings/site', 'profit-settings': '/api/admin/settings/profit' }
-    const method = kind === 'affiliate-settings' || kind === 'profit-settings' ? 'PATCH' : kind === 'site-settings' ? 'PUT' : 'POST'
+    const endpoints = { 'media-price': '/api/admin/media/prices', channel: '/api/admin/channels', 'channel-cost': '/api/admin/channel-costs', price: '/api/admin/prices', 'fixed-price': '/api/admin/fixed-prices', plan: '/api/admin/plans', 'affiliate-settings': '/api/admin/affiliate/settings', 'site-settings': '/api/admin/settings/site', 'profit-settings': '/api/admin/settings/profit', 'night-discount-settings': '/api/admin/settings/night-discount' }
+    const method = kind === 'affiliate-settings' || kind === 'profit-settings' || kind === 'night-discount-settings' ? 'PATCH' : kind === 'site-settings' ? 'PUT' : 'POST'
     if (kind === 'channel-cost') {
       payload.highContextMultiplierBps = Math.round(10000 + Number(payload.highContextIncreasePercent) * 100)
       payload.expectedUpdatedAt = editor.dataset.expectedUpdatedAt || null
@@ -892,6 +1002,7 @@
       await api('/api/auth/logout', { method: 'POST', body: '{}' })
       state.user = null
       if (state.overviewTimer) { clearInterval(state.overviewTimer); state.overviewTimer = null }
+      clearNightDiscountTimer(); state.nightDiscount = null; state.nightDiscountTransitionRequested = null
       $('#app-view').classList.add('hidden')
       $('#auth-view').classList.remove('hidden')
       $('#auth-error').textContent = ''
@@ -1092,8 +1203,8 @@
     try { await api('/api/admin/users/' + encodeURIComponent(state.walletAdjustUserId || '') + '/wallet-adjustment', { method: 'POST', body: JSON.stringify(data) }); form.closest('dialog').close(); toast('钱包调账成功'); await loadAdmin('users') } catch (error) { $('#wallet-adjust-error').textContent = error.message } finally { pending(button, false) }
   })
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { if (state.overviewTimer) { clearInterval(state.overviewTimer); state.overviewTimer = null } }
-    else if (state.user && $('#view-overview')?.classList.contains('active-view') && !state.overviewTimer) { loadOverview(); state.overviewTimer = setInterval(() => loadOverview(), 30000) }
+    if (document.hidden) { if (state.overviewTimer) { clearInterval(state.overviewTimer); state.overviewTimer = null }; clearNightDiscountTimer() }
+    else if (state.user && $('#view-overview')?.classList.contains('active-view') && !state.overviewTimer) { loadOverview(); state.overviewTimer = setInterval(() => loadOverview(), 30000); startNightDiscountTimer() }
   })
   showPublicRoute()
   ;(async () => {
