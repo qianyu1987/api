@@ -219,6 +219,7 @@
 - 根因：`media_tasks.next_attempt_at` 为 `NOT NULL`，终态任务收尾却写入 `NULL`，导致 worker 事务回滚、媒体队列无法正常收尾。`src/services/media.ts` 已移除终态写入 `next_attempt_at=NULL`，视频接单状态保留合法时间值；`src/server.ts` 保留真实 worker 异常日志。新增回归断言，避免再次生成该 SQL。
 - 图片真实测试：经公网 `/v1/media/quote` 与 `/v1/images/generations` 使用 1K `gpt-image-2.5`，quote HTTP 200、创建 HTTP 202，任务 `cb100454-ade2-4b50-98c9-fd8296dd136c` 完成并写入持久化素材；扣费 `500000` 微元、实际成本 `100000` 微元。账务只有一笔 `usage_reserve` 和一笔 `usage_settle`，无重复扣费。
 - 视频真实测试：经公网 `/v1/media/quote` 与 `/v1/videos` 使用最低 4 秒 `agnes-video-2.5-flash`，quote HTTP 200、创建 HTTP 202；上游连续返回明确 `video queue is full`，任务无上游任务号、9 次重试后由 API 取消，HTTP 200；一笔 `usage_reserve` 配一笔 `usage_release`，`500000` 微元全部退回。代码/数据库收尾正常，但视频上游当前仍不可接单，不能宣称视频已成功出片；恢复后应重新做一次单次授权测试。
+- 熔断窗口结束后再次做最低 4 秒视频复测，创建 HTTP 202，但兼容渠道均暂不可用（`no_compatible_channel`），5 次尝试后同样经 API 取消并全额释放 `500000` 微元；没有上游任务号，也没有结算扣费。
 - 本地验证：23 个测试文件、247 项测试通过；`typecheck`、`build`、`git diff --check` 通过。价格仍未发布重算，未修改真实渠道、模型路由或用户账务。
 
 ## 更新模板

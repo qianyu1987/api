@@ -145,6 +145,7 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 - 生产已运行 `relay-station:v1.0.94`，两个 API 副本 healthy。媒体 worker 的终态 SQL 不再把 `media_tasks.next_attempt_at` 写成 NULL；视频接单后保留合法下一次轮询时间，worker 异常继续记录真实错误。
 - 付费图片验证通过：1K `gpt-image-2.5` 任务完成并持久化结果，扣费 500000 微元、成本 100000 微元；预扣/结算各一笔，无重复账单。
 - 付费视频验证未出片：4 秒 `agnes-video-2.5-flash` 创建成功进入队列，但上游明确返回 `video queue is full`，无上游任务编号；重试后通过 API 取消，冻结额度全部释放。应用收尾和退款正常，视频上游恢复前不能称为已修复完成。
+- 熔断窗口结束后的第二次 4 秒复测仍未接单，状态为 `no_compatible_channel`；5 次尝试后取消并全额释放冻结额度，未发生结算扣费。当前视频阻塞属于上游容量/渠道可用性，待上游恢复后再复测。
 - 本地 23 个测试文件/247 项通过，typecheck、build、diff-check 通过。媒体修复备份为 `/opt/relay-station-backups/pre-v1.0.94-media-fix-20260927/`；价格发布仍受 21 条缺失渠道成本阻断，未修改价格或真实路由。
 
 ## 用户偏好与维护约定
