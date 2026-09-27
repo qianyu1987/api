@@ -143,6 +143,31 @@ function yuanInput(value: unknown, name: string, allowZero = true): string {
   return micros.toString()
 }
 
+function parsePricingTiers(value: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(value) || value.length > 8) throw new Error('分层价格必须是最多 8 档的数组')
+  const seen = new Set<string>()
+  return value.map((item: any) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('分层价格格式无效')
+    const threshold = String(item.thresholdTokens ?? '').trim()
+    if (!/^\d+$/.test(threshold) || BigInt(threshold) < 1n || BigInt(threshold) > 9_223_372_036_854_775_807n || seen.has(threshold)) throw new Error('分层 Token 阈值无效或重复')
+    seen.add(threshold)
+    const normalized: Record<string, unknown> = { thresholdTokens: threshold }
+    if (item.label != null) normalized.label = cleanText(item.label, '价格层名称', 128)
+    for (const [part, label] of [['input','输入'],['output','输出'],['cache','cache-read']] as const) {
+      normalized[`${part}SellMicrosPerMillion`] = moneyInput(item[`${part}SellMicrosPerMillion`], `${label}售价`)
+      normalized[`${part}CostMicrosPerMillion`] = moneyInput(item[`${part}CostMicrosPerMillion`], `${label}成本`)
+    }
+    const writeSell = item.cacheWriteSellMicrosPerMillion
+    const writeCost = item.cacheWriteCostMicrosPerMillion
+    if ((writeSell == null) !== (writeCost == null)) throw new Error('cache-write 成本和售价必须同时填写')
+    if (writeSell != null) {
+      normalized.cacheWriteSellMicrosPerMillion = moneyInput(writeSell, 'cache-write售价')
+      normalized.cacheWriteCostMicrosPerMillion = moneyInput(writeCost, 'cache-write成本')
+    }
+    return normalized
+  }).sort((a: any, b: any) => BigInt(a.thresholdTokens) < BigInt(b.thresholdTokens) ? -1 : 1)
+}
+
 function cleanText(value: unknown, name: string, max = 256): string {
   const text = String(value ?? '').trim()
   if (!text || text.length > max) throw new Error(`${name}无效`)
@@ -205,8 +230,12 @@ function validMultiplier(value: unknown, fallback: number): number {
   return Number.isInteger(multiplier) && multiplier >= 10000 && multiplier <= 100000 ? multiplier : fallback
 }
 
-function modelRate(row: any, part: 'input' | 'output' | 'cache'): bigint | null {
-  const value = row?.[`${part}_sell_micros_per_million`] ?? row?.[`${part}_sell_micros`]
+function modelRate(row: any, part: 'input' | 'output' | 'cache' | 'cacheWrite', tier?: any): bigint | null {
+  const column = part === 'cacheWrite' ? 'cache_write' : part
+  const value = tier?.[`${part}SellMicrosPerMillion`]
+    ?? tier?.[`${column}_sell_micros_per_million`]
+    ?? row?.[`${column}_sell_micros_per_million`]
+    ?? row?.[`${column}_sell_micros`]
   const text = String(value ?? '')
   return /^\d+$/.test(text) ? BigInt(text) : null
 }
@@ -234,16 +263,36 @@ export function buildModelPriceComparison(rows: any[], effectiveDiscountBps: num
     enterpriseMultiplierBps: enterpriseMultiplier,
     models: PRICE_COMPARISON_MODELS.map((model) => {
       const row = indexed.get(model.id)
+      const highTier = Array.isArray(row?.pricing_tiers)
+        ? row.pricing_tiers
+          .filter((tier: any) => { try { return BigInt(tier.thresholdTokens ?? tier.threshold_tokens ?? 0) > 272000n } catch { return false } })
+          .sort((a: any, b: any) => { try { return BigInt(a.thresholdTokens ?? a.threshold_tokens) < BigInt(b.thresholdTokens ?? b.threshold_tokens) ? -1 : 1 } catch { return 0 } })[0]
+        : null
       const input = modelRate(row, 'input')
       const output = modelRate(row, 'output')
       const cache = modelRate(row, 'cache')
+      const cacheWrite = modelRate(row, 'cacheWrite')
       const available = Boolean(row?.active) && input !== null && input > 0n && output !== null && output > 0n && cache !== null && cache > 0n
+      const highInput = modelRate(row, 'input', highTier)
+      const highOutput = modelRate(row, 'output', highTier)
+      const highCache = modelRate(row, 'cache', highTier)
+      const highCacheWrite = modelRate(row, 'cacheWrite', highTier)
       return {
         ...model,
         available,
         input: available ? displayRate(input!) : unavailableRate(),
         output: available ? displayRate(output!) : unavailableRate(),
         cache: available ? displayRate(cache!) : unavailableRate(),
+        cacheWrite: cacheWrite === null ? unavailableRate() : displayRate(cacheWrite),
+        highContext: highTier && highInput !== null && highOutput !== null && highCache !== null
+          ? {
+              thresholdTokens: String(highTier.thresholdTokens ?? highTier.threshold_tokens),
+              input: displayRate(highInput),
+              output: displayRate(highOutput),
+              cache: displayRate(highCache),
+              cacheWrite: highCacheWrite === null ? unavailableRate() : displayRate(highCacheWrite),
+            }
+          : null,
       }
     }),
   }
@@ -730,7 +779,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       db.query<any>(`SELECT model_pattern,active,
         input_sell_micros,input_sell_micros_per_million,
         output_sell_micros,output_sell_micros_per_million,
-        cache_sell_micros,cache_sell_micros_per_million
+        cache_sell_micros,cache_sell_micros_per_million,
+        cache_write_sell_micros,cache_write_sell_micros_per_million,
+        pricing_tiers
         FROM model_prices WHERE model_pattern = ANY($1::text[])`, [PRICE_COMPARISON_MODELS.map((item) => item.id)]),
       profit.overview(),
     ])
@@ -889,7 +940,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           u.created_at, u.started_at, u.request_id, u.request_path, u.api_key_id, u.key_id,
           u.api_key_name_snapshot, u.requested_model, u.upstream_model,
           u.final_channel_id, u.final_channel_name_snapshot,
-          u.input_tokens, u.output_tokens, u.cache_tokens, u.reported_total_tokens,
+          u.input_tokens, u.output_tokens, u.cache_tokens, u.cache_write_tokens, u.reported_total_tokens,
           u.plan_charge_micros, u.wallet_charge_micros, u.charge_micros ${adminFinanceSelect},
           u.status_code, u.status, u.success, u.duration_ms, u.latency_ms,
           u.is_estimated_usage, u.estimated_usage, u.error_code, u.error_summary,
@@ -903,7 +954,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         keyId: row.api_key_id || row.key_id, keyName: row.api_key_name_snapshot || row.current_key_name || '',
         model: row.requested_model, upstreamModel: user.role === 'admin' ? row.upstream_model : row.requested_model,
         channel: user.role !== 'admin' && row.request_path === '/v1/site-chat' ? 'AI 对话' : row.final_channel_name_snapshot || row.current_channel_name || '',
-        inputTokens: String(row.input_tokens), outputTokens: String(row.output_tokens), cacheTokens: String(row.cache_tokens), totalTokens: String(row.reported_total_tokens),
+        inputTokens: String(row.input_tokens), outputTokens: String(row.output_tokens), cacheTokens: String(row.cache_tokens), cacheWriteTokens: String(row.cache_write_tokens || 0), totalTokens: String(row.reported_total_tokens),
         planCharge: publicMoney(row.plan_charge_micros), walletCharge: publicMoney(row.wallet_charge_micros), charge: publicMoney(row.charge_micros),
         statusCode: row.status_code, status: row.status, success: row.success,
         errorCode: row.error_code || null, errorSummary: row.error_summary || null,
@@ -919,12 +970,13 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         ${user.role === 'admin' ? ', COALESCE(sum(cost_micros),0)::bigint AS cost, COALESCE(sum(profit_micros),0)::bigint AS profit' : ''},
         COALESCE(sum(input_tokens),0)::bigint AS input,
         COALESCE(sum(output_tokens),0)::bigint AS output,
-        COALESCE(sum(cache_tokens),0)::bigint AS cache
+        COALESCE(sum(cache_tokens),0)::bigint AS cache,
+        COALESCE(sum(cache_write_tokens),0)::bigint AS cache_write
         FROM usage_logs u WHERE ${filterWhere.join(' AND ')}`, filterValues)
       return { items, nextCursor, summary: {
         requests: Number(summary?.requests || 0), charge: publicMoney(summary?.charge),
         planCharge: publicMoney(summary?.plan_charge), walletCharge: publicMoney(summary?.wallet_charge),
-        inputTokens: String(summary?.input || 0), outputTokens: String(summary?.output || 0), cacheTokens: String(summary?.cache || 0),
+        inputTokens: String(summary?.input || 0), outputTokens: String(summary?.output || 0), cacheTokens: String(summary?.cache || 0), cacheWriteTokens: String(summary?.cache_write || 0),
         ...(user.role === 'admin' ? { estimatedCost: publicMoney(summary?.cost), profit: publicMoney(summary?.profit) } : {}),
       } }
     } catch (error) {
@@ -1046,7 +1098,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   })
   app.get('/api/me/billing/:requestId', async (request, reply) => {
     const user = await requireSession(request, reply); if (!user) return
-    const row = await db.one<any>('SELECT request_id,requested_model,upstream_model,final_channel_name_snapshot,input_tokens,output_tokens,cache_tokens,reported_total_tokens,plan_charge_micros,wallet_charge_micros,charge_micros,status,success,status_code,is_estimated_usage,error_code,error_summary,started_at,finished_at FROM usage_logs WHERE request_id=$1 AND user_id=$2', [String((request.params as any).requestId || ''), user.id])
+    const row = await db.one<any>('SELECT request_id,requested_model,upstream_model,final_channel_name_snapshot,input_tokens,output_tokens,cache_tokens,cache_write_tokens,reported_total_tokens,plan_charge_micros,wallet_charge_micros,charge_micros,status,success,status_code,is_estimated_usage,error_code,error_summary,started_at,finished_at FROM usage_logs WHERE request_id=$1 AND user_id=$2', [String((request.params as any).requestId || ''), user.id])
     if (!row) { reply.code(404).send({ error: { message: '账单记录不存在' } }); return }
     if (user.role !== 'admin') row.upstream_model = row.requested_model
     return { ...row, charge: publicMoney(row.charge_micros), planCharge: publicMoney(row.plan_charge_micros), walletCharge: publicMoney(row.wallet_charge_micros), billingNote: row.success ? (row.is_estimated_usage ? '本次用量由系统估算，后续可能按上游实际用量校正' : '按上游实际用量结算') : (Number(row.charge_micros) > 0 ? '请求失败但已产生可计费用量' : '请求失败，未产生收费') }
@@ -1214,13 +1266,37 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       }
       return await db.tx(async (client) => {
         const before = (await client.query<any>('SELECT * FROM model_prices WHERE model_pattern=$1 FOR UPDATE', [pattern])).rows[0] || null
+        const writeCost = b.cacheWriteCostYuanPerMillion !== undefined || b.cacheWriteCostMicrosPerMillion !== undefined
+          ? value('cacheWriteCostYuanPerMillion', 'cacheWriteCostMicrosPerMillion', 'cache-write成本')
+          : before?.cache_write_cost_micros_per_million ?? before?.cache_write_cost_micros ?? null
+        const writeSell = b.cacheWriteSellYuanPerMillion !== undefined || b.cacheWriteSellMicrosPerMillion !== undefined
+          ? value('cacheWriteSellYuanPerMillion', 'cacheWriteSellMicrosPerMillion', 'cache-write售价')
+          : before?.cache_write_sell_micros_per_million ?? before?.cache_write_sell_micros ?? null
+        if ((writeCost == null) !== (writeSell == null)) throw new Error('cache-write 成本和售价必须同时填写')
+        const pricingTiers = Object.hasOwn(b, 'pricingTiers') ? parsePricingTiers(b.pricingTiers) : before?.pricing_tiers ?? null
+        if (pattern === 'gpt-6-sol') {
+          const high = Array.isArray(pricingTiers) ? pricingTiers.find((tier: any) => String(tier.thresholdTokens) === '272001') : null
+          if (writeCost == null || !high || high.cacheWriteCostMicrosPerMillion == null || high.cacheWriteSellMicrosPerMillion == null) {
+            throw new Error('gpt-6-sol 必须配置 Standard cache-write 成本/售价和 272K+ cache-write 成本/售价')
+          }
+        }
+        if (writeCost != null && writeSell != null) requireWalletMinimumMargin(BigInt(String(writeCost)), BigInt(String(writeSell)), rules, `${pattern} cache-write价格`)
+        for (const tier of Array.isArray(pricingTiers) ? pricingTiers as any[] : []) {
+          for (const [part, label] of [['input','输入'],['output','输出'],['cache','cache-read'],['cacheWrite','cache-write']] as const) {
+            const cost = tier[`${part}CostMicrosPerMillion`]
+            const sell = tier[`${part}SellMicrosPerMillion`]
+            if ((cost == null) !== (sell == null)) throw new Error(`${label}成本和售价必须同时填写`)
+            if (cost != null) requireWalletMinimumMargin(BigInt(String(cost)), BigInt(String(sell)), rules, `${pattern} ${tier.label || tier.thresholdTokens} ${label}价格`)
+          }
+        }
         const result = await client.query<any>(`INSERT INTO model_prices(
         model_pattern,input_cost_micros,output_cost_micros,cache_cost_micros,
         input_sell_micros,output_sell_micros,cache_sell_micros,fixed_cost_micros,fixed_sell_micros,active,
         input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,
         input_sell_micros_per_million,output_sell_micros_per_million,cache_sell_micros_per_million,
-        price_source,price_effective_at,fx_rate_cny_micros,pricing_tiers)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$2,$3,$4,$5,$6,$7,$11,$12,$13,NULL)
+        price_source,price_effective_at,fx_rate_cny_micros,cache_write_cost_micros,cache_write_sell_micros,
+        cache_write_cost_micros_per_million,cache_write_sell_micros_per_million,pricing_tiers)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$2,$3,$4,$5,$6,$7,$11,$12,$13,$14,$15,$14,$15,$16)
         ON CONFLICT(model_pattern) DO UPDATE SET
           input_cost_micros=excluded.input_cost_micros, output_cost_micros=excluded.output_cost_micros,
           cache_cost_micros=excluded.cache_cost_micros, input_sell_micros=excluded.input_sell_micros,
@@ -1232,10 +1308,13 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           input_sell_micros_per_million=excluded.input_sell_micros_per_million,
           output_sell_micros_per_million=excluded.output_sell_micros_per_million,
           cache_sell_micros_per_million=excluded.cache_sell_micros_per_million,
+          cache_write_cost_micros=excluded.cache_write_cost_micros, cache_write_sell_micros=excluded.cache_write_sell_micros,
+          cache_write_cost_micros_per_million=excluded.cache_write_cost_micros_per_million,
+          cache_write_sell_micros_per_million=excluded.cache_write_sell_micros_per_million,
           price_source=excluded.price_source, price_effective_at=excluded.price_effective_at,
           fx_rate_cny_micros=excluded.fx_rate_cny_micros,
-          pricing_tiers=NULL,
-          active=excluded.active, updated_at=now() RETURNING *`, values)
+          pricing_tiers=excluded.pricing_tiers,
+          active=excluded.active, updated_at=now() RETURNING *`, [...values, writeCost, writeSell, pricingTiers == null ? null : JSON.stringify(pricingTiers)])
         const after = result.rows[0]
         await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value)
           VALUES($1,'model_price',$2,$3,$4)`, [actor.id, pattern, before ? JSON.stringify(before) : null, JSON.stringify(after)])

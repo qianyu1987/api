@@ -14,9 +14,19 @@ export type PricingPreviewModel = {
   standardInputCostMicrosPerMillion: string
   standardOutputCostMicrosPerMillion: string
   standardCacheCostMicrosPerMillion: string
+  standardCacheWriteCostMicrosPerMillion?: string
   highContextInputCostMicrosPerMillion: string
   highContextOutputCostMicrosPerMillion: string
   highContextCacheCostMicrosPerMillion: string
+  highContextCacheWriteCostMicrosPerMillion?: string
+  standardInputSellMicrosPerMillion?: string
+  standardOutputSellMicrosPerMillion?: string
+  standardCacheSellMicrosPerMillion?: string
+  standardCacheWriteSellMicrosPerMillion?: string
+  highContextInputSellMicrosPerMillion?: string
+  highContextOutputSellMicrosPerMillion?: string
+  highContextCacheSellMicrosPerMillion?: string
+  highContextCacheWriteSellMicrosPerMillion?: string
   inputCostMicrosPerMillion: string
   outputCostMicrosPerMillion: string
   cacheCostMicrosPerMillion: string
@@ -99,11 +109,13 @@ function priceRate(row: any, part: string, kind: 'cost' | 'sell'): bigint {
   return nonNegativeRate(row?.[`${part}_${kind}_micros_per_million`] ?? row?.[`${part}_${kind}_micros`])
 }
 
+type CostPart = 'input' | 'output' | 'cache' | 'cacheWrite'
+
 type RoutedCosts = {
   routes: any[]
   usable: Array<{ route: any; cost: any; source: string }>
-  standard: Record<'input' | 'output' | 'cache', bigint>
-  high: Record<'input' | 'output' | 'cache', bigint>
+  standard: Record<CostPart, bigint>
+  high: Record<CostPart, bigint>
   blockers: PricingPreview['blockers']
 }
 
@@ -114,20 +126,31 @@ function routedCosts(channels: any[], costRows: any[], model: string, modelPrice
   const usable: RoutedCosts['usable'] = []
   for (const route of routes) {
     const cost = costFor(costRows, String(route.id), model)
-    const source = cost?.price_source == null ? '' : String(cost.price_source).trim()
-    if (!cost || !source) {
-      blockers.push({ kind: 'cost_missing', model, channelId: String(route.id), channelName: String(route.name), message: `${route.name} / ${model} 缺少有来源的输入、输出、缓存成本` })
+    const tier = model === 'gpt-6-sol' ? cost?.provider_tier_costs?.standard : null
+    const source = String(tier?.source ?? cost?.price_source ?? '').trim()
+    const tierReady = model !== 'gpt-6-sol' || Boolean(tier
+      && ['inputCostMicrosPerMillion','outputCostMicrosPerMillion','cacheReadCostMicrosPerMillion','cacheWriteCostMicrosPerMillion'].every((key) => /^\d+$/.test(String(tier[key] ?? '')))
+      && tier.highContextMultipliers?.input === 20000 && tier.highContextMultipliers?.output === 15000
+      && tier.highContextMultipliers?.cacheRead === 20000 && tier.highContextMultipliers?.cacheWrite === 20000)
+    if (!cost || !source || !tierReady) {
+      blockers.push({ kind: model === 'gpt-6-sol' ? 'standard_cost_missing' : 'cost_missing', model, channelId: String(route.id), channelName: String(route.name), message: model === 'gpt-6-sol' ? `${route.name} / ${model} 缺少有来源的 Standard 输入、输出、cache-read、cache-write 成本` : `${route.name} / ${model} 缺少有来源的输入、输出、缓存成本` })
       if (!cost) continue
     }
     usable.push({ route, cost, source })
   }
-  const parts = ['input', 'output', 'cache'] as const
-  const standard = Object.fromEntries(parts.map((part) => [part, priceRate(modelPrice, part, 'cost')])) as RoutedCosts['standard']
+  const parts: CostPart[] = model === 'gpt-6-sol' ? ['input', 'output', 'cache', 'cacheWrite'] : ['input', 'output', 'cache']
+  const standard = Object.fromEntries(parts.map((part) => [part, priceRate(modelPrice, part === 'cacheWrite' ? 'cache_write' : part, 'cost')])) as RoutedCosts['standard']
   const high = { ...standard }
   for (const item of usable) for (const part of parts) {
-    const value = nonNegativeRate(item.cost[`${part}_cost_micros_per_million`])
+    const profile = model === 'gpt-6-sol' ? item.cost.provider_tier_costs?.standard : null
+    const rateKey = part === 'cacheWrite' ? 'cacheWriteCostMicrosPerMillion' : part === 'cache' ? 'cacheReadCostMicrosPerMillion' : `${part}CostMicrosPerMillion`
+    const value = profile
+      ? nonNegativeRate(profile[rateKey])
+      : nonNegativeRate(item.cost[`${part}_cost_micros_per_million`])
     if (value > standard[part]) standard[part] = value
-    const scaled = scaledCost(value, item.cost.high_context_multiplier_bps)
+    const multiplierKey = part === 'input' ? 'input' : part === 'output' ? 'output' : part === 'cache' ? 'cacheRead' : 'cacheWrite'
+    const multiplier = profile?.highContextMultipliers?.[multiplierKey] ?? item.cost.high_context_multiplier_bps
+    const scaled = scaledCost(value, multiplier)
     if (scaled > high[part]) high[part] = scaled
   }
   for (const part of parts) if (standard[part] > high[part]) high[part] = standard[part]
@@ -145,16 +168,24 @@ export function buildMarginPriceRows(input: { channels: any[]; prices: any[]; co
     const coverage = routedCosts(input.channels, input.costs, model, price)
     blockers.push(...coverage.blockers)
     const patched: any = { ...price }
-    for (const part of ['input', 'output', 'cache'] as const) {
-      patched[`${part}_cost_micros`] = coverage.high[part].toString()
-      patched[`${part}_cost_micros_per_million`] = coverage.high[part].toString()
+    const gpt6Sol = model === 'gpt-6-sol'
+    const parts: CostPart[] = gpt6Sol ? ['input', 'output', 'cache', 'cacheWrite'] : ['input', 'output', 'cache']
+    for (const part of parts) {
+      const baseCost = gpt6Sol ? coverage.standard[part] : coverage.high[part]
+      const column = part === 'cacheWrite' ? 'cache_write' : part
+      patched[`${column}_cost_micros`] = baseCost.toString()
+      patched[`${column}_cost_micros_per_million`] = baseCost.toString()
     }
-    if (Array.isArray(price.pricing_tiers)) patched.pricing_tiers = price.pricing_tiers.map((tier: any) => ({
-      ...tier,
-      inputCostMicrosPerMillion: coverage.high.input.toString(),
-      outputCostMicrosPerMillion: coverage.high.output.toString(),
-      cacheCostMicrosPerMillion: coverage.high.cache.toString(),
-    }))
+    if (Array.isArray(price.pricing_tiers)) patched.pricing_tiers = price.pricing_tiers.map((tier: any) => {
+      const rates = BigInt(tier.thresholdTokens ?? tier.threshold_tokens ?? 0) > 272000n ? coverage.high : coverage.standard
+      return {
+        ...tier,
+        inputCostMicrosPerMillion: rates.input.toString(),
+        outputCostMicrosPerMillion: rates.output.toString(),
+        cacheCostMicrosPerMillion: rates.cache.toString(),
+        ...(gpt6Sol ? { cacheWriteCostMicrosPerMillion: rates.cacheWrite.toString() } : {}),
+      }
+    })
     return patched
   })
   return { rows, blockers }
@@ -175,15 +206,29 @@ export function buildPricingPreview(input: { channels: any[]; prices: any[]; cos
     blockers.push(...coverage.blockers)
     if (!coverage.routes.length || coverage.usable.length !== coverage.routes.length) continue
     const inputCost = coverage.high.input; const outputCost = coverage.high.output; const cacheCost = coverage.high.cache
+    const gpt6Sol = model === 'gpt-6-sol'
+    const sellParts: CostPart[] = gpt6Sol ? ['input', 'output', 'cache', 'cacheWrite'] : ['input', 'output', 'cache']
+    const highSells = Object.fromEntries(sellParts.map((part) => [part, requiredWalletSell(coverage.high[part], input.rules)])) as Record<CostPart, bigint>
+    const standardSells = Object.fromEntries(sellParts.map((part) => [part, requiredWalletSell(coverage.standard[part], input.rules)])) as Record<CostPart, bigint>
+    const baseSells = gpt6Sol ? standardSells : highSells
     previewModels.push({
       model,
       channels: coverage.usable.map((item) => ({ channelId: String(item.route.id), channelName: String(item.route.name), source: item.source })),
       standardInputCostMicrosPerMillion: coverage.standard.input.toString(), standardOutputCostMicrosPerMillion: coverage.standard.output.toString(), standardCacheCostMicrosPerMillion: coverage.standard.cache.toString(),
       highContextInputCostMicrosPerMillion: coverage.high.input.toString(), highContextOutputCostMicrosPerMillion: coverage.high.output.toString(), highContextCacheCostMicrosPerMillion: coverage.high.cache.toString(),
+      ...(gpt6Sol ? {
+        standardCacheWriteCostMicrosPerMillion: coverage.standard.cacheWrite.toString(),
+        highContextCacheWriteCostMicrosPerMillion: coverage.high.cacheWrite.toString(),
+        standardInputSellMicrosPerMillion: standardSells.input.toString(), standardOutputSellMicrosPerMillion: standardSells.output.toString(),
+        standardCacheSellMicrosPerMillion: standardSells.cache.toString(), standardCacheWriteSellMicrosPerMillion: standardSells.cacheWrite.toString(),
+        highContextInputSellMicrosPerMillion: highSells.input.toString(), highContextOutputSellMicrosPerMillion: highSells.output.toString(),
+        highContextCacheSellMicrosPerMillion: highSells.cache.toString(), highContextCacheWriteSellMicrosPerMillion: highSells.cacheWrite.toString(),
+      } : {}),
       inputCostMicrosPerMillion: inputCost.toString(), outputCostMicrosPerMillion: outputCost.toString(), cacheCostMicrosPerMillion: cacheCost.toString(),
-      inputSellMicrosPerMillion: requiredWalletSell(inputCost, input.rules).toString(),
-      outputSellMicrosPerMillion: requiredWalletSell(outputCost, input.rules).toString(),
-      cacheSellMicrosPerMillion: requiredWalletSell(cacheCost, input.rules).toString(),
+      ...(gpt6Sol ? { cacheWriteCostMicrosPerMillion: coverage.high.cacheWrite.toString() } : {}),
+      inputSellMicrosPerMillion: baseSells.input.toString(),
+      outputSellMicrosPerMillion: baseSells.output.toString(),
+      cacheSellMicrosPerMillion: baseSells.cache.toString(),
       sources: [...new Set(coverage.usable.map((item) => item.source))], existingPrice: modelPrice,
     })
   }

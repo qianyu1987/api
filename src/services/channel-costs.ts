@@ -9,6 +9,36 @@ const uuid = (value: unknown) => {
   return text
 }
 
+function parseProviderTierCosts(value: unknown): Record<string, any> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('分档上游成本必须是 Standard/Fast 对象')
+  const input = value as Record<string, any>
+  const allowed = new Set(['standard', 'fast'])
+  if (Object.keys(input).some((key) => !allowed.has(key))) invalid('仅支持 Standard 或 Fast 上游成本档')
+  const result: Record<string, any> = {}
+  for (const [tier, rates] of Object.entries(input)) {
+    if (!rates || typeof rates !== 'object' || Array.isArray(rates)) invalid(`${tier} 成本档格式无效`)
+    const values: Record<string, string> = {}
+    for (const [field, label] of [
+      ['inputCostYuanPerMillion', '普通输入'], ['outputCostYuanPerMillion', '输出'],
+      ['cacheReadCostYuanPerMillion', 'cache-read'], ['cacheWriteCostYuanPerMillion', 'cache-write'],
+    ] as const) {
+      try { values[field.replace('YuanPerMillion', 'MicrosPerMillion')] = yuanToMicros((rates as any)[field]).toString() }
+      catch { invalid(`${tier} ${label}成本必须是非负人民币金额，最多 6 位小数`) }
+    }
+    const multipliers = rates.highContextMultipliers
+    if (!multipliers || typeof multipliers !== 'object' || Array.isArray(multipliers)) invalid(`${tier} 必须明确填写 272K+ 各项成本倍率`)
+    const normalized = {
+      input: Number(multipliers.input), output: Number(multipliers.output),
+      cacheRead: Number(multipliers.cacheRead), cacheWrite: Number(multipliers.cacheWrite),
+    }
+    if (Object.values(normalized).some((item) => !Number.isInteger(item) || item < 10000 || item > 110000)) invalid(`${tier} 272K+ 倍率必须在 1–11 倍之间`)
+    const source = String(rates.priceSource || '').trim()
+    if (!source || source.length > 512) invalid(`${tier} 必须填写可审计成本来源，最多 512 字`)
+    result[tier] = { ...values, highContextMultipliers: normalized, source }
+  }
+  return result
+}
+
 export class ChannelCostService {
   constructor(private readonly db: Database) {}
 
@@ -53,6 +83,7 @@ export class ChannelCostService {
     // this editor immediate until the schema supports multiple dated versions.
     if (body.priceEffectiveAt && new Date(body.priceEffectiveAt).getTime() > Date.now()) invalid('当前成本编辑立即生效，暂不支持预约改价')
     if (body.priceEffectiveAt && Number.isNaN(new Date(body.priceEffectiveAt).getTime())) invalid('成本生效时间无效')
+    const providerTierCosts = body.providerTierCosts === undefined ? null : JSON.stringify(parseProviderTierCosts(body.providerTierCosts))
     return this.db.tx(async client => {
       // Serialize both first writes and subsequent edits for the channel.
       const channel = await one<any>(client, 'SELECT id,name,model_map FROM channels WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [channelId])
@@ -64,10 +95,10 @@ export class ChannelCostService {
         const current = before ? new Date(before.updated_at).getTime() : null
         if (expected !== current) invalid('成本已被其他管理员修改，请重新加载后再保存', 409)
       }
-      const after = await one<any>(client, `INSERT INTO channel_model_costs(channel_id,model_pattern,input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,price_source,price_effective_at,high_context_multiplier_bps)
-        VALUES($1,$2,$3,$4,$5,$6,now(),$7)
-        ON CONFLICT(channel_id,model_pattern) DO UPDATE SET input_cost_micros_per_million=excluded.input_cost_micros_per_million,output_cost_micros_per_million=excluded.output_cost_micros_per_million,cache_cost_micros_per_million=excluded.cache_cost_micros_per_million,price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,high_context_multiplier_bps=excluded.high_context_multiplier_bps,updated_at=clock_timestamp()
-        RETURNING *`, [channelId, model, ...rates, source, multiplier])
+      const after = await one<any>(client, `INSERT INTO channel_model_costs(channel_id,model_pattern,input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,price_source,price_effective_at,high_context_multiplier_bps,provider_tier_costs)
+        VALUES($1,$2,$3,$4,$5,$6,now(),$7,COALESCE($8::jsonb,'{}'::jsonb))
+        ON CONFLICT(channel_id,model_pattern) DO UPDATE SET input_cost_micros_per_million=excluded.input_cost_micros_per_million,output_cost_micros_per_million=excluded.output_cost_micros_per_million,cache_cost_micros_per_million=excluded.cache_cost_micros_per_million,price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,high_context_multiplier_bps=excluded.high_context_multiplier_bps,provider_tier_costs=CASE WHEN $8::jsonb IS NULL THEN channel_model_costs.provider_tier_costs ELSE excluded.provider_tier_costs END,updated_at=clock_timestamp()
+        RETURNING *`, [channelId, model, ...rates, source, multiplier, providerTierCosts])
       await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value)
         VALUES($1,'channel_model_cost',$2,$3,$4)`, [actorId, `${channelId}:${model}`, before ? JSON.stringify(before) : null, JSON.stringify(after)])
       return after
@@ -89,20 +120,43 @@ export class ChannelCostService {
       for (const item of preview.models) {
         const source = `channel-cost-preview ${publishedAt.toISOString()} · ${item.sources.join('；')}`.slice(0, 512)
         const before = await one<any>(client, 'SELECT * FROM model_prices WHERE model_pattern=$1 FOR UPDATE', [item.model])
+        const tiered = item.model === 'gpt-6-sol'
+        const inputCost = tiered ? item.standardInputCostMicrosPerMillion : item.inputCostMicrosPerMillion
+        const outputCost = tiered ? item.standardOutputCostMicrosPerMillion : item.outputCostMicrosPerMillion
+        const cacheCost = tiered ? item.standardCacheCostMicrosPerMillion : item.cacheCostMicrosPerMillion
+        const inputSell = tiered ? item.standardInputSellMicrosPerMillion : item.inputSellMicrosPerMillion
+        const outputSell = tiered ? item.standardOutputSellMicrosPerMillion : item.outputSellMicrosPerMillion
+        const cacheSell = tiered ? item.standardCacheSellMicrosPerMillion : item.cacheSellMicrosPerMillion
+        const writeCost = tiered ? item.standardCacheWriteCostMicrosPerMillion : null
+        const writeSell = tiered ? item.standardCacheWriteSellMicrosPerMillion : null
+        const pricingTiers = tiered ? [{
+          thresholdTokens: '272001', label: '272K+',
+          inputCostMicrosPerMillion: item.highContextInputCostMicrosPerMillion,
+          outputCostMicrosPerMillion: item.highContextOutputCostMicrosPerMillion,
+          cacheCostMicrosPerMillion: item.highContextCacheCostMicrosPerMillion,
+          cacheWriteCostMicrosPerMillion: item.highContextCacheWriteCostMicrosPerMillion,
+          inputSellMicrosPerMillion: item.highContextInputSellMicrosPerMillion,
+          outputSellMicrosPerMillion: item.highContextOutputSellMicrosPerMillion,
+          cacheSellMicrosPerMillion: item.highContextCacheSellMicrosPerMillion,
+          cacheWriteSellMicrosPerMillion: item.highContextCacheWriteSellMicrosPerMillion,
+        }] : before?.pricing_tiers ?? null
         const after = await one<any>(client, `INSERT INTO model_prices(
           model_pattern,input_cost_micros,output_cost_micros,cache_cost_micros,
           input_sell_micros,output_sell_micros,cache_sell_micros,fixed_cost_micros,fixed_sell_micros,active,
           input_cost_micros_per_million,output_cost_micros_per_million,cache_cost_micros_per_million,
           input_sell_micros_per_million,output_sell_micros_per_million,cache_sell_micros_per_million,
+          cache_write_cost_micros,cache_write_sell_micros,cache_write_cost_micros_per_million,cache_write_sell_micros_per_million,
           price_source,price_effective_at,pricing_tiers)
-          VALUES($1,$2,$3,$4,$5,$6,$7,0,0,true,$2,$3,$4,$5,$6,$7,$8,$9,NULL)
+          VALUES($1,$2,$3,$4,$5,$6,$7,0,0,true,$2,$3,$4,$5,$6,$7,$8,$9,$8,$9,$10,$11,$12)
           ON CONFLICT(model_pattern) DO UPDATE SET
             input_cost_micros=excluded.input_cost_micros,output_cost_micros=excluded.output_cost_micros,cache_cost_micros=excluded.cache_cost_micros,
             input_sell_micros=excluded.input_sell_micros,output_sell_micros=excluded.output_sell_micros,cache_sell_micros=excluded.cache_sell_micros,
             input_cost_micros_per_million=excluded.input_cost_micros_per_million,output_cost_micros_per_million=excluded.output_cost_micros_per_million,cache_cost_micros_per_million=excluded.cache_cost_micros_per_million,
             input_sell_micros_per_million=excluded.input_sell_micros_per_million,output_sell_micros_per_million=excluded.output_sell_micros_per_million,cache_sell_micros_per_million=excluded.cache_sell_micros_per_million,
-            price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,pricing_tiers=NULL,active=true,updated_at=now()
-          RETURNING *`, [item.model, item.inputCostMicrosPerMillion, item.outputCostMicrosPerMillion, item.cacheCostMicrosPerMillion, item.inputSellMicrosPerMillion, item.outputSellMicrosPerMillion, item.cacheSellMicrosPerMillion, source, publishedAt])
+            cache_write_cost_micros=excluded.cache_write_cost_micros,cache_write_sell_micros=excluded.cache_write_sell_micros,
+            cache_write_cost_micros_per_million=excluded.cache_write_cost_micros_per_million,cache_write_sell_micros_per_million=excluded.cache_write_sell_micros_per_million,
+            price_source=excluded.price_source,price_effective_at=excluded.price_effective_at,pricing_tiers=excluded.pricing_tiers,active=true,updated_at=now()
+          RETURNING *`, [item.model, inputCost, outputCost, cacheCost, inputSell, outputSell, cacheSell, writeCost, writeSell, source, publishedAt, JSON.stringify(pricingTiers)])
         await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value)
           VALUES($1,'model_price',$2,$3,$4)`, [actorId, item.model, before ? JSON.stringify(before) : null, JSON.stringify(after)])
       }

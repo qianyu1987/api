@@ -61,6 +61,23 @@ describe('money helpers', () => {
     })
   })
 
+  test('prices cache-write tokens with their own configured rates', () => {
+    const rates: TokenRates = {
+      inputSellMicrosPerMillion: 1_000_000n,
+      outputSellMicrosPerMillion: 2_000_000n,
+      cacheSellMicrosPerMillion: 500_000n,
+      cacheWriteSellMicrosPerMillion: 3_000_000n,
+      inputCostMicrosPerMillion: 100_000n,
+      outputCostMicrosPerMillion: 200_000n,
+      cacheCostMicrosPerMillion: 50_000n,
+      cacheWriteCostMicrosPerMillion: 400_000n,
+    }
+    expect(calculateUsageMoney({ input: 1n, output: 1n, cache: 1n, cacheWrite: 1n, reportedTotal: 4n }, rates)).toEqual({
+      chargeMicros: 7n,
+      costMicros: 4n,
+    })
+  })
+
   test('keeps large token calculations exact with bigint', () => {
     expect(tokenCharge(9_007_199_254_740_993n, 2_000_000n)).toBe(18_014_398_509_481_986n)
   })

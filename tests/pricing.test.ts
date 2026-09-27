@@ -73,4 +73,25 @@ describe('cash-margin pricing preview', () => {
       inputCostMicrosPerMillion: '360', inputSellMicrosPerMillion: '4500',
     })
   })
+
+  test('builds gpt-6-sol Standard and 272K+ prices from the four official cost parts', () => {
+    const result = buildPricingPreview({
+      rules: { minimumMarginBps: 3000, paymentFeeRateBps: 0, affiliateRateBps: 1000, walletTopupMultiplierBps: 50000 },
+      prices: [{ model_pattern: 'gpt-6-sol', active: true }],
+      channels: [{ id: 'sol', name: 'Sol', enabled: true, deleted_at: null, model_map: { 'gpt-6-sol': 'gpt-6-sol' } }],
+      costs: [{ channel_id: 'sol', model_pattern: 'gpt-6-sol', provider_tier_costs: { standard: {
+        inputCostMicrosPerMillion: '2000000', outputCostMicrosPerMillion: '10000000',
+        cacheReadCostMicrosPerMillion: '200000', cacheWriteCostMicrosPerMillion: '2500000',
+        highContextMultipliers: { input: 20000, output: 15000, cacheRead: 20000, cacheWrite: 20000 }, source: 'official screenshot',
+      } } }],
+    })
+    expect(result.ready).toBe(true)
+    expect(result.models[0]).toMatchObject({
+      standardInputCostMicrosPerMillion: '2000000', highContextInputCostMicrosPerMillion: '4000000',
+      standardCacheWriteCostMicrosPerMillion: '2500000', highContextCacheWriteCostMicrosPerMillion: '5000000',
+      inputSellMicrosPerMillion: '16666667', outputSellMicrosPerMillion: '83333334', cacheSellMicrosPerMillion: '1666667',
+      standardCacheWriteSellMicrosPerMillion: '20833334', highContextInputSellMicrosPerMillion: '33333334',
+      highContextOutputSellMicrosPerMillion: '125000000', highContextCacheWriteSellMicrosPerMillion: '41666667',
+    })
+  })
 })

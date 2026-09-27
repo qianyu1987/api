@@ -8,20 +8,27 @@ describe('usage parsing', () => {
       completion_tokens: 30,
       cached_tokens: 20,
       total_tokens: 150,
-    } })).toEqual({ input: 100n, output: 30n, cache: 20n, reportedTotal: 150n })
+    } })).toEqual({ input: 100n, output: 30n, cache: 20n, cacheWrite: 0n, reportedTotal: 150n })
 
     expect(usageFromPayload({ response: { usage: {
       input_tokens: '80',
       output_tokens: '12',
       input_tokens_details: { cached_tokens: '8' },
-    } } })).toEqual({ input: 72n, output: 12n, cache: 8n, reportedTotal: 92n })
+    } } })).toEqual({ input: 72n, output: 12n, cache: 8n, cacheWrite: 0n, reportedTotal: 92n })
 
     expect(usageFromPayload({ usage: {
       prompt_tokens: 50,
       completion_tokens: 5,
       prompt_tokens_details: { cached_tokens: 15 },
       total_tokens: 55,
-    } })).toEqual({ input: 35n, output: 5n, cache: 15n, reportedTotal: 55n })
+    } })).toEqual({ input: 35n, output: 5n, cache: 15n, cacheWrite: 0n, reportedTotal: 55n })
+
+    expect(usageFromPayload({ usage: {
+      input_tokens: 100,
+      output_tokens: 4,
+      cache_read_tokens: 20,
+      cache_write_tokens: 5,
+    } })).toEqual({ input: 100n, output: 4n, cache: 20n, cacheWrite: 5n, reportedTotal: 129n })
   })
 
   test('returns the last valid usage event from an SSE transcript', () => {
@@ -38,14 +45,14 @@ describe('usage parsing', () => {
       'data: [DONE]',
     ].join('\n')
 
-    expect(parseSseUsage(transcript)).toEqual({ input: 8n, output: 4n, cache: 2n, reportedTotal: 14n })
+    expect(parseSseUsage(transcript)).toEqual({ input: 8n, output: 4n, cache: 2n, cacheWrite: 0n, reportedTotal: 14n })
   })
 
   test('ignores empty usage and keeps the previous parsed value', () => {
     const current = { input: 3n, output: 1n, cache: 0n, reportedTotal: 4n }
     expect(parseSseUsage('data: {"usage":{}}\n\ndata: [DONE]\n')).toBeNull()
     expect(mergeSseUsage(current, null)).toBe(current)
-    expect(mergeSseUsage(current, { input: 5n, output: 2n, cache: 0n, reportedTotal: 7n }))
-      .toEqual({ input: 5n, output: 2n, cache: 0n, reportedTotal: 7n })
+    expect(mergeSseUsage(current, { input: 5n, output: 2n, cache: 0n, cacheWrite: 0n, reportedTotal: 7n }))
+      .toEqual({ input: 5n, output: 2n, cache: 0n, cacheWrite: 0n, reportedTotal: 7n })
   })
 })

@@ -25,6 +25,7 @@ export type CashGuardSnapshot = PricingRules & {
     inputMicrosPerMillion: string
     outputMicrosPerMillion: string
     cacheMicrosPerMillion: string
+    cacheWriteMicrosPerMillion?: string
   }
 }
 
@@ -72,9 +73,11 @@ export type StoredPriceSnapshot = {
     inputSellMicrosPerMillion: string
     outputSellMicrosPerMillion: string
     cacheSellMicrosPerMillion: string
+    cacheWriteSellMicrosPerMillion?: string
     inputCostMicrosPerMillion: string
     outputCostMicrosPerMillion: string
     cacheCostMicrosPerMillion: string
+    cacheWriteCostMicrosPerMillion?: string
     fixedSellMicros: string
     fixedCostMicros: string
   }
@@ -83,6 +86,7 @@ export type StoredPriceSnapshot = {
     input: string
     output: string
     cache: string
+    cacheWrite?: string
     reportedTotal: string
   }
   request: {
@@ -177,7 +181,7 @@ export type SettlementAllocation = {
   overageMicros: bigint
 }
 
-const zeroUsage: UsageTokens = { input: 0n, output: 0n, cache: 0n, reportedTotal: 0n }
+const zeroUsage: UsageTokens = { input: 0n, output: 0n, cache: 0n, cacheWrite: 0n, reportedTotal: 0n }
 
 function bigintValue(value: unknown): bigint {
   if (typeof value === 'bigint') return value
@@ -294,18 +298,43 @@ function fixedUnits(row: any, payload: Record<string, unknown>): bigint {
   return BigInt(Math.max(1, Math.min(100_000, Math.ceil(value))))
 }
 
+function gpt6SolStandardCostReady(row: any): boolean {
+  const standard = row?.provider_tier_costs?.standard
+  if (!standard || !String(standard.source || '').trim()) return false
+  const fields = ['inputCostMicrosPerMillion', 'outputCostMicrosPerMillion', 'cacheReadCostMicrosPerMillion', 'cacheWriteCostMicrosPerMillion']
+  if (fields.some((key) => !/^\d+$/.test(String(standard[key] ?? '')))) return false
+  return Number(standard.highContextMultipliers?.input) === 20000
+    && Number(standard.highContextMultipliers?.output) === 15000
+    && Number(standard.highContextMultipliers?.cacheRead) === 20000
+    && Number(standard.highContextMultipliers?.cacheWrite) === 20000
+}
+
 function usageFromStored(value: any): UsageTokens {
   return {
     input: bigintValue(value?.input),
     output: bigintValue(value?.output),
     cache: bigintValue(value?.cache),
+    cacheWrite: bigintValue(value?.cacheWrite),
     reportedTotal: bigintValue(value?.reportedTotal),
   }
 }
 
 export function calculatePrice(price: PriceSnapshot, usage: UsageTokens, mode: BillingMode = price.billingMode || 'token'): { chargeMicros: bigint; costMicros: bigint } {
   if (mode === 'fixed') return { chargeMicros: price.fixedSellMicros, costMicros: price.fixedCostMicros }
-  return calculateUsageMoney(usage, tierRates(price, usage.input))
+  return calculateUsageMoney(usage, tierRates(price, usage.input + usage.cache + (usage.cacheWrite || 0n)))
+}
+
+function conservativeEstimatePrice(price: PriceSnapshot, usage: UsageTokens): { chargeMicros: bigint; costMicros: bigint } {
+  const rates = tierRates(price, usage.input + usage.cache + (usage.cacheWrite || 0n))
+  const maxPromptSell = [rates.inputSellMicrosPerMillion, rates.cacheSellMicrosPerMillion, rates.cacheWriteSellMicrosPerMillion ?? rates.inputSellMicrosPerMillion].reduce((max, value) => value > max ? value : max, 0n)
+  const maxPromptCost = [rates.inputCostMicrosPerMillion, rates.cacheCostMicrosPerMillion, rates.cacheWriteCostMicrosPerMillion ?? rates.inputCostMicrosPerMillion].reduce((max, value) => value > max ? value : max, 0n)
+  const promptTokens = usage.input + usage.cache + (usage.cacheWrite || 0n)
+  return {
+    chargeMicros: calculateUsageMoney({ ...usage, input: 0n, cache: 0n, cacheWrite: 0n }, rates).chargeMicros
+      + (promptTokens * maxPromptSell + 999_999n) / 1_000_000n,
+    costMicros: calculateUsageMoney({ ...usage, input: 0n, cache: 0n, cacheWrite: 0n }, rates).costMicros
+      + (promptTokens * maxPromptCost + 999_999n) / 1_000_000n,
+  }
 }
 
 export function tierRates(price: PriceSnapshot, inputTokens: bigint): TokenRates {
@@ -323,43 +352,59 @@ export function applyTokenDiscount(price: PriceSnapshot, discountBps: bigint): P
     return value > 0n ? value : 1n
   }
   return { ...price, discountBps,
-    inputSellMicrosPerMillion: discounted(price.inputSellMicrosPerMillion),
-    outputSellMicrosPerMillion: discounted(price.outputSellMicrosPerMillion),
-    cacheSellMicrosPerMillion: discounted(price.cacheSellMicrosPerMillion),
-    pricingTiers: price.pricingTiers?.map((tier) => ({ ...tier,
-      inputSellMicrosPerMillion: discounted(tier.inputSellMicrosPerMillion),
-      outputSellMicrosPerMillion: discounted(tier.outputSellMicrosPerMillion),
-      cacheSellMicrosPerMillion: discounted(tier.cacheSellMicrosPerMillion),
-    })) }
+      inputSellMicrosPerMillion: discounted(price.inputSellMicrosPerMillion),
+      outputSellMicrosPerMillion: discounted(price.outputSellMicrosPerMillion),
+      cacheSellMicrosPerMillion: discounted(price.cacheSellMicrosPerMillion),
+      ...(price.cacheWriteSellMicrosPerMillion === undefined ? {} : { cacheWriteSellMicrosPerMillion: discounted(price.cacheWriteSellMicrosPerMillion) }),
+      pricingTiers: price.pricingTiers?.map((tier) => ({ ...tier,
+        inputSellMicrosPerMillion: discounted(tier.inputSellMicrosPerMillion),
+        outputSellMicrosPerMillion: discounted(tier.outputSellMicrosPerMillion),
+        cacheSellMicrosPerMillion: discounted(tier.cacheSellMicrosPerMillion),
+        ...(tier.cacheWriteSellMicrosPerMillion === undefined ? {} : { cacheWriteSellMicrosPerMillion: discounted(tier.cacheWriteSellMicrosPerMillion) }),
+      })) }
 }
 
-type TokenPart = 'input' | 'output' | 'cache'
+type TokenPart = 'input' | 'output' | 'cache' | 'cacheWrite'
 
-const tokenParts: TokenPart[] = ['input', 'output', 'cache']
+const tokenParts: TokenPart[] = ['input', 'output', 'cache', 'cacheWrite']
 
 function rateFor(price: TokenRates, part: TokenPart, kind: 'Sell' | 'Cost'): bigint {
-  return price[`${part}${kind}MicrosPerMillion` as keyof TokenRates] as bigint
+  const value = price[`${part}${kind}MicrosPerMillion` as keyof TokenRates]
+  return typeof value === 'bigint' ? value : 0n
 }
 
-function worstTokenCosts(price: PriceSnapshot, channelCosts: ChannelCostSnapshot[]): Record<TokenPart, bigint> {
-  const result = Object.fromEntries(tokenParts.map((part) => [part, rateFor(price, part, 'Cost')])) as Record<TokenPart, bigint>
-  for (const tier of price.pricingTiers || []) {
-    for (const part of tokenParts) {
-      const cost = rateFor(tier, part, 'Cost')
-      if (cost > result[part]) result[part] = cost
-    }
+type TokenCostSets = { standard: Record<TokenPart, bigint>; high: Record<TokenPart, bigint> }
+
+function tokenCostSets(price: PriceSnapshot, channelCosts: ChannelCostSnapshot[]): TokenCostSets {
+  const standard = Object.fromEntries(tokenParts.map((part) => [part, rateFor(price, part, 'Cost')])) as Record<TokenPart, bigint>
+  const highCosts = { ...standard }
+  const hasCacheWritePricing = price.cacheWriteCostMicrosPerMillion !== undefined
+    || price.pricingTiers?.some((tier) => tier.cacheWriteCostMicrosPerMillion !== undefined)
+    || channelCosts.some((cost) => cost.cacheWriteMicros != null)
+  const parts = tokenParts.filter((part) => part !== 'cacheWrite' || hasCacheWritePricing)
+  for (const tier of price.pricingTiers || []) for (const part of parts) {
+    const cost = rateFor(tier, part, 'Cost')
+    const target = tier.thresholdTokens > 272000n ? highCosts : standard
+    if (cost > target[part]) target[part] = cost
   }
   for (const cost of channelCosts) {
-    const multiplier = Number.isInteger(cost.highContextMultiplierBps) && cost.highContextMultiplierBps >= 10_000
-      ? cost.highContextMultiplierBps
-      : 10_000
-    for (const part of tokenParts) {
-      const raw = bigintValue(cost[`${part}Micros` as keyof ChannelCostSnapshot])
-      const high = (raw * BigInt(multiplier) + 9_999n) / 10_000n
-      if (high > result[part]) result[part] = high
+    for (const part of parts) {
+      const value = cost[`${part}Micros` as keyof ChannelCostSnapshot]
+      if (value == null) continue
+      const raw = bigintValue(value)
+      if (raw > standard[part]) standard[part] = raw
+      const multiplierValue = part === 'input' ? cost.highContextInputMultiplierBps
+        : part === 'output' ? cost.highContextOutputMultiplierBps
+          : part === 'cache' ? cost.highContextCacheMultiplierBps
+            : cost.highContextCacheWriteMultiplierBps
+      const candidate = multiplierValue ?? cost.highContextMultiplierBps
+      const multiplier = Number.isInteger(candidate) && Number(candidate) >= 10_000 ? Number(candidate) : 10_000
+      const scaled = (raw * BigInt(multiplier) + 9_999n) / 10_000n
+      if (scaled > highCosts[part]) highCosts[part] = scaled
     }
   }
-  return result
+  for (const part of parts) if (standard[part] > highCosts[part]) highCosts[part] = standard[part]
+  return { standard, high: highCosts }
 }
 
 function safeDiscountForRate(sell: bigint, required: bigint): { maxDiscountBps: number; baselineSafe: boolean } {
@@ -379,14 +424,18 @@ export function guardTokenPrice(input: {
   channelCosts: ChannelCostSnapshot[]
   coverageComplete: boolean
 }): { price: PriceSnapshot; guard: CashGuardSnapshot } {
-  const costs = worstTokenCosts(input.price, input.channelCosts)
+  const costs = tokenCostSets(input.price, input.channelCosts)
   const constraints: Array<{ maxDiscountBps: number; baselineSafe: boolean }> = []
-  for (const rates of [input.price, ...(input.price.pricingTiers || [])]) {
-    for (const part of tokenParts) constraints.push(safeDiscountForRate(
-      rateFor(rates, part, 'Sell'),
-      requiredWalletSell(costs[part], input.rules),
-    ))
-  }
+  const hasCacheWritePricing = input.price.cacheWriteSellMicrosPerMillion !== undefined
+    || input.price.pricingTiers?.some((tier) => tier.cacheWriteSellMicrosPerMillion !== undefined)
+  const tiers = input.price.pricingTiers || []
+  const rateSets = tiers.length
+    ? [{ rates: input.price, costs: costs.standard }, ...tiers.map((rates) => ({ rates, costs: rates.thresholdTokens > 272000n ? costs.high : costs.standard }))]
+    : [{ rates: input.price, costs: costs.high }]
+  for (const item of rateSets) for (const part of tokenParts.filter((value) => value !== 'cacheWrite' || hasCacheWritePricing)) constraints.push(safeDiscountForRate(
+    rateFor(item.rates, part, 'Sell'),
+    requiredWalletSell(item.costs[part], input.rules),
+  ))
   const baselineSafe = constraints.every((constraint) => constraint.baselineSafe)
   const maxSafeDiscountBps = constraints.length ? Math.min(...constraints.map((constraint) => constraint.maxDiscountBps)) : 0
   const requestedDiscountBps = effectiveDiscountBps(
@@ -427,9 +476,10 @@ export function guardTokenPrice(input: {
     coverageComplete: input.coverageComplete,
     baselineSafe,
     worstCosts: {
-      inputMicrosPerMillion: costs.input.toString(),
-      outputMicrosPerMillion: costs.output.toString(),
-      cacheMicrosPerMillion: costs.cache.toString(),
+      inputMicrosPerMillion: costs.high.input.toString(),
+      outputMicrosPerMillion: costs.high.output.toString(),
+      cacheMicrosPerMillion: costs.high.cache.toString(),
+      ...(hasCacheWritePricing ? { cacheWriteMicrosPerMillion: costs.high.cacheWrite.toString() } : {}),
     },
   }
   return {
@@ -440,7 +490,7 @@ export function guardTokenPrice(input: {
 
 export function estimatePrice(price: PriceSnapshot, payload: Record<string, unknown>, mode: BillingMode = price.billingMode || 'token'): { usage: UsageTokens; chargeMicros: bigint; costMicros: bigint } {
   const usage = estimatedRequestTokens(payload)
-  return { usage, ...calculatePrice(price, usage, mode) }
+  return { usage, ...(mode === 'token' ? conservativeEstimatePrice(price, usage) : calculatePrice(price, usage, mode)) }
 }
 
 export function serializePriceSnapshot(price: PriceSnapshot, estimatedUsage: UsageTokens, context: PriceContext, mode: BillingMode = price.billingMode || 'token'): StoredPriceSnapshot {
@@ -462,19 +512,24 @@ export function serializePriceSnapshot(price: PriceSnapshot, estimatedUsage: Usa
       inputSellMicrosPerMillion: price.inputSellMicrosPerMillion.toString(),
       outputSellMicrosPerMillion: price.outputSellMicrosPerMillion.toString(),
       cacheSellMicrosPerMillion: price.cacheSellMicrosPerMillion.toString(),
+      ...(price.cacheWriteSellMicrosPerMillion === undefined ? {} : { cacheWriteSellMicrosPerMillion: price.cacheWriteSellMicrosPerMillion.toString() }),
       inputCostMicrosPerMillion: price.inputCostMicrosPerMillion.toString(),
       outputCostMicrosPerMillion: price.outputCostMicrosPerMillion.toString(),
       cacheCostMicrosPerMillion: price.cacheCostMicrosPerMillion.toString(),
+      ...(price.cacheWriteCostMicrosPerMillion === undefined ? {} : { cacheWriteCostMicrosPerMillion: price.cacheWriteCostMicrosPerMillion.toString() }),
       fixedSellMicros: price.fixedSellMicros.toString(),
       fixedCostMicros: price.fixedCostMicros.toString(),
     },
     pricingTiers: price.pricingTiers?.map((tier) => ({ thresholdTokens: tier.thresholdTokens.toString(), label: tier.label, rates: {
       inputSellMicrosPerMillion: tier.inputSellMicrosPerMillion.toString(), outputSellMicrosPerMillion: tier.outputSellMicrosPerMillion.toString(), cacheSellMicrosPerMillion: tier.cacheSellMicrosPerMillion.toString(), inputCostMicrosPerMillion: tier.inputCostMicrosPerMillion.toString(), outputCostMicrosPerMillion: tier.outputCostMicrosPerMillion.toString(), cacheCostMicrosPerMillion: tier.cacheCostMicrosPerMillion.toString(), fixedSellMicros: '0', fixedCostMicros: '0',
+      ...(tier.cacheWriteSellMicrosPerMillion === undefined ? {} : { cacheWriteSellMicrosPerMillion: tier.cacheWriteSellMicrosPerMillion.toString() }),
+      ...(tier.cacheWriteCostMicrosPerMillion === undefined ? {} : { cacheWriteCostMicrosPerMillion: tier.cacheWriteCostMicrosPerMillion.toString() }),
     } })),
     estimatedUsage: {
       input: estimatedUsage.input.toString(),
       output: estimatedUsage.output.toString(),
       cache: estimatedUsage.cache.toString(),
+      ...(estimatedUsage.cacheWrite === undefined ? {} : { cacheWrite: estimatedUsage.cacheWrite.toString() }),
       reportedTotal: estimatedUsage.reportedTotal.toString(),
     },
     request: {
@@ -508,12 +563,14 @@ export function deserializePriceSnapshot(value: unknown, fallback?: PriceSnapsho
     inputSellMicrosPerMillion: bigintValue(rates.inputSellMicrosPerMillion ?? fallback?.inputSellMicrosPerMillion),
     outputSellMicrosPerMillion: bigintValue(rates.outputSellMicrosPerMillion ?? fallback?.outputSellMicrosPerMillion),
     cacheSellMicrosPerMillion: bigintValue(rates.cacheSellMicrosPerMillion ?? fallback?.cacheSellMicrosPerMillion),
+    cacheWriteSellMicrosPerMillion: rates.cacheWriteSellMicrosPerMillion == null ? fallback?.cacheWriteSellMicrosPerMillion : bigintValue(rates.cacheWriteSellMicrosPerMillion),
     inputCostMicrosPerMillion: bigintValue(rates.inputCostMicrosPerMillion ?? fallback?.inputCostMicrosPerMillion),
     outputCostMicrosPerMillion: bigintValue(rates.outputCostMicrosPerMillion ?? fallback?.outputCostMicrosPerMillion),
     cacheCostMicrosPerMillion: bigintValue(rates.cacheCostMicrosPerMillion ?? fallback?.cacheCostMicrosPerMillion),
+    cacheWriteCostMicrosPerMillion: rates.cacheWriteCostMicrosPerMillion == null ? fallback?.cacheWriteCostMicrosPerMillion : bigintValue(rates.cacheWriteCostMicrosPerMillion),
     fixedSellMicros: bigintValue(rates.fixedSellMicros ?? fallback?.fixedSellMicros),
     fixedCostMicros: bigintValue(rates.fixedCostMicros ?? fallback?.fixedCostMicros),
-    pricingTiers: Array.isArray(snapshot.pricingTiers) ? snapshot.pricingTiers.map((tier: any) => ({ thresholdTokens: bigintValue(tier.thresholdTokens), label: cleanText(tier.label, 128) || undefined, inputSellMicrosPerMillion: bigintValue(tier.rates?.inputSellMicrosPerMillion), outputSellMicrosPerMillion: bigintValue(tier.rates?.outputSellMicrosPerMillion), cacheSellMicrosPerMillion: bigintValue(tier.rates?.cacheSellMicrosPerMillion), inputCostMicrosPerMillion: bigintValue(tier.rates?.inputCostMicrosPerMillion), outputCostMicrosPerMillion: bigintValue(tier.rates?.outputCostMicrosPerMillion), cacheCostMicrosPerMillion: bigintValue(tier.rates?.cacheCostMicrosPerMillion) })) : fallback?.pricingTiers,
+    pricingTiers: Array.isArray(snapshot.pricingTiers) ? snapshot.pricingTiers.map((tier: any) => ({ thresholdTokens: bigintValue(tier.thresholdTokens), label: cleanText(tier.label, 128) || undefined, inputSellMicrosPerMillion: bigintValue(tier.rates?.inputSellMicrosPerMillion), outputSellMicrosPerMillion: bigintValue(tier.rates?.outputSellMicrosPerMillion), cacheSellMicrosPerMillion: bigintValue(tier.rates?.cacheSellMicrosPerMillion), inputCostMicrosPerMillion: bigintValue(tier.rates?.inputCostMicrosPerMillion), outputCostMicrosPerMillion: bigintValue(tier.rates?.outputCostMicrosPerMillion), cacheCostMicrosPerMillion: bigintValue(tier.rates?.cacheCostMicrosPerMillion), ...(tier.rates?.cacheWriteSellMicrosPerMillion == null ? {} : { cacheWriteSellMicrosPerMillion: bigintValue(tier.rates.cacheWriteSellMicrosPerMillion) }), ...(tier.rates?.cacheWriteCostMicrosPerMillion == null ? {} : { cacheWriteCostMicrosPerMillion: bigintValue(tier.rates.cacheWriteCostMicrosPerMillion) }) })) : fallback?.pricingTiers,
   }
   const storedRequest = snapshot.request || {}
   return {
@@ -734,16 +791,27 @@ export class BillingService {
       inputSellMicrosPerMillion: bigintValue(row.input_sell_micros_per_million ?? row.input_sell_micros),
       outputSellMicrosPerMillion: bigintValue(row.output_sell_micros_per_million ?? row.output_sell_micros),
       cacheSellMicrosPerMillion: bigintValue(row.cache_sell_micros_per_million ?? row.cache_sell_micros),
+      cacheWriteSellMicrosPerMillion: row.cache_write_sell_micros_per_million == null && row.cache_write_sell_micros == null ? undefined : bigintValue(row.cache_write_sell_micros_per_million ?? row.cache_write_sell_micros),
       inputCostMicrosPerMillion: bigintValue(row.input_cost_micros_per_million ?? row.input_cost_micros),
       outputCostMicrosPerMillion: bigintValue(row.output_cost_micros_per_million ?? row.output_cost_micros),
       cacheCostMicrosPerMillion: bigintValue(row.cache_cost_micros_per_million ?? row.cache_cost_micros),
+      cacheWriteCostMicrosPerMillion: row.cache_write_cost_micros_per_million == null && row.cache_write_cost_micros == null ? undefined : bigintValue(row.cache_write_cost_micros_per_million ?? row.cache_write_cost_micros),
       fixedSellMicros: bigintValue(row.fixed_sell_micros), fixedCostMicros: bigintValue(row.fixed_cost_micros),
       priceSource: row.price_source || null,
       priceEffectiveAt: row.price_effective_at ? new Date(row.price_effective_at).toISOString() : null,
       fxRateCnyMicros: row.fx_rate_cny_micros == null ? null : bigintValue(row.fx_rate_cny_micros),
-      // Active customer prices are standard-rate only. Provider high-context
-      // costs are added later by applyChannelCost without changing the sale.
-      pricingTiers: undefined,
+      pricingTiers: Array.isArray(row.pricing_tiers) ? row.pricing_tiers.map((tier: any) => ({
+        thresholdTokens: bigintValue(tier.thresholdTokens ?? tier.threshold_tokens),
+        label: cleanText(tier.label, 128) || undefined,
+        inputSellMicrosPerMillion: bigintValue(tier.inputSellMicrosPerMillion ?? tier.input_sell_micros_per_million),
+        outputSellMicrosPerMillion: bigintValue(tier.outputSellMicrosPerMillion ?? tier.output_sell_micros_per_million),
+        cacheSellMicrosPerMillion: bigintValue(tier.cacheSellMicrosPerMillion ?? tier.cache_sell_micros_per_million),
+        ...(tier.cacheWriteSellMicrosPerMillion == null && tier.cache_write_sell_micros_per_million == null ? {} : { cacheWriteSellMicrosPerMillion: bigintValue(tier.cacheWriteSellMicrosPerMillion ?? tier.cache_write_sell_micros_per_million) }),
+        inputCostMicrosPerMillion: bigintValue(tier.inputCostMicrosPerMillion ?? tier.input_cost_micros_per_million),
+        outputCostMicrosPerMillion: bigintValue(tier.outputCostMicrosPerMillion ?? tier.output_cost_micros_per_million),
+        cacheCostMicrosPerMillion: bigintValue(tier.cacheCostMicrosPerMillion ?? tier.cache_cost_micros_per_million),
+        ...(tier.cacheWriteCostMicrosPerMillion == null && tier.cache_write_cost_micros_per_million == null ? {} : { cacheWriteCostMicrosPerMillion: bigintValue(tier.cacheWriteCostMicrosPerMillion ?? tier.cache_write_cost_micros_per_million) }),
+      })) : undefined,
     }
   }
 
@@ -780,9 +848,48 @@ export class BillingService {
   }
 
   async priceForRequest(method: string, path: string, model: string, payload: Record<string, unknown> = {}): Promise<PriceSnapshot | null> {
+    if (model === 'gpt-6-sol' && ['fast', 'priority'].includes(String(payload.service_tier || '').toLowerCase())) {
+      throw Object.assign(new Error('gpt-6-sol Fast/priority 服务档尚未完成单独价格与成本验证，已阻止转发'), { statusCode: 422 })
+    }
     const fixed = await this.fixedPriceFor(method, path, model, payload)
-    if (fixed) return fixed
+    if (fixed) {
+      if (model === 'gpt-6-sol') {
+        throw Object.assign(new Error('gpt-6-sol 只能使用已验证的 Standard/272K+ Token 计费，已阻止固定价路由绕过分层价格'), { statusCode: 409 })
+      }
+      return fixed
+    }
     return model ? this.priceFor(model) : null
+  }
+
+  private assertGpt6SolPricing(price: PriceSnapshot, model: string, routes: any[], selectedCosts: any[]): void {
+    if (model !== 'gpt-6-sol') return
+    if (!routes.length) {
+      throw Object.assign(new Error('gpt-6-sol 没有启用且已映射的上游渠道，已阻止转发'), { statusCode: 409 })
+    }
+    const high = price.pricingTiers?.find((tier) => tier.thresholdTokens === 272001n)
+    if (price.cacheWriteSellMicrosPerMillion === undefined || price.cacheWriteCostMicrosPerMillion === undefined
+      || !high || high.cacheWriteSellMicrosPerMillion === undefined || high.cacheWriteCostMicrosPerMillion === undefined) {
+      throw Object.assign(new Error('gpt-6-sol Standard 与 272K+ cache-write 价格尚未完整配置，已阻止转发'), { statusCode: 409 })
+    }
+    const standardSellRates = [price.inputSellMicrosPerMillion, price.outputSellMicrosPerMillion, price.cacheSellMicrosPerMillion, price.cacheWriteSellMicrosPerMillion]
+    const highSellRates = [high.inputSellMicrosPerMillion, high.outputSellMicrosPerMillion, high.cacheSellMicrosPerMillion, high.cacheWriteSellMicrosPerMillion]
+    if ([...standardSellRates, ...highSellRates].some((rate) => rate <= 0n)) {
+      throw Object.assign(new Error('gpt-6-sol Standard 与 272K+ 输入/输出/cache-read/cache-write 售价尚未完整配置，已阻止转发'), { statusCode: 409 })
+    }
+    for (const route of routes) {
+      const row = selectedCosts.find((cost) => String(cost.channel_id) === String(route.id))
+      if (!gpt6SolStandardCostReady(row)) {
+        throw Object.assign(new Error('gpt-6-sol 存在缺少有来源 Standard 输入/输出/cache-read/cache-write 渠道成本的启用渠道，已阻止转发'), { statusCode: 409 })
+      }
+      const standard = row.provider_tier_costs.standard
+      const inputMultiplier = Number(standard.highContextMultipliers?.input)
+      const outputMultiplier = Number(standard.highContextMultipliers?.output)
+      const cacheMultiplier = Number(standard.highContextMultipliers?.cacheRead)
+      const writeMultiplier = Number(standard.highContextMultipliers?.cacheWrite)
+      if (inputMultiplier !== 20000 || outputMultiplier !== 15000 || cacheMultiplier !== 20000 || writeMultiplier !== 20000) {
+        throw Object.assign(new Error('gpt-6-sol 渠道 272K+ 成本倍率未按 Standard 规则配置 (输入/缓存/写入 2 倍、输出 1.5 倍)，已阻止转发'), { statusCode: 409 })
+      }
+    }
   }
 
   async reserve(input: ReserveInput): Promise<ReservationResult>
@@ -796,6 +903,9 @@ export class BillingService {
         }
       : first
     const mode = input.billingMode || input.price.billingMode || 'token'
+    if (input.model === 'gpt-6-sol' && mode === 'fixed') {
+      throw Object.assign(new Error('gpt-6-sol 只能使用已验证的 Standard/272K+ Token 计费，已阻止固定价预扣'), { statusCode: 409 })
+    }
     let estimate: ReturnType<typeof estimatePrice>
     let snapshot: StoredPriceSnapshot
 
@@ -838,9 +948,16 @@ export class BillingService {
           const routeCosts = costs.rows.filter((row: any) => String(row.channel_id) === String(route.id))
           const selected = routeCosts.find((row: any) => String(row.model_pattern) === input.model)
             || routeCosts.find((row: any) => String(row.model_pattern) === '*')
-          if (!selected || !String(selected.price_source || '').trim()) coverageComplete = false
+          const ready = input.model === 'gpt-6-sol'
+            ? gpt6SolStandardCostReady(selected)
+            : Boolean(selected && String(selected.price_source || '').trim())
+          if (!ready) coverageComplete = false
           if (selected) selectedCosts.push(selected)
         }
+        // GPT-6 Sol has provider-specific Standard and 272K+ pricing rules.
+        // Validate the complete routed set before estimating or reserving any
+        // balance so an incomplete cost record can never reach an upstream.
+        this.assertGpt6SolPricing(input.price, input.model, routes.rows, selectedCosts)
         const snapshots = selectedCosts.map(snapshotChannelCost)
         const guarded = guardTokenPrice({
           price: input.price,
@@ -852,6 +969,9 @@ export class BillingService {
           channelCosts: snapshots,
           coverageComplete,
         })
+        if (input.model === 'gpt-6-sol' && !guarded.guard.baselineSafe) {
+          throw Object.assign(new Error('gpt-6-sol 基准售价低于最低利润护栏，已阻止亏损转发；请先修正 Standard/272K+ 价格'), { statusCode: 409 })
+        }
         effectivePrice = guarded.price
       } else {
         effectivePrice = applyTokenDiscount(input.price, BigInt(effectiveDiscountBps(personalDiscount, globalDiscount)))
@@ -917,11 +1037,11 @@ export class BillingService {
       // output and cache rates. Treat it as missing component usage so the
       // request falls back to the conservative start-of-request estimate
       // instead of silently becoming a zero-cost call.
-      const hasReportedUsage = Boolean(reportedUsage && (reportedUsage.input > 0n || reportedUsage.output > 0n || reportedUsage.cache > 0n))
+      const hasReportedUsage = Boolean(reportedUsage && (reportedUsage.input > 0n || reportedUsage.output > 0n || reportedUsage.cache > 0n || (reportedUsage.cacheWrite || 0n) > 0n))
       const useEstimatedUsage = Boolean(input.success && mode === 'token' && (input.estimatedUsage || !hasReportedUsage))
       const usage = useEstimatedUsage ? stored.estimatedUsage : input.usage || zeroUsage
       const calculated = useEstimatedUsage
-        ? { chargeMicros: bigintValue(reservation.estimated_micros), costMicros: calculatePrice(stored.price, stored.estimatedUsage, 'token').costMicros }
+        ? { chargeMicros: bigintValue(reservation.estimated_micros), costMicros: conservativeEstimatePrice(stored.price, stored.estimatedUsage).costMicros }
         : calculatePrice(stored.price, usage, mode)
       const calculatedCharge = input.success ? calculated.chargeMicros : 0n
       const cost = input.success ? calculated.costMicros : 0n
@@ -1117,21 +1237,21 @@ export class BillingService {
          request_id, user_id, key_id, api_key_id, api_key_name_snapshot,
          requested_model, upstream_model, final_channel_id, final_channel_name_snapshot,
          request_path, request_method, billing_mode, pricing_snapshot,
-         input_tokens, output_tokens, cache_tokens, reported_total_tokens,
+         input_tokens, output_tokens, cache_tokens, cache_write_tokens, reported_total_tokens,
          plan_charge_micros, wallet_charge_micros, charge_micros, cost_micros, profit_micros,
          status_code, status, success, latency_ms, duration_ms,
          estimated_usage, is_estimated_usage, error_code, error_summary,
          upstream_request_id, started_at, finished_at, metadata
        ) VALUES (
          $1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-         $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$25,
-         $26,$26,$27,$28,$29,$30,now(),$31
+         $13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,
+         $26,$26,$27,$27,$28,$29,$30,$31,now(),$32
        )`,
       [
         input.requestId, input.userId, keyId, cleanText(input.keyName || stored.context.keyName, 128),
         String(input.model ?? stored.context.model).slice(0, 256), String(input.upstreamModel || '').slice(0, 256),
         input.channelId || null, cleanText(input.channelName, 128), path, method, stored.price.billingMode || 'token',
-        JSON.stringify(serializePriceSnapshot(stored.price, stored.estimatedUsage, { model: stored.context.model, requestPath: stored.context.path, requestMethod: stored.context.method, keyId: stored.context.keyId, keyName: stored.context.keyName })), usage.input.toString(), usage.output.toString(), usage.cache.toString(), usage.reportedTotal.toString(),
+        JSON.stringify(serializePriceSnapshot(stored.price, stored.estimatedUsage, { model: stored.context.model, requestPath: stored.context.path, requestMethod: stored.context.method, keyId: stored.context.keyId, keyName: stored.context.keyName })), usage.input.toString(), usage.output.toString(), usage.cache.toString(), (usage.cacheWrite || 0n).toString(), usage.reportedTotal.toString(),
         planCharge.toString(), walletCharge.toString(), charge.toString(), cost.toString(), (charge - cost).toString(),
         statusCode, input.success ? 'success' : 'failed', input.success, latency, estimatedUsage,
         cleanText(errorCode, 120), cleanText(errorSummary, 500), cleanText(input.upstreamRequestId, 256),

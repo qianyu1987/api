@@ -60,7 +60,7 @@ describe('billing invariants', () => {
     const restored = deserializePriceSnapshot(snapshot)
     expect(restored.price.inputSellMicrosPerMillion).toBe(1_000_000n)
     expect(restored.price.outputSellMicrosPerMillion).toBe(2_000_000n)
-    expect(restored.estimatedUsage).toEqual({ input: 13n, output: 7n, cache: 3n, reportedTotal: 23n })
+    expect(restored.estimatedUsage).toEqual({ input: 13n, output: 7n, cache: 3n, cacheWrite: 0n, reportedTotal: 23n })
     expect(restored.price.pricingTiers?.[0].thresholdTokens).toBe(272001n)
     expect(restored.context).toMatchObject({ model: 'gpt-test', path: '/v1/chat/completions', method: 'POST' })
   })
@@ -136,6 +136,36 @@ describe('billing invariants', () => {
     expect(guarded.price.inputSellMicrosPerMillion).toBe(950_000n)
   })
 
+  test('checks each gpt-6-sol sale tier against its matching standard or 272K+ cost', () => {
+    const guarded = guardTokenPrice({
+      price: {
+        ...price,
+        modelPattern: 'gpt-6-sol',
+        inputSellMicrosPerMillion: 20_000_000n, outputSellMicrosPerMillion: 100_000_000n,
+        cacheSellMicrosPerMillion: 2_000_000n, cacheWriteSellMicrosPerMillion: 25_000_000n,
+        inputCostMicrosPerMillion: 2_000_000n, outputCostMicrosPerMillion: 10_000_000n,
+        cacheCostMicrosPerMillion: 200_000n, cacheWriteCostMicrosPerMillion: 2_500_000n,
+        pricingTiers: [{
+          thresholdTokens: 272001n,
+          inputSellMicrosPerMillion: 40_000_000n, outputSellMicrosPerMillion: 150_000_000n,
+          cacheSellMicrosPerMillion: 4_000_000n, cacheWriteSellMicrosPerMillion: 50_000_000n,
+          inputCostMicrosPerMillion: 4_000_000n, outputCostMicrosPerMillion: 15_000_000n,
+          cacheCostMicrosPerMillion: 400_000n, cacheWriteCostMicrosPerMillion: 5_000_000n,
+        }],
+      },
+      rules: { minimumMarginBps: 3000, paymentFeeRateBps: 0, affiliateRateBps: 1000, walletTopupMultiplierBps: 50000 },
+      personalDiscountBps: 0, globalDiscountBps: 0, nightDiscountBps: 0, nightDiscountActive: false,
+      channelCosts: [{
+        channelId: 'sol', model: 'gpt-6-sol', inputMicros: '2000000', outputMicros: '10000000', cacheMicros: '200000', cacheWriteMicros: '2500000',
+        highContextMultiplierBps: 10000, highContextInputMultiplierBps: 20000, highContextOutputMultiplierBps: 15000,
+        highContextCacheMultiplierBps: 20000, highContextCacheWriteMultiplierBps: 20000, source: 'official price screenshot', effectiveAt: null,
+      }],
+      coverageComplete: true,
+    })
+    expect(guarded.guard.baselineSafe).toBe(true)
+    expect(guarded.guard.maxSafeDiscountBps).toBeGreaterThan(0)
+  })
+
   test('formats balance with exact micro-yuan fields for UI and clients', async () => {
     const { BillingService } = await import('../src/services/billing.js')
     expect(BillingService.formatBalance({
@@ -182,6 +212,17 @@ describe('billing invariants', () => {
     await expect(billing.fixedPriceFor('POST', '/v1/images/generations', 'gpt-image-1', {
       size: '1024x1024', quality: 'medium', n: 1,
     })).rejects.toThrow('规格尚未配置价格')
+  })
+
+  test('does not let a fixed route bypass gpt-6-sol token tier validation', async () => {
+    const billing = new (await import('../src/services/billing.js')).BillingService({
+      query: async (sql: string) => sql.includes('fixed_route_prices') ? [{
+        id: 'fixed-sol', http_method: 'POST', path_pattern: '/v1/responses', requested_model: 'gpt-6-sol',
+        selectors: null, unit_mode: 'request', sell_micros: '1000000', cost_micros: '100000',
+      }] : [],
+    } as any)
+    await expect(billing.priceForRequest('POST', '/v1/responses', 'gpt-6-sol', {}))
+      .rejects.toMatchObject({ statusCode: 409 })
   })
 })
 
@@ -230,6 +271,109 @@ describe('night discount reservation guard', () => {
       baselineSafe: false, protectionApplied: true, protectionReason: 'baseline_below_minimum_margin',
     })
     expect(storedSnapshot.discountBps).toBe('500')
+  })
+})
+
+describe('gpt-6-sol reservation guard', () => {
+  test('rejects before touching wallets when a routed channel lacks Standard costs', async () => {
+    const highTier = {
+      thresholdTokens: 272001n,
+      inputSellMicrosPerMillion: 2_000_000n,
+      outputSellMicrosPerMillion: 3_000_000n,
+      cacheSellMicrosPerMillion: 1_000_000n,
+      cacheWriteSellMicrosPerMillion: 2_000_000n,
+      inputCostMicrosPerMillion: 1_000_000n,
+      outputCostMicrosPerMillion: 1_500_000n,
+      cacheCostMicrosPerMillion: 500_000n,
+      cacheWriteCostMicrosPerMillion: 1_000_000n,
+    }
+    const gpt6Price: PriceSnapshot = {
+      ...price,
+      modelPattern: 'gpt-6-sol',
+      cacheWriteSellMicrosPerMillion: 1_000_000n,
+      cacheWriteCostMicrosPerMillion: 500_000n,
+      pricingTiers: [highTier],
+    }
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('SELECT id, token_discount_bps FROM users')) return { rows: [{ id: 'user-1', token_discount_bps: 0 }], rowCount: 1 }
+        if (sql.includes('SELECT * FROM billing_reservations')) return { rows: [], rowCount: 0 }
+        if (sql.includes('SELECT key,value FROM app_settings')) return { rows: [
+          { key: 'profit_min_margin_bps', value: '3000' }, { key: 'payment_fee_rate_bps', value: '0' },
+          { key: 'affiliate_enabled', value: 'true' }, { key: 'affiliate_rate_bps', value: '1000' },
+          { key: 'global_token_discount_bps', value: '0' }, { key: 'night_token_discount_enabled', value: 'false' },
+          { key: 'night_token_discount_bps', value: '0' },
+        ], rowCount: 7 }
+        if (sql.includes('MAX(topup_multiplier_bps)')) return { rows: [{ multiplier: 50000 }], rowCount: 1 }
+        if (sql.includes('SELECT id,model_map FROM channels')) return { rows: [{ id: 'channel-1', model_map: { 'gpt-6-sol': 'gpt-6-sol' } }], rowCount: 1 }
+        if (sql.includes('SELECT * FROM channel_model_costs')) return { rows: [{
+          channel_id: 'channel-1', model_pattern: 'gpt-6-sol', price_source: 'provider invoice',
+          input_cost_micros_per_million: '1000000', output_cost_micros_per_million: '2000000', cache_cost_micros_per_million: '500000',
+        }], rowCount: 1 }
+        return { rows: [], rowCount: 1 }
+      }),
+    }
+    const billing = new (await import('../src/services/billing.js')).BillingService({ tx: (fn: any) => fn(client) } as any)
+    await expect(billing.reserve({
+      userId: 'user-1', requestId: 'sol-guard-1', model: 'gpt-6-sol', payload: { messages: [{ role: 'user', content: 'hello' }] },
+      requestPath: '/v1/chat/completions', requestMethod: 'POST', price: gpt6Price,
+    })).rejects.toMatchObject({ statusCode: 409 })
+    expect(client.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO wallets'))).toBe(false)
+  })
+
+  test('rejects an unsafe gpt-6-sol baseline before touching wallets', async () => {
+    const gpt6Price: PriceSnapshot = {
+      ...price,
+      modelPattern: 'gpt-6-sol',
+      inputSellMicrosPerMillion: 1_000_000n,
+      outputSellMicrosPerMillion: 2_000_000n,
+      cacheSellMicrosPerMillion: 500_000n,
+      cacheWriteSellMicrosPerMillion: 500_000n,
+      inputCostMicrosPerMillion: 1_000_000n,
+      outputCostMicrosPerMillion: 2_000_000n,
+      cacheCostMicrosPerMillion: 500_000n,
+      cacheWriteCostMicrosPerMillion: 500_000n,
+      pricingTiers: [{
+        thresholdTokens: 272001n,
+        inputSellMicrosPerMillion: 2_000_000n,
+        outputSellMicrosPerMillion: 3_000_000n,
+        cacheSellMicrosPerMillion: 1_000_000n,
+        cacheWriteSellMicrosPerMillion: 1_000_000n,
+        inputCostMicrosPerMillion: 2_000_000n,
+        outputCostMicrosPerMillion: 3_000_000n,
+        cacheCostMicrosPerMillion: 1_000_000n,
+        cacheWriteCostMicrosPerMillion: 1_000_000n,
+      }],
+    }
+    const client = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes('SELECT id, token_discount_bps FROM users')) return { rows: [{ id: 'user-1', token_discount_bps: 0 }], rowCount: 1 }
+        if (sql.includes('SELECT * FROM billing_reservations')) return { rows: [], rowCount: 0 }
+        if (sql.includes('SELECT key,value FROM app_settings')) return { rows: [
+          { key: 'profit_min_margin_bps', value: '3000' }, { key: 'payment_fee_rate_bps', value: '0' },
+          { key: 'affiliate_enabled', value: 'true' }, { key: 'affiliate_rate_bps', value: '1000' },
+          { key: 'global_token_discount_bps', value: '0' }, { key: 'night_token_discount_enabled', value: 'false' },
+          { key: 'night_token_discount_bps', value: '0' },
+        ], rowCount: 7 }
+        if (sql.includes('MAX(topup_multiplier_bps)')) return { rows: [{ multiplier: 50000 }], rowCount: 1 }
+        if (sql.includes('SELECT id,model_map FROM channels')) return { rows: [{ id: 'channel-1', model_map: { 'gpt-6-sol': 'gpt-6-sol' } }], rowCount: 1 }
+        if (sql.includes('SELECT * FROM channel_model_costs')) return { rows: [{
+          channel_id: 'channel-1', model_pattern: 'gpt-6-sol', price_source: null,
+          provider_tier_costs: { standard: {
+            inputCostMicrosPerMillion: '1000000', outputCostMicrosPerMillion: '2000000',
+            cacheReadCostMicrosPerMillion: '500000', cacheWriteCostMicrosPerMillion: '500000',
+            highContextMultipliers: { input: 20000, output: 15000, cacheRead: 20000, cacheWrite: 20000 }, source: 'provider invoice',
+          } },
+        }], rowCount: 1 }
+        return { rows: [], rowCount: 1 }
+      }),
+    }
+    const billing = new (await import('../src/services/billing.js')).BillingService({ tx: (fn: any) => fn(client) } as any)
+    await expect(billing.reserve({
+      userId: 'user-1', requestId: 'sol-unsafe-1', model: 'gpt-6-sol', payload: { messages: [{ role: 'user', content: 'hello' }] },
+      requestPath: '/v1/chat/completions', requestMethod: 'POST', price: gpt6Price,
+    })).rejects.toMatchObject({ statusCode: 409 })
+    expect(client.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO wallets'))).toBe(false)
   })
 })
 

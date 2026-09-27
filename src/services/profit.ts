@@ -83,8 +83,15 @@ export function discountLimit(rows: any[], rules: ProfitRules) {
   const retainedBps = BigInt(10000 - rules.minimumMarginBps - rules.paymentFeeRateBps - rules.affiliateRateBps)
   const constraints: Array<{ model: string; tier: string; part: string; maxDiscountBps: number; costMicros: string; sellMicros: string; requiredSellMicros: string | null; reason: string | null }> = []
   for (const row of rows.filter((row) => row.active !== false)) {
-    const tiers = [{ label: '标准', ...Object.fromEntries(['input', 'output', 'cache'].flatMap((part) => ['Cost', 'Sell'].map((kind) => [part + kind + 'MicrosPerMillion', row[part + '_' + kind.toLowerCase() + '_micros_per_million'] ?? row[part + '_' + kind.toLowerCase() + '_micros']])) ) }, ...(Array.isArray(row.pricing_tiers) ? row.pricing_tiers : [])]
-    for (const tier of tiers) for (const part of ['input', 'output', 'cache']) {
+    const baseTier: any = { label: '标准', ...Object.fromEntries(['input', 'output', 'cache'].flatMap((part) => ['Cost', 'Sell'].map((kind) => [part + kind + 'MicrosPerMillion', row[part + '_' + kind.toLowerCase() + '_micros_per_million'] ?? row[part + '_' + kind.toLowerCase() + '_micros']])) ) }
+    if (row.cache_write_cost_micros_per_million != null || row.cache_write_sell_micros_per_million != null) {
+      baseTier.cacheWriteCostMicrosPerMillion = row.cache_write_cost_micros_per_million
+      baseTier.cacheWriteSellMicrosPerMillion = row.cache_write_sell_micros_per_million
+    }
+    const tiers = [baseTier, ...(Array.isArray(row.pricing_tiers) ? row.pricing_tiers : [])]
+    const hasCacheWriteRate = row.cache_write_cost_micros_per_million != null || row.cache_write_sell_micros_per_million != null
+      || tiers.some((tier: any) => tier.cacheWriteCostMicrosPerMillion != null || tier.cacheWriteSellMicrosPerMillion != null)
+    for (const tier of tiers) for (const part of ['input', 'output', 'cache', ...(hasCacheWriteRate ? ['cacheWrite'] : [])]) {
       const rawCost = tier[part + 'CostMicrosPerMillion']; const rawSell = tier[part + 'SellMicrosPerMillion']
       const valid = /^\d+$/.test(String(rawCost)) && /^\d+$/.test(String(rawSell))
       const cost = valid ? BigInt(rawCost) : 0n; const sell = valid ? BigInt(rawSell) : 0n

@@ -120,21 +120,31 @@
     ['gpt-5.6-luna', 'Luna']
   ]
   const priceUnavailable = () => '<span class="price-unavailable">暂不可用</span>'
-  function personalPriceCell(rate, comparison) {
-    if (!rate || rate.monthlyEffectiveMicros == null || rate.walletEffectiveMicros == null) return priceUnavailable()
-    return '<div class="price-value"><div><strong>' + money({ micros: rate.monthlyEffectiveMicros }) + '</strong><span class="recommended-tag">个人推荐</span></div><small>月卡折算 1/' + multiplierLabel(comparison.monthlyMultiplierBps, 4) + '</small><span>普通钱包 ' + money({ micros: rate.walletEffectiveMicros }) + ' · 1/' + multiplierLabel(comparison.walletMultiplierBps, 3) + '</span></div>'
+  function highContextPriceLine(model, comparison, tier, part) {
+    const high = model?.highContext?.[part]
+    if (!high) return ''
+    if (tier === 'enterprise') {
+      if (high.enterpriseEffectiveMicros == null) return ''
+      return '<small class="tier-price-line">272K+ ' + money({ micros: high.enterpriseEffectiveMicros }) + ' · 1/' + multiplierLabel(comparison.enterpriseMultiplierBps, 5) + '</small>'
+    }
+    if (high.monthlyEffectiveMicros == null || high.walletEffectiveMicros == null) return ''
+    return '<small class="tier-price-line">272K+ 月卡 ' + money({ micros: high.monthlyEffectiveMicros }) + ' · 钱包 ' + money({ micros: high.walletEffectiveMicros }) + '</small>'
   }
-  function enterprisePriceCell(rate, comparison) {
+  function personalPriceCell(rate, comparison, part, model) {
+    if (!rate || rate.monthlyEffectiveMicros == null || rate.walletEffectiveMicros == null) return priceUnavailable()
+    return '<div class="price-value"><div><strong>' + money({ micros: rate.monthlyEffectiveMicros }) + '</strong><span class="recommended-tag">个人推荐</span></div><small>标准 · 月卡 1/' + multiplierLabel(comparison.monthlyMultiplierBps, 4) + '</small><span>普通钱包 ' + money({ micros: rate.walletEffectiveMicros }) + ' · 1/' + multiplierLabel(comparison.walletMultiplierBps, 3) + '</span>' + highContextPriceLine(model, comparison, 'personal', part) + '</div>'
+  }
+  function enterprisePriceCell(rate, comparison, part, model) {
     if (!rate || rate.enterpriseEffectiveMicros == null) return priceUnavailable()
-    return '<div class="price-value enterprise-value"><strong>' + money({ micros: rate.enterpriseEffectiveMicros }) + '</strong><small>企业钱包折算 · 1/' + multiplierLabel(comparison.enterpriseMultiplierBps, 5) + '</small></div>'
+    return '<div class="price-value enterprise-value"><strong>' + money({ micros: rate.enterpriseEffectiveMicros }) + '</strong><small>标准 · 企业钱包 1/' + multiplierLabel(comparison.enterpriseMultiplierBps, 5) + '</small>' + highContextPriceLine(model, comparison, 'enterprise', part) + '</div>'
   }
   function comparisonRows(comparison, tier) {
     const byId = new Map((comparison?.models || []).map((model) => [model.id, model]))
     return comparisonModels.map(([id, fallbackName]) => {
       const model = byId.get(id) || { id, displayName: fallbackName, available: false }
       const cell = tier === 'enterprise' ? enterprisePriceCell : personalPriceCell
-      const parts = model.available === false ? [priceUnavailable(), priceUnavailable(), priceUnavailable()] : ['input', 'output', 'cache'].map((part) => cell(model[part], comparison))
-      return '<tr><th scope="row"><strong>' + esc(model.displayName || model.name || fallbackName) + '</strong><small>' + esc(id) + '</small></th><td>' + parts[0] + '</td><td>' + parts[1] + '</td><td>' + parts[2] + '</td></tr>'
+      const parts = model.available === false ? [priceUnavailable(), priceUnavailable(), priceUnavailable(), priceUnavailable()] : ['input', 'output', 'cache', 'cacheWrite'].map((part) => cell(model[part], comparison, part, model))
+      return '<tr><th scope="row"><strong>' + esc(model.displayName || model.name || fallbackName) + '</strong><small>' + esc(id) + '</small></th><td>' + parts[0] + '</td><td>' + parts[1] + '</td><td>' + parts[2] + '</td><td>' + parts[3] + '</td></tr>'
     }).join('')
   }
   function renderOverviewPricing(data) {
@@ -146,7 +156,7 @@
     applyEnterpriseOffer(data.enterpriseOffer)
     const comparison = data.modelPriceComparison
     if (!comparison?.models) {
-      const unavailable = comparisonModels.map(([id, name]) => '<tr><th scope="row"><strong>' + esc(name) + '</strong><small>' + esc(id) + '</small></th><td colspan="3">' + priceUnavailable() + '</td></tr>').join('')
+      const unavailable = comparisonModels.map(([id, name]) => '<tr><th scope="row"><strong>' + esc(name) + '</strong><small>' + esc(id) + '</small></th><td colspan="4">' + priceUnavailable() + '</td></tr>').join('')
       $('#personal-price-table').innerHTML = unavailable
       $('#enterprise-price-table').innerHTML = unavailable
       $('#personal-price-error').textContent = '价格暂未加载，请稍后刷新。'
@@ -515,7 +525,7 @@
     const reason = (item) => item.success ? '' : '<small class="subline">' + esc(item.errorSummary || (item.statusCode === 403 ? '上游拒绝访问，可能是权限或余额不足' : item.statusCode >= 500 ? '上游服务暂时不可用' : '请求失败')) + ' · ' + esc(item.billingNote || '请求失败，未产生收费') + '</small>'
     const rows = items.map((item) => compact
       ? '<tr><td>' + date(item.time) + '</td><td>' + esc(item.model) + '</td><td>' + integer(item.totalTokens) + '</td><td>' + money(item.charge) + '</td><td><span class="state ' + (item.success ? 'good' : 'bad') + '">' + (item.success ? '成功' : '失败') + '</span>' + reason(item) + '</td></tr>'
-      : '<tr><td>' + date(item.time) + '</td><td><code>' + esc(item.requestId).slice(0, 12) + '…</code></td><td><strong>' + esc(item.model) + '</strong><small class="subline">' + esc(item.channel || '—') + '</small></td><td>' + integer(item.totalTokens) + '<small class="subline">入 ' + integer(item.inputTokens) + ' / 出 ' + integer(item.outputTokens) + '</small></td><td>' + money(item.charge) + '<small class="subline">套餐 ' + money(item.planCharge) + ' · 钱包 ' + money(item.walletCharge) + '</small>' + (item.profit ? '<small class="subline">成本 ' + money(item.estimatedCost) + ' · 利润 ' + money(item.profit) + '</small>' : '') + '</td><td><span class="state ' + (item.success ? 'good' : 'bad') + '">' + (item.statusCode ?? '—') + ' · ' + (item.success ? '成功' : '失败') + '</span>' + reason(item) + '</td></tr>').join('')
+      : '<tr><td>' + date(item.time) + '</td><td><code>' + esc(item.requestId).slice(0, 12) + '…</code></td><td><strong>' + esc(item.model) + '</strong><small class="subline">' + esc(item.channel || '—') + '</small></td><td>' + integer(item.totalTokens) + '<small class="subline">入 ' + integer(item.inputTokens) + ' / 出 ' + integer(item.outputTokens) + ' / 缓存读 ' + integer(item.cacheTokens) + ' / 写 ' + integer(item.cacheWriteTokens) + '</small></td><td>' + money(item.charge) + '<small class="subline">套餐 ' + money(item.planCharge) + ' · 钱包 ' + money(item.walletCharge) + '</small>' + (item.profit ? '<small class="subline">成本 ' + money(item.estimatedCost) + ' · 利润 ' + money(item.profit) + '</small>' : '') + '</td><td><span class="state ' + (item.success ? 'good' : 'bad') + '">' + (item.statusCode ?? '—') + ' · ' + (item.success ? '成功' : '失败') + '</span>' + reason(item) + '</td></tr>').join('')
     if (append) body.insertAdjacentHTML('beforeend', rows); else body.innerHTML = rows
   }
   async function loadAffiliate() {

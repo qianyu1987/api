@@ -178,7 +178,7 @@ describe('relay HTTP integration and billing boundary', () => {
     if (sse) expect(response.body).toContain('response.completed')
     expect(services.billing.reserve).toHaveBeenCalledTimes(1)
     expect(services.billing.settle).toHaveBeenCalledTimes(1)
-    expect(services.billing.settle).toHaveBeenCalledWith(expect.objectContaining({ model, upstreamModel: upstream, channelId: 'fallback', success: true, attemptCount: 2, usage: { input: 5n, output: 2n, cache: 0n, reportedTotal: 7n } }))
+    expect(services.billing.settle).toHaveBeenCalledWith(expect.objectContaining({ model, upstreamModel: upstream, channelId: 'fallback', success: true, attemptCount: 2, usage: { input: 5n, output: 2n, cache: 0n, cacheWrite: 0n, reportedTotal: 7n } }))
     expect(services.billing.release).not.toHaveBeenCalled()
     const records = vi.mocked(services.db.query).mock.calls.filter(([sql]) => sql.includes('INSERT INTO relay_attempts'))
     expect(records).toHaveLength(2); expect(records[1][1]).toContain(upstream)
@@ -208,7 +208,7 @@ describe('relay HTTP integration and billing boundary', () => {
       if (sse) expect(response.body).toContain('response.completed')
       expect(services.billing.settle).toHaveBeenLastCalledWith(expect.objectContaining({
         upstreamModel: upstream, estimatedUsage: false,
-        usage: { input: 5n, output: 2n, cache: 0n, reportedTotal: 7n },
+        usage: { input: 5n, output: 2n, cache: 0n, cacheWrite: 0n, reportedTotal: 7n },
       }))
     }
   })

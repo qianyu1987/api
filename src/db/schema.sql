@@ -346,6 +346,8 @@ CREATE TABLE IF NOT EXISTS model_prices (
   input_sell_micros BIGINT NOT NULL DEFAULT 0,
   output_sell_micros BIGINT NOT NULL DEFAULT 0,
   cache_sell_micros BIGINT NOT NULL DEFAULT 0,
+  cache_write_cost_micros BIGINT,
+  cache_write_sell_micros BIGINT,
   fixed_cost_micros BIGINT NOT NULL DEFAULT 0,
   fixed_sell_micros BIGINT NOT NULL DEFAULT 0,
   active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -356,6 +358,9 @@ CREATE TABLE IF NOT EXISTS model_prices (
   input_sell_micros_per_million BIGINT,
   output_sell_micros_per_million BIGINT,
   cache_sell_micros_per_million BIGINT,
+  cache_write_cost_micros_per_million BIGINT,
+  provider_tier_costs JSONB NOT NULL DEFAULT '{}'::jsonb,
+  cache_write_sell_micros_per_million BIGINT,
   price_source TEXT,
   price_effective_at TIMESTAMPTZ,
   fx_rate_cny_micros BIGINT,
@@ -371,7 +376,11 @@ CREATE TABLE IF NOT EXISTS model_prices (
   CHECK (cache_cost_micros_per_million IS NULL OR cache_cost_micros_per_million >= 0),
   CHECK (input_sell_micros_per_million IS NULL OR input_sell_micros_per_million >= 0),
   CHECK (output_sell_micros_per_million IS NULL OR output_sell_micros_per_million >= 0),
-  CHECK (cache_sell_micros_per_million IS NULL OR cache_sell_micros_per_million >= 0)
+  CHECK (cache_sell_micros_per_million IS NULL OR cache_sell_micros_per_million >= 0),
+  CHECK (cache_write_cost_micros IS NULL OR cache_write_cost_micros >= 0),
+  CHECK (cache_write_sell_micros IS NULL OR cache_write_sell_micros >= 0),
+  CHECK (cache_write_cost_micros_per_million IS NULL OR cache_write_cost_micros_per_million >= 0),
+  CHECK (cache_write_sell_micros_per_million IS NULL OR cache_write_sell_micros_per_million >= 0)
   ,CHECK (fx_rate_cny_micros IS NULL OR fx_rate_cny_micros > 0)
 );
 CREATE INDEX IF NOT EXISTS model_prices_active_lookup_idx ON model_prices (active, model_pattern);
@@ -386,6 +395,7 @@ CREATE TABLE IF NOT EXISTS channel_model_costs (
   input_cost_micros_per_million BIGINT NOT NULL DEFAULT 0,
   output_cost_micros_per_million BIGINT NOT NULL DEFAULT 0,
   cache_cost_micros_per_million BIGINT NOT NULL DEFAULT 0,
+  cache_write_cost_micros_per_million BIGINT,
   price_source TEXT,
   price_effective_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -394,6 +404,12 @@ CREATE TABLE IF NOT EXISTS channel_model_costs (
   CHECK (input_cost_micros_per_million >= 0 AND output_cost_micros_per_million >= 0 AND cache_cost_micros_per_million >= 0)
 );
 ALTER TABLE channel_model_costs ADD COLUMN IF NOT EXISTS high_context_multiplier_bps INTEGER NOT NULL DEFAULT 12000 CHECK (high_context_multiplier_bps BETWEEN 10000 AND 110000);
+ALTER TABLE channel_model_costs ADD COLUMN IF NOT EXISTS cache_write_cost_micros_per_million BIGINT;
+ALTER TABLE channel_model_costs ADD COLUMN IF NOT EXISTS high_context_input_multiplier_bps INTEGER;
+ALTER TABLE channel_model_costs ADD COLUMN IF NOT EXISTS high_context_output_multiplier_bps INTEGER;
+ALTER TABLE channel_model_costs ADD COLUMN IF NOT EXISTS high_context_cache_multiplier_bps INTEGER;
+ALTER TABLE channel_model_costs ADD COLUMN IF NOT EXISTS high_context_cache_write_multiplier_bps INTEGER;
+ALTER TABLE channel_model_costs ADD COLUMN IF NOT EXISTS provider_tier_costs JSONB NOT NULL DEFAULT '{}'::jsonb;
 CREATE UNIQUE INDEX IF NOT EXISTS channel_model_costs_unique ON channel_model_costs(channel_id, model_pattern);
 CREATE INDEX IF NOT EXISTS channel_model_costs_lookup_idx ON channel_model_costs(channel_id, model_pattern);
 
@@ -557,6 +573,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   input_tokens BIGINT NOT NULL DEFAULT 0,
   output_tokens BIGINT NOT NULL DEFAULT 0,
   cache_tokens BIGINT NOT NULL DEFAULT 0,
+  cache_write_tokens BIGINT NOT NULL DEFAULT 0,
   reported_total_tokens BIGINT NOT NULL DEFAULT 0,
   plan_charge_micros BIGINT NOT NULL DEFAULT 0,
   wallet_charge_micros BIGINT NOT NULL DEFAULT 0,
@@ -580,7 +597,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   CHECK (request_path LIKE '/v1/%'),
   CHECK (request_method IN ('GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS')),
   CHECK (billing_mode IN ('token', 'fixed', 'free')),
-  CHECK (input_tokens >= 0 AND output_tokens >= 0 AND cache_tokens >= 0 AND reported_total_tokens >= 0),
+  CHECK (input_tokens >= 0 AND output_tokens >= 0 AND cache_tokens >= 0 AND cache_write_tokens >= 0 AND reported_total_tokens >= 0),
   CHECK (plan_charge_micros >= 0 AND wallet_charge_micros >= 0 AND charge_micros >= 0 AND cost_micros >= 0),
   CHECK (charge_micros = plan_charge_micros + wallet_charge_micros),
   CHECK (status_code IS NULL OR status_code BETWEEN 100 AND 599),
@@ -1031,10 +1048,14 @@ ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS price_source TEXT;
 ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS price_effective_at TIMESTAMPTZ;
 ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS fx_rate_cny_micros BIGINT;
 ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS pricing_tiers JSONB;
--- User-facing model prices are standard across all context lengths. Keep any
--- historical tiers inside immutable billing snapshots, but remove active sales
--- tiers so a schema migration cannot re-enable the old 272K user surcharge.
-UPDATE model_prices SET pricing_tiers = NULL WHERE active;
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS cache_write_cost_micros BIGINT;
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS cache_write_sell_micros BIGINT;
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS cache_write_cost_micros_per_million BIGINT;
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS cache_write_sell_micros_per_million BIGINT;
+ALTER TABLE model_prices ADD COLUMN IF NOT EXISTS provider_tier_costs JSONB NOT NULL DEFAULT '{}'::jsonb;
+-- Only gpt-6-sol uses active customer-facing 272K+ sale tiers. Keep older
+-- model prices standard-rate while preserving immutable billing snapshots.
+UPDATE model_prices SET pricing_tiers = NULL WHERE active AND model_pattern <> 'gpt-6-sol';
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS wallet_settled_micros BIGINT;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS pricing_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE billing_reservations ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ NOT NULL DEFAULT now();
@@ -1071,6 +1092,7 @@ ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS upstream_request_id TEXT;
 ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
 ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE relay_attempts ADD COLUMN IF NOT EXISTS cost_micros BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE relay_attempts ADD COLUMN IF NOT EXISTS cost_estimated BOOLEAN NOT NULL DEFAULT TRUE;
 

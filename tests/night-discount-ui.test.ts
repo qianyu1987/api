@@ -66,4 +66,16 @@ describe('night discount administration UI', () => {
     expect(source.indexOf("['gpt-6-astra', 'Astra']")).toBeLessThan(source.indexOf("['gpt-6-sol', 'Sol 6']"))
     expect(source.indexOf("['gpt-6-sol', 'Sol 6']")).toBeLessThan(source.indexOf("['gpt-5.6-sol', 'Sol']"))
   })
+
+  test('reads 272K+ prices from the model rate part shown in each table cell', () => {
+    expect(source).toContain('model?.highContext?.[part]')
+    expect(source).toContain("cell(model[part], comparison, part, model)")
+  })
+
+  test('does not hide enterprise 272K+ prices when personal tier fields are absent', () => {
+    const renderer = source.slice(source.indexOf('  function highContextPriceLine'), source.indexOf('  function personalPriceCell'))
+    expect(renderer).toContain("if (tier === 'enterprise')")
+    expect(renderer).toContain('high.enterpriseEffectiveMicros == null')
+    expect(renderer.indexOf("if (tier === 'enterprise')")).toBeLessThan(renderer.indexOf('high.monthlyEffectiveMicros == null'))
+  })
 })

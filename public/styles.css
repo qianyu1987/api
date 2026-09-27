@@ -19,7 +19,7 @@
 .today-usage dt { color: var(--muted); font-size: 11px; }
 .today-usage dd { margin: 2px 0 0; color: var(--ink); font-size: 16px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .price-table-wrap { border-color: var(--line); }
-.price-table { min-width: 900px; table-layout: fixed; }
+.price-table { min-width: 1120px; table-layout: fixed; }
 .price-table th:first-child { width: 170px; }
 .price-table tbody th { position: sticky; left: 0; z-index: 1; padding: 16px 15px; background: var(--surface); text-align: left; box-shadow: 1px 0 0 var(--line); }
 .price-table tbody th strong, .price-table tbody th small { display: block; }
@@ -31,6 +31,7 @@
 .price-value strong { color: #075b58; font-size: 17px; font-weight: 780; font-variant-numeric: tabular-nums; }
 .price-value small { color: #236762; font-size: 11px; font-weight: 700; }
 .price-value > span { color: var(--muted); font-size: 11px; }
+.tier-price-line { color: #8a5c17; font-size: 11px; font-weight: 700; }
 .recommended-tag, .offer-tag { display: inline-flex; align-items: center; width: max-content; border-radius: 999px; font-size: 10px; font-weight: 750; line-height: 1; }
 .recommended-tag { padding: 4px 6px; background: #dff1ed; color: #075b58; }
 .price-unavailable { display: inline-flex; align-items: center; min-height: 44px; color: var(--muted); font-size: 12px; }
@@ -67,7 +68,7 @@
 .enterprise-cta { flex: none; border-color: #dfb351; background: #f3c66b; color: #2d260f; }
 .enterprise-cta:hover { border-color: #f8d98f; background: #f8d98f; color: #211b09; }
 .enterprise-price-wrap { margin: 0 24px; border-color: rgba(203, 232, 226, .24); background: transparent; }
-.enterprise-price-table { min-width: 760px; }
+.enterprise-price-table { min-width: 920px; }
 .enterprise-offer .price-table th, .enterprise-offer .price-table td { border-bottom-color: rgba(203, 232, 226, .16); }
 .enterprise-offer .price-table thead th { background: #173b3d; color: #bcd7d3; }
 .enterprise-offer .price-table tbody th { background: #102d31; box-shadow: 1px 0 0 rgba(203, 232, 226, .24); }
@@ -120,7 +121,7 @@
   .today-usage { grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
   .today-usage div { padding: 9px 11px; }
   .price-table-wrap { border-right: 0; border-left: 0; }
-  .price-table { min-width: 780px; }
+  .price-table { min-width: 960px; }
   .price-table th:first-child { width: 148px; }
   .price-value { min-width: 145px; }
   .enterprise-offer-copy { padding: 20px 18px 16px; }

@@ -14,15 +14,21 @@ export type TokenRates = {
   inputSellMicrosPerMillion: bigint
   outputSellMicrosPerMillion: bigint
   cacheSellMicrosPerMillion: bigint
+  /** Optional provider-specific cache-write rate. Undefined means unconfigured, not free. */
+  cacheWriteSellMicrosPerMillion?: bigint
   inputCostMicrosPerMillion: bigint
   outputCostMicrosPerMillion: bigint
   cacheCostMicrosPerMillion: bigint
+  /** Optional provider-specific cache-write cost. Undefined means unconfigured, not free. */
+  cacheWriteCostMicrosPerMillion?: bigint
 }
 
 export type UsageTokens = {
   input: bigint
   output: bigint
   cache: bigint
+  /** Reported only when the upstream exposes a distinct cache-write count. */
+  cacheWrite?: bigint
   reportedTotal: bigint
 }
 
@@ -78,12 +84,20 @@ export function tokenCharge(tokens: bigint, microsPerMillion: bigint): bigint {
 }
 
 export function calculateUsageMoney(tokens: UsageTokens, rates: TokenRates): { chargeMicros: bigint; costMicros: bigint } {
+  const cacheWrite = tokens.cacheWrite ?? 0n
+  // Older price rows historically treated cache-write as regular input. Keep
+  // that behavior for legacy models; gpt-6-sol requires explicit write rates
+  // and channel costs before its request is allowed to reach an upstream.
+  const cacheWriteSell = rates.cacheWriteSellMicrosPerMillion ?? rates.inputSellMicrosPerMillion
+  const cacheWriteCost = rates.cacheWriteCostMicrosPerMillion ?? rates.inputCostMicrosPerMillion
   const chargeMicros = tokenCharge(tokens.input, rates.inputSellMicrosPerMillion)
     + tokenCharge(tokens.output, rates.outputSellMicrosPerMillion)
     + tokenCharge(tokens.cache, rates.cacheSellMicrosPerMillion)
+    + tokenCharge(cacheWrite, cacheWriteSell)
   const costMicros = tokenCharge(tokens.input, rates.inputCostMicrosPerMillion)
     + tokenCharge(tokens.output, rates.outputCostMicrosPerMillion)
     + tokenCharge(tokens.cache, rates.cacheCostMicrosPerMillion)
+    + tokenCharge(cacheWrite, cacheWriteCost)
   return { chargeMicros, costMicros }
 }
 
