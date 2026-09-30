@@ -327,3 +327,4 @@
 - 发布前备份 `/opt/relay-station-backups/pre-v1.0.100-luna-removal-20260930T224631Z/`：PostgreSQL custom dump 约 340 MB，容器内 `pg_restore --list` 校验通过；同时备份 `docker-compose.yml` 和生产 `.env`，目录权限为 0700。未覆盖 `secrets/`。
 - 生产 migration 成功，数据库复核为 Luna active 价格 0 条、运行时映射 0 条、启用目录映射 0 条；历史 Luna 价格 1 条、渠道成本 1 条、usage_logs 3887 条仍在，billing reservations 为 released 3878 / settled 9 / reserved 0。
 - 两个 API 副本已更新为 `relay-station:v1.0.100` 并 healthy，Gateway/PostgreSQL/Redis healthy。`https://api.hhtc.top/healthz`、`/api/v1/health` 返回 200，`www.hhtc.top` 加载 `styles.css?v=1.0.100` 和 `app.js?v=1.0.100`；未携带凭据访问 `/v1/models` 返回预期 401。未发起新的付费请求。
+- 发布时发现生产 `.env` 原先仍为 `RELAY_IMAGE_TAG=v1.0.99`，新源码曾短暂复用旧标签构建；已从发布前保留的 dangling 镜像恢复 `relay-station:v1.0.99`（旧 package 1.0.99），并确认其与当前 v1.0.100 镜像 ID 不同，回滚能力保留。
