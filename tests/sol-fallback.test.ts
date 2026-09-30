@@ -47,6 +47,10 @@ describe('sol fallback routing', () => {
     expect(isPublicFallbackModel(requestedModel)).toBe(true)
     expect(isSolFallback(requestedModel, upstream)).toBe(true)
   })
+  test('does not treat unsupported Luna as a public fallback model', () => {
+    expect(isPublicFallbackModel('gpt-5.6-luna')).toBe(false)
+    expect(isSolFallback('gpt-5.6-luna', upstream)).toBe(false)
+  })
   test('keeps real providers first even if an administrator gives fallback a lower priority', async () => {
     const { service, rows } = routing(); rows[1].priority = 1
     respond('real')
