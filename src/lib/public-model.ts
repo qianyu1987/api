@@ -1,7 +1,7 @@
 import { StringDecoder } from 'node:string_decoder'
 
 export const SOL_FALLBACK_UPSTREAM_MODELS = ['agnes-3.0-flash', 'agnes-2.5-flash'] as const
-export const PUBLIC_FALLBACK_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
+export const PUBLIC_FALLBACK_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra'] as const
 
 export function isPublicFallbackModel(model: string): boolean {
   return PUBLIC_FALLBACK_MODELS.includes(model as typeof PUBLIC_FALLBACK_MODELS[number])

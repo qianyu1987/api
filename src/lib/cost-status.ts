@@ -10,7 +10,7 @@ export function fallbackCostPending(row: any): boolean {
 }
 
 // The equivalent predicate for report aggregation over usage_logs.
-export const pendingFallbackCostSql = `(requested_model IN ('gpt-5.6-sol','gpt-5.6-terra','gpt-5.6-luna') AND upstream_model IN ('agnes-3.0-flash','agnes-2.5-flash')
+export const pendingFallbackCostSql = `(requested_model IN ('gpt-5.6-sol','gpt-5.6-terra') AND upstream_model IN ('agnes-3.0-flash','agnes-2.5-flash')
   AND NOT COALESCE(
     pricing_snapshot->'appliedChannelCost'->>'channelId' = final_channel_id::text
     AND pricing_snapshot->'appliedChannelCost'->>'model' IN (requested_model, '*')
@@ -20,7 +20,7 @@ export const pendingFallbackCostSql = `(requested_model IN ('gpt-5.6-sol','gpt-5
 export async function fallbackCostAlerts(db: Database) {
   const rows = await db.query<any>(`SELECT c.id,c.name,models.requested_model,c.model_map->>models.requested_model AS upstream_model
     FROM channels c
-    CROSS JOIN (VALUES ('gpt-5.6-sol'),('gpt-5.6-terra'),('gpt-5.6-luna')) AS models(requested_model)
+    CROSS JOIN (VALUES ('gpt-5.6-sol'),('gpt-5.6-terra')) AS models(requested_model)
     WHERE c.enabled AND c.model_map->>models.requested_model IN ('agnes-3.0-flash','agnes-2.5-flash')
     AND NOT COALESCE((SELECT length(trim(m.price_source)) > 0 FROM channel_model_costs m WHERE m.channel_id=c.id
       AND m.model_pattern IN (models.requested_model,'*')

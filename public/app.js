@@ -116,8 +116,7 @@
     ['gpt-6-astra', 'Astra'],
     ['gpt-6-sol', 'Sol 6'],
     ['gpt-5.6-sol', 'Sol'],
-    ['gpt-5.6-terra', 'Terra'],
-    ['gpt-5.6-luna', 'Luna']
+    ['gpt-5.6-terra', 'Terra']
   ]
   const priceUnavailable = () => '<span class="price-unavailable">暂不可用</span>'
   function highContextPriceLine(model, comparison, tier, part) {

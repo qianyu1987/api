@@ -1276,3 +1276,15 @@ ALTER TABLE channels ADD COLUMN IF NOT EXISTS media_last_failure_at TIMESTAMPTZ;
 ALTER TABLE channels ADD COLUMN IF NOT EXISTS media_last_success_at TIMESTAMPTZ;
 ALTER TABLE channels DROP CONSTRAINT IF EXISTS channels_media_failure_count_check;
 ALTER TABLE channels ADD CONSTRAINT channels_media_failure_count_check CHECK(media_failure_count >= 0);
+
+-- gpt-5.6-luna has no supported upstream. Keep historical prices, costs and
+-- usage snapshots for audit, but remove it from active routing and catalogs.
+UPDATE channels
+SET model_map = model_map - 'gpt-5.6-luna', updated_at = now()
+WHERE model_map ? 'gpt-5.6-luna';
+UPDATE channel_model_mappings
+SET enabled = false, updated_at = now()
+WHERE requested_model = 'gpt-5.6-luna' AND enabled;
+UPDATE model_prices
+SET active = false, updated_at = now()
+WHERE model_pattern = 'gpt-5.6-luna' AND active;

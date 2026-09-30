@@ -43,7 +43,7 @@ const body = Buffer.from(JSON.stringify({ model, messages: [{ role: 'user', cont
 const call = (service: ChannelService, path = '/chat/completions', requestedModel = model) => service.relay(path, 'POST', { 'content-type': 'application/json' }, body, requestedModel)
 
 describe('sol fallback routing', () => {
-  test.each(['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'])('recognizes %s as an Agnes-compatible public model', requestedModel => {
+  test.each(['gpt-5.6-sol', 'gpt-5.6-terra'])('recognizes %s as an Agnes-compatible public model', requestedModel => {
     expect(isPublicFallbackModel(requestedModel)).toBe(true)
     expect(isSolFallback(requestedModel, upstream)).toBe(true)
   })
@@ -183,7 +183,7 @@ describe('relay HTTP integration and billing boundary', () => {
     const records = vi.mocked(services.db.query).mock.calls.filter(([sql]) => sql.includes('INSERT INTO relay_attempts'))
     expect(records).toHaveLength(2); expect(records[1][1]).toContain(upstream)
   })
-  test.each(['gpt-5.6-terra', 'gpt-5.6-luna'])('rewrites Agnes response metadata back to %s', async requestedModel => {
+  test.each(['gpt-5.6-terra'])('rewrites Agnes response metadata back to %s', async requestedModel => {
     const response = await relayResponse(false, false, requestedModel)
     expect(response.statusCode).toBe(200)
     expect(response.json().model).toBe(requestedModel)

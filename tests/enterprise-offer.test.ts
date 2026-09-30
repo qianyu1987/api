@@ -55,7 +55,7 @@ describe('enterprise price comparison', () => {
       unit: 'CNY_PER_MILLION_TOKENS', walletMultiplierBps: 30000,
       monthlyMultiplierBps: 40000, enterpriseMultiplierBps: 50000,
     })
-    expect(comparison.models).toHaveLength(5)
+    expect(comparison.models).toHaveLength(4)
     expect(comparison.models[0]).toMatchObject({
       id: 'gpt-6-astra', displayName: 'Astra', available: true,
       input: {
@@ -66,15 +66,11 @@ describe('enterprise price comparison', () => {
     expect(comparison.models[1]).toMatchObject({
       id: 'gpt-6-sol', displayName: 'Sol 6', available: false,
     })
-    expect(comparison.models[4]).toMatchObject({
-      id: 'gpt-5.6-luna', displayName: 'Luna', available: false,
-      input: { standardMicros: null, walletEffectiveMicros: null, monthlyEffectiveMicros: null, enterpriseEffectiveMicros: null },
-    })
     const rounded = buildModelPriceComparison([{
-      model_pattern: 'gpt-5.6-luna', active: true,
+      model_pattern: 'gpt-5.6-terra', active: true,
       input_sell_micros_per_million: '2', output_sell_micros_per_million: '2', cache_sell_micros_per_million: '2',
     }], 0, 30000)
-    expect(rounded.models[4].input.walletEffectiveMicros).toBe('1')
+    expect(rounded.models[3].input.walletEffectiveMicros).toBe('1')
   })
 
   test('does not advertise active rows whose token prices are zero', () => {

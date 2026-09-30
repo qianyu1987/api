@@ -179,7 +179,6 @@ const PRICE_COMPARISON_MODELS = [
   { id: 'gpt-6-sol', displayName: 'Sol 6' },
   { id: 'gpt-5.6-sol', displayName: 'Sol' },
   { id: 'gpt-5.6-terra', displayName: 'Terra' },
-  { id: 'gpt-5.6-luna', displayName: 'Luna' },
 ] as const
 
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000
