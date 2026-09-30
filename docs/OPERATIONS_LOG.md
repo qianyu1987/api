@@ -323,7 +323,7 @@
 
 - 用户确认 `gpt-5.6-luna` 的上游不支持，要求移除。源码从公开兜底模型、价格对比、前端模型列表和兜底成本告警中移除 Luna；历史账单、成本和用量查询逻辑保持可读。
 - `src/db/schema.sql` 增加幂等迁移：删除所有 `channels.model_map` 的 Luna 运行键，停用 `channel_model_mappings` 的 Luna 目录行，将 `model_prices.active` 设为 `false`；不删除模型价格、渠道成本、usage_logs、relay_attempts、billing_reservations 或配置审计。
-- 本地提交 `a5e43a6` 已推送 `origin/main`。25 个测试文件 / 289 项测试、TypeScript 检查、构建和 `git diff --check` 通过；发布归档为 `/Volumes/brainos/CodexMedia/generated/relay-station-v1-0-100-luna-removal/relay-station-v1.0.100.tar.gz`。
+- 本地提交 `a5e43a6` 已推送 `origin/main`。25 个测试文件 / 290 项测试、TypeScript 检查、构建和 `git diff --check` 通过；发布归档为 `/Volumes/brainos/CodexMedia/generated/relay-station-v1-0-100-luna-removal/relay-station-v1.0.100.tar.gz`。
 - 发布前备份 `/opt/relay-station-backups/pre-v1.0.100-luna-removal-20260930T224631Z/`：PostgreSQL custom dump 约 340 MB，容器内 `pg_restore --list` 校验通过；同时备份 `docker-compose.yml` 和生产 `.env`，目录权限为 0700。未覆盖 `secrets/`。
 - 生产 migration 成功，数据库复核为 Luna active 价格 0 条、运行时映射 0 条、启用目录映射 0 条；历史 Luna 价格 1 条、渠道成本 1 条、usage_logs 3887 条仍在，billing reservations 为 released 3878 / settled 9 / reserved 0。
 - 两个 API 副本已更新为 `relay-station:v1.0.100` 并 healthy，Gateway/PostgreSQL/Redis healthy。`https://api.hhtc.top/healthz`、`/api/v1/health` 返回 200，`www.hhtc.top` 加载 `styles.css?v=1.0.100` 和 `app.js?v=1.0.100`；未携带凭据访问 `/v1/models` 返回预期 401。未发起新的付费请求。
