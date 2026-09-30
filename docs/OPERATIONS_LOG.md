@@ -328,3 +328,10 @@
 - 生产 migration 成功，数据库复核为 Luna active 价格 0 条、运行时映射 0 条、启用目录映射 0 条；历史 Luna 价格 1 条、渠道成本 1 条、usage_logs 3887 条仍在，billing reservations 为 released 3878 / settled 9 / reserved 0。
 - 两个 API 副本已更新为 `relay-station:v1.0.100` 并 healthy，Gateway/PostgreSQL/Redis healthy。`https://api.hhtc.top/healthz`、`/api/v1/health` 返回 200，`www.hhtc.top` 加载 `styles.css?v=1.0.100` 和 `app.js?v=1.0.100`；未携带凭据访问 `/v1/models` 返回预期 401。未发起新的付费请求。
 - 发布时发现生产 `.env` 原先仍为 `RELAY_IMAGE_TAG=v1.0.99`，新源码曾短暂复用旧标签构建；已从发布前保留的 dangling 镜像恢复 `relay-station:v1.0.99`（旧 package 1.0.99），并确认其与当前 v1.0.100 镜像 ID 不同，回滚能力保留。
+
+## gpt-6.1-sol 改为 gpt-5.6-sol 网站价三分之一：2026-10-01 CST
+
+- 用户要求将 `gpt-6.1-sol` 的网站售价调整为当前 `gpt-5.6-sol` 售价的三分之一。生产 `gpt-5.6-sol` 当前售价为输入/输出/cache-read `46.6/233.2/4.7` 元/百万 Token。
+- 在事务中仅更新 `gpt-6.1-sol` 用户售价及其 per-million 别名字段，微元四舍五入为输入/输出/cache-read `15533333/77733333/1566667`（`15.533333/77.733333/1.566667` 元/百万 Token），并写入一条 `model_price` 配置审计。渠道成本、7 条上游映射、模型状态、历史账单和价格快照未修改。
+- 变更前备份 `/opt/relay-station-backups/pre-gpt-6-1-sol-third-price-20260930T230120Z/`：PostgreSQL custom dump `340128674` 字节，容器内 `pg_restore --list` 校验通过，同时保存生产 `.env` 和 `docker-compose.yml`。
+- 复核三项价格与 `gpt-5.6-sol` 的三倍关系误差均不超过 1 微元；变更后两 API 副本仍为 `relay-station:v1.0.100` 且 healthy，Gateway/PostgreSQL/Redis healthy，`https://api.hhtc.top/healthz` 返回 200。改价期间出现的 1 笔正常进行中预扣随后自行结算，未人工干预；未发起新的付费验证请求。
