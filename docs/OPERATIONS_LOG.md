@@ -318,3 +318,12 @@
 - 对所有启用渠道再次在 API 容器内使用现有解密逻辑请求 `/models`，仅输出模型 ID。新发现的精确上游 ID：`gpt-6`（高速pro）、`gpt-5.5` 与 `gpt-5.6`（高价稳定pro）、`gpt-5.3-codex-spark`（0.6/0.8/0.2/0.12）。`gpt-6-luna` 仍未在任何已核验上游目录出现。
 - 这些新 ID 当前没有完整的本站独立成本/售价证据：`gpt-6`、`gpt-5.6`、`gpt-5.3-codex-spark` 没有 `model_prices`；`gpt-5.5` 虽有历史 `manual` 模型价格，但没有对应渠道级成本。故本轮未写运行映射、未开放公开目录、未发起收费请求，避免把模型 ID 或旧价格当作可审计成本。
 - 待用户提供各模型的上游 Standard 成本/倍率或明确授权采用可审计价格来源后，再分别写入渠道映射、渠道成本、模型售价并做非计费目录和小额收费验收。
+
+## gpt-5.6-luna 下线：v1.0.100（2026-10-01 CST）
+
+- 用户确认 `gpt-5.6-luna` 的上游不支持，要求移除。源码从公开兜底模型、价格对比、前端模型列表和兜底成本告警中移除 Luna；历史账单、成本和用量查询逻辑保持可读。
+- `src/db/schema.sql` 增加幂等迁移：删除所有 `channels.model_map` 的 Luna 运行键，停用 `channel_model_mappings` 的 Luna 目录行，将 `model_prices.active` 设为 `false`；不删除模型价格、渠道成本、usage_logs、relay_attempts、billing_reservations 或配置审计。
+- 本地提交 `a5e43a6` 已推送 `origin/main`。25 个测试文件 / 289 项测试、TypeScript 检查、构建和 `git diff --check` 通过；发布归档为 `/Volumes/brainos/CodexMedia/generated/relay-station-v1-0-100-luna-removal/relay-station-v1.0.100.tar.gz`。
+- 发布前备份 `/opt/relay-station-backups/pre-v1.0.100-luna-removal-20260930T224631Z/`：PostgreSQL custom dump 约 340 MB，容器内 `pg_restore --list` 校验通过；同时备份 `docker-compose.yml` 和生产 `.env`，目录权限为 0700。未覆盖 `secrets/`。
+- 生产 migration 成功，数据库复核为 Luna active 价格 0 条、运行时映射 0 条、启用目录映射 0 条；历史 Luna 价格 1 条、渠道成本 1 条、usage_logs 3887 条仍在，billing reservations 为 released 3878 / settled 9 / reserved 0。
+- 两个 API 副本已更新为 `relay-station:v1.0.100` 并 healthy，Gateway/PostgreSQL/Redis healthy。`https://api.hhtc.top/healthz`、`/api/v1/health` 返回 200，`www.hhtc.top` 加载 `styles.css?v=1.0.100` 和 `app.js?v=1.0.100`；未携带凭据访问 `/v1/models` 返回预期 401。未发起新的付费请求。
