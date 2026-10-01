@@ -101,6 +101,22 @@ describe('sol fallback routing', () => {
     expect(db.query.mock.calls.some(([sql]) => String(sql).includes('failure_count = failure_count + 1'))).toBe(false)
     await result.response.body.dump()
   })
+  test('fails over a Responses request when the first provider rejects its payload size', async () => {
+    const { service } = routing()
+    agent.get('http://real.test').intercept({ path: '/v1/responses', method: 'POST' })
+      .reply(413, { error: { message: 'Request body too large' } }, { headers: { 'content-type': 'application/json' } })
+    agent.get('http://fallback.test').intercept({
+      path: '/v1/responses', method: 'POST',
+      body: value => {
+        const parsed = JSON.parse(String(value))
+        return parsed.model === upstream && parsed.input === 'hello'
+      },
+    }).reply(200, { object: 'response', model: upstream, output_text: 'OK' }, { headers: { 'content-type': 'application/json' } })
+    const result = await service.relay('/responses', 'POST', { 'content-type': 'application/json' }, Buffer.from(JSON.stringify({ model, input: 'hello' })), model)
+    expect(result.channel.id).toBe('fallback')
+    expect(result.attempts.map(a => a.statusCode)).toEqual([413, 200])
+    await result.response.body.dump()
+  })
   test.each(['UND_ERR_HEADERS_TIMEOUT', 'ECONNRESET'])('fails over %s', async code => {
     const { service } = routing()
     agent.get('http://real.test').intercept({ path: '/v1/chat/completions', method: 'POST' }).replyWithError(Object.assign(new Error('test error'), { code }))

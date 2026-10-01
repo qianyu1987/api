@@ -53,6 +53,12 @@ test('free conversation has no pricing, reserve or settle dependency', async()=>
  const source=readFileSync(new URL('../src/services/chat.ts',import.meta.url),'utf8').split('async send(')[1]
  expect(source).not.toContain('this.billing.')
 })
+test('blocked chat quota guards both keyboard and form submission paths',async()=>{
+ const {readFileSync}=await import('node:fs')
+ const source=readFileSync(new URL('../public/app.js',import.meta.url),'utf8')
+ expect(source).toContain("if(rejectChatIfQuotaBlocked())return;$('#chat-form').requestSubmit()")
+ expect(source).toContain('if(chatController||rejectChatIfQuotaBlocked()||chatPending&&!chatPending.retryable)return;')
+})
 test('free saved answer recovers without charging while legacy recovery remains supported',async()=>{
  const query=vi.fn().mockResolvedValueOnce([{request_id:id,user_id:'user',answer:'saved',settlement:{billing:'free',usage:{input:'9',output:'3',cache:'0'}}}]).mockResolvedValue([])
  const billing={settle:vi.fn(),release:vi.fn()}

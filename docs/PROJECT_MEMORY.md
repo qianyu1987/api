@@ -206,6 +206,9 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 ## 2026-10-01 上游 413 故障切换：v1.0.102
 
 - `a97458d` 将 HTTP 413 纳入渠道重试；413 不增加渠道故障计数或触发熔断，其他可用渠道仍可尝试。若所有渠道都拒绝该请求，relay 保留并返回最后的 413。请求体不会被自动缩小。
+- 2026-10-01 只读确认 `www.hhtc.top` 当前与 `api.hhtc.top` 一样将 API 请求转发至 Relay Station：生产 HTTPS 虚拟主机将 `/` 代理到 `127.0.0.1:18082`，公网 `/healthz`、`/api/v1/health` 返回 Relay Station 健康响应，`/v1/models` 无 Key 返回预期 401。因此 v1.0.102 的 413 渠道重试覆盖 `www.hhtc.top/v1/responses`；未发 POST 或做付费验证。Fastify 请求体上限为 20 MiB、宿主 Nginx 和内部 Gateway 为 32 MiB，入口层拒绝不会进入渠道切换；若所有上游均拒绝请求体，仍需缩小请求或提高相应上游限制。
 - 25 个测试文件 / 293 项测试、TypeScript 检查、构建和 `git diff --check` 通过。发布归档取当前 `origin/main`（`c1ff614`，包含 `a97458d` 与 `b8d4912`）并保存于 `/Volumes/brainos/CodexMedia/generated/relay-413-failover-20261001/relay-station-v1.0.102-current-main.tar.gz`。
 - 生产备份 `/opt/relay-station-backups/pre-v1.0.102-413-failover-20261001T013222Z/` 的 PostgreSQL custom dump 为 340513324 字节，`pg_restore --list` 校验通过；另存生产 `.env`、Compose 配置、旧镜像信息及发布归档。发布后两个 API 副本均为 v1.0.102 且 healthy，Gateway、PostgreSQL、Redis healthy，worker timer active/enabled。三个公网健康接口均为 200，首页引用的 `app.js?v=1.0.102` 与本地文件 SHA-256 一致，容器编译产物已确认含 413 重试逻辑。
 - 未发起真实大请求或付费模型调用。若请求仍大于所有已配置上游网关的限制，最终仍会返回 413；需压缩上下文/移除大日志或图片，或请相应提供商提高请求体限制。
+- 2026-10-01 后续只读生产核验：`www.hhtc.top/`、`/login`、`/register`、`/app.js?v=1.0.102` 和 `/api/v1/health` 均返回 200；脚本 SHA-256 `e969374fb49785122ae8b53b0e5671f942125f1863587feb7f1c9186ea24d162` 与 `origin/main:public/app.js` 一致。当前工作区 `public/app.js` 含未发布聊天额度拦截，哈希不同，不可当成生产文件。无会话钱包下单与无认证媒体报价均返回 401，未创建订单或触发媒体供应商。匿名浏览器页面/响应检查与无 Key 的 20 MiB 入口边界测试不等于认证业务端到端、真实支付、媒体出片或上游 413 故障切换。
+- 提供管理员测试账号后完成生产浏览器认证检查：登录、`/api/me/overview`、只读 `/api/admin/overview` 均返回 200，管理员导航与经营概览正常；退出后公开界面恢复，个人总览请求返回 401。未访问或调用后台写入操作，也未执行真实支付或媒体生成；未在记录中保存凭据或业务数据。

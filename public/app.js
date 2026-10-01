@@ -975,8 +975,13 @@
     if(chatPending?.unknown&&!chatController&&!result.items.some(t=>t.request_id===chatPending.id)){$('#chat-error').textContent='暂未查到提交记录。可点击发送重试，将沿用原请求编号。';chatPending.retryable=true}
     renderChat(result.items,force);chatBusy(Boolean(chatController||chatPending&&!chatPending.retryable));scheduleChatPoll()
   }catch(e){$('#chat-error').textContent=e.message;scheduleChatPoll()}}
+  function rejectChatIfQuotaBlocked(){
+    if(!chatQuotaBlocked||chatPending?.retryable)return false
+    $('#chat-error').textContent=$('#chat-send').title
+    return true
+  }
   $('#chat-input').oninput=()=>{sizeChatInput();chatSaveDraft()}
-  $('#chat-input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229&&matchMedia('(min-width:801px) and (pointer:fine)').matches){e.preventDefault();$('#chat-form').requestSubmit()}}
+  $('#chat-input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229&&matchMedia('(min-width:801px) and (pointer:fine)').matches){e.preventDefault();if(rejectChatIfQuotaBlocked())return;$('#chat-form').requestSubmit()}}
   $('#chat-messages').onscroll=()=>$('#chat-latest').classList.toggle('hidden',chatNearBottom())
   $('#chat-latest').onclick=chatBottom
   $('#chat-refresh').onclick=()=>loadChat()
@@ -987,7 +992,7 @@
   $('#chat-new').onclick=async()=>{if(chatController||chatPending)return;try{$('#chat-error').textContent='';chatSaveDraft();const row=await api('/api/me/chat/conversations',{method:'POST',body:'{}'});chatId=row.id;$('#chat-input').value='';sizeChatInput();$('#chat-history-dialog').close();await loadChat(true);$('#chat-input').focus()}catch(e){$('#chat-error').textContent=e.message}}
   $('#chat-mobile-new').onclick=()=>$('#chat-new').click()
   $('#chat-stop').onclick=()=>{chatController?.abort();$('#chat-error').textContent='已请求停止，正在确认最终结果。'}
-  $('#chat-form').onsubmit=async event=>{event.preventDefault();if(chatController||chatPending&&!chatPending.retryable)return;const content=$('#chat-input').value.trim();if(!content)return
+  $('#chat-form').onsubmit=async event=>{event.preventDefault();if(chatController||rejectChatIfQuotaBlocked()||chatPending&&!chatPending.retryable)return;const content=$('#chat-input').value.trim();if(!content)return
     if(chatPending?.retryable&&content!==chatPending.content){$('#chat-error').textContent='上一条消息结果尚待确认，请先重试原消息或刷新记录。';return}
     chatController=new AbortController();chatBusy(true);$('#chat-error').textContent='';clearTimeout(chatPoll)
     try{if(!chatId)chatId=(await api('/api/me/chat/conversations',{method:'POST',body:'{}'})).id
