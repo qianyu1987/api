@@ -191,7 +191,8 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 - 禁止在普通维护中修改媒体价格、渠道映射或用户账务，禁止破坏性数据操作；验证码、人工凭据、无法安全判断的项目暂停并明确报告。
 - 记忆更新时分清稳定约定、历史验证、未解决事项；旧版本号和旧故障不能当作永恒状态。
 
-## 2026-10-01 本地前端体验迭代
+## 2026-10-01 GPT TOKEN 控制台体验迭代：v1.0.101
 
 - 本地工作树已完成钱包二维码右侧布局、“我的钱包”命名、首页“无限免费生图”展示文案、免费智能配额/快捷入口、短剧创作流程提示与任务进度、后台固定经营概览及四类标签分组等前端改进；套餐/企业充值支付结果在各自区域展示，倍率文案跟随服务端配置，支付轮询按结果容器隔离并保留到账核对异常状态，历史账单和接口未改动。
-- 本轮不改变后端额度、支付、账务、媒体报价或数据库；尚未提交、推送或部署生产。验证结果和截图路径见 `docs/OPERATIONS_LOG.md` 同名条目。
+- 本轮不改变后端额度、支付、账务、媒体报价或数据库。提交 `d618011` 已推送 `origin/main`，镜像 `relay-station:v1.0.101` 已发布生产。生产备份位于 `/opt/relay-station-backups/pre-v1.0.101-console-20261001T002401Z/`，包含 PostgreSQL dump、`.env`、Compose 配置、旧镜像信息和源码归档；临时发布目录及上传归档已清理。
+- 两个 API 副本为 `relay-station:v1.0.101` 且 healthy，Gateway、PostgreSQL、Redis healthy，`relay-station-worker.timer` active/enabled。`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 和 `https://www.hhtc.top/` 均已复核；线上资源为 `styles-extra.css?v=1.0.62`、`app.js?v=1.0.101`。未创建支付订单、未发起付费媒体或模型调用。

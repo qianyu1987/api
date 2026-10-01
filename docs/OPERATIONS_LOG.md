@@ -343,10 +343,12 @@
 - 变更前备份 `/opt/relay-station-backups/pre-gpt-6-1-sol-discount-20261001T234725Z/`：PostgreSQL custom dump `340295747` 字节，`pg_restore --list` 校验通过，同时保存生产 `.env` 和 `docker-compose.yml`。
 - 变更后两 API 副本仍为 `relay-station:v1.0.100` 且 healthy，Gateway/PostgreSQL/Redis healthy；`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health` 和 `https://www.hhtc.top/` 均返回 200。未发起新的付费模型调用；本次无代码、镜像或部署变更。
 
-## GPT TOKEN 控制台体验迭代：本地前端改进（2026-10-01 CST）
+## GPT TOKEN 控制台体验迭代：v1.0.101 生产发布（2026-10-01 CST）
 
 - 按用户确认的范围完成本地前端改进：普通钱包支付结果移入充值表单右侧并在窄屏上下排列；套餐和企业充值保留在各自区域显示支付结果；用户侧导航和接入说明统一使用“我的钱包”；首页主文案更新为“无限免费生图”，仅改展示文案，不改变标准图片赠送额度、限流或成本策略。
 - 免费智能增加任务型快捷提问、配额状态徽标、额度耗尽时的发送禁用、历史会话更新时间和错误状态清理；短剧创作增加流程提示、确认报价按钮、任务状态徽标与原生进度条，并将移动端任务列表改为卡片式布局。
 - 后台标签固定提供“经营概览”，并按“渠道与成本 / 价格与套餐 / 用户与订单 / 媒体与设置”分组；充值倍率展示跟随服务端配置，订单轮询对套餐、企业钱包和普通钱包使用对应成功文案；未修改后端 API、账务、支付、媒体报价、数据库或历史审计数据。静态资源查询参数已更新为 `styles-extra.css?v=1.0.62`、`app.js?v=1.0.101`。
 - 本地验证：25 个测试文件 / 290 项测试通过；TypeScript 类型检查、构建、前端语法检查和 `git diff --check` 通过。Impeccable detector 因缺少 HTML/CSS parser 使用正则降级扫描，未发现规则项；Chrome 1440px 与 390px 截图检查确认二维码布局、媒体流程、后台分组无横向溢出。补充验证显示桌面表单/二维码结果区域左右排列、窄屏上下排列；支付轮询按结果容器隔离，旧订单响应不会覆盖新订单，paid 但到账记录不一致时保留明确异常状态。
-- 当前状态：改动仅在本地工作树，未提交、未推送、未部署生产；未创建支付订单、未发起付费媒体或模型调用。截图保存在 `/Volumes/brainos/CodexMedia/generated/gpt-token-ui-20261001/`。
+- 提交 `d618011` 已推送 `origin/main`；构建镜像 `relay-station:v1.0.101` 已发布到固定生产主机 `101.35.223.148:/opt/relay-station`。发布前备份 `/opt/relay-station-backups/pre-v1.0.101-console-20261001T002401Z/` 已校验，包含 PostgreSQL dump、生产 `.env`、Compose 配置、旧镜像信息和源码归档；临时发布目录及上传归档已清理。
+- 生产验收：两个 API 副本为 `relay-station:v1.0.101` 且 healthy，Gateway、PostgreSQL、Redis healthy；`relay-station-worker.timer` 为 `active/enabled`。`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 和 `https://www.hhtc.top/` 均返回 200，线上加载 `styles-extra.css?v=1.0.62`、`app.js?v=1.0.101`。
+- 本地验证：25 个测试文件 / 290 项测试通过，TypeScript 检查、构建、前端语法检查和 `git diff --check` 通过；Chrome 1440px 与 390px 布局检查通过。未创建支付订单、未发起付费媒体或模型调用。截图保存在 `/Volumes/brainos/CodexMedia/generated/gpt-token-ui-20261001/`。
