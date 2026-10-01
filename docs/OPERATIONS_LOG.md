@@ -352,3 +352,11 @@
 - 提交 `d618011` 已推送 `origin/main`；构建镜像 `relay-station:v1.0.101` 已发布到固定生产主机 `101.35.223.148:/opt/relay-station`。发布前备份 `/opt/relay-station-backups/pre-v1.0.101-console-20261001T002401Z/` 已校验，包含 PostgreSQL dump、生产 `.env`、Compose 配置、旧镜像信息和源码归档；临时发布目录及上传归档已清理。
 - 生产验收：两个 API 副本为 `relay-station:v1.0.101` 且 healthy，Gateway、PostgreSQL、Redis healthy；`relay-station-worker.timer` 为 `active/enabled`。`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 和 `https://www.hhtc.top/` 均返回 200，线上加载 `styles-extra.css?v=1.0.62`、`app.js?v=1.0.101`。
 - 本地验证：25 个测试文件 / 290 项测试通过，TypeScript 检查、构建、前端语法检查和 `git diff --check` 通过；Chrome 1440px 与 390px 布局检查通过。未创建支付订单、未发起付费媒体或模型调用。截图保存在 `/Volumes/brainos/CodexMedia/generated/gpt-token-ui-20261001/`。
+
+## 短剧创作任务列表修复：v1.0.102 生产发布（2026-10-01 CST）
+
+- 用户反馈短剧创作页在存在历史任务时显示 `rows.join is not a function`。根因是 `tasks.items.map(...)` 的结果被提前 `.join('')`，随后又传给会调用 `rows.join('')` 的共享 `table()`；空任务时不触发，因此此前只在有历史任务的账号复现。
+- 修复提交 `b8d4912` 已推送 `origin/main`，并保留当前主分支已有的 413 上游故障切换修复。仅修改 `public/app.js` 的任务行数组、`public/index.html` 的 `app.js?v=1.0.102` 缓存版本，以及源码回归测试；媒体 API、报价、提交、轮询、账务和数据库业务数据未改动。
+- 发布前备份 `/opt/relay-station-backups/pre-v1.0.102-short-drama-20261001T013042Z/` 已完成，包含 PostgreSQL custom dump（约 340 MB）、生产 `.env`、Compose 配置和镜像信息。发布归档已传输并校验，临时源码目录保留在服务器用于本次发布核对。
+- 生产迁移成功；两个 API 副本均为 `relay-station:v1.0.102` / healthy，Gateway、PostgreSQL、Redis healthy，`relay-station-worker.timer` 为 `active/enabled`。`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 和 `https://www.hhtc.top/` 均返回 200；首页实际加载 `app.js?v=1.0.102`，线上脚本复核修复已生效。
+- 本地验证：25 个测试文件 / 293 项测试通过，TypeScript 检查、构建、`public/app.js` 语法检查和 `git diff --check` 通过。未创建支付订单、未发起付费媒体或模型调用。

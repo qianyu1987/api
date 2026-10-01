@@ -196,3 +196,9 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 - 本地工作树已完成钱包二维码右侧布局、“我的钱包”命名、首页“无限免费生图”展示文案、免费智能配额/快捷入口、短剧创作流程提示与任务进度、后台固定经营概览及四类标签分组等前端改进；套餐/企业充值支付结果在各自区域展示，倍率文案跟随服务端配置，支付轮询按结果容器隔离并保留到账核对异常状态，历史账单和接口未改动。
 - 本轮不改变后端额度、支付、账务、媒体报价或数据库。提交 `d618011` 已推送 `origin/main`，镜像 `relay-station:v1.0.101` 已发布生产。生产备份位于 `/opt/relay-station-backups/pre-v1.0.101-console-20261001T002401Z/`，包含 PostgreSQL dump、`.env`、Compose 配置、旧镜像信息和源码归档；临时发布目录及上传归档已清理。
 - 两个 API 副本为 `relay-station:v1.0.101` 且 healthy，Gateway、PostgreSQL、Redis healthy，`relay-station-worker.timer` active/enabled。`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 和 `https://www.hhtc.top/` 均已复核；线上资源为 `styles-extra.css?v=1.0.62`、`app.js?v=1.0.101`。未创建支付订单、未发起付费媒体或模型调用。
+
+## 2026-10-01 短剧创作任务列表修复：v1.0.102
+
+- 用户反馈短剧创作页在存在历史任务时显示 `rows.join is not a function`。根因是任务行数组在传给共享 `table()` 渲染器前被提前 `.join('')` 转成字符串；本次只移除该提前拼接，并加入源码回归断言，媒体报价、提交、轮询和账务接口未修改。
+- 提交 `b8d4912` 已推送 `origin/main`，基于当前主分支 `v1.0.102` 构建并发布；同时保留已在主分支的 413 上游故障切换修复。发布前备份位于 `/opt/relay-station-backups/pre-v1.0.102-short-drama-20261001T013042Z/`，生产 `.env`、Compose 配置和旧镜像均保留。
+- 两个 API 副本为 `relay-station:v1.0.102` 且 healthy，Gateway、PostgreSQL、Redis healthy，`relay-station-worker.timer` active/enabled。公网 `https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 和 `https://www.hhtc.top/` 均返回 200；首页加载 `app.js?v=1.0.102`，线上脚本已复核任务行保持数组。25 个测试文件 / 293 项测试、typecheck、build、语法检查和 diff-check 通过。未创建支付订单、未发起付费媒体或模型调用。
