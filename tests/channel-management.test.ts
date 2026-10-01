@@ -116,6 +116,11 @@ describe('browser request headers regression', () => {
     await api('/upload', { method: 'POST', body: new FormData() })
     expect((fetch.mock.calls as any)[2][1].headers.has('Content-Type')).toBe(false)
   })
+  test('keeps short-drama task rows as an array for the shared table renderer', () => {
+    const taskRows = source.match(/const taskRows=tasks\.items\.map[\s\S]*?;\$\('#media-tasks'\)\.innerHTML=table/)
+    expect(taskRows).toBeTruthy()
+    expect(taskRows?.[0]).not.toContain("}).join('');")
+  })
 })
 
 describe('payment refresh regression', () => {
