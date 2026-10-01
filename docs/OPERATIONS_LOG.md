@@ -360,3 +360,10 @@
 - 发布前备份 `/opt/relay-station-backups/pre-v1.0.102-short-drama-20261001T013042Z/` 已完成，包含 PostgreSQL custom dump（约 340 MB）、生产 `.env`、Compose 配置和镜像信息。发布归档已传输并校验，临时源码目录保留在服务器用于本次发布核对。
 - 生产迁移成功；两个 API 副本均为 `relay-station:v1.0.102` / healthy，Gateway、PostgreSQL、Redis healthy，`relay-station-worker.timer` 为 `active/enabled`。`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 和 `https://www.hhtc.top/` 均返回 200；首页实际加载 `app.js?v=1.0.102`，线上脚本复核修复已生效。
 - 本地验证：25 个测试文件 / 293 项测试通过，TypeScript 检查、构建、`public/app.js` 语法检查和 `git diff --check` 通过。未创建支付订单、未发起付费媒体或模型调用。
+
+## 上游 HTTP 413 渠道故障切换：v1.0.102 生产发布（2026-10-01 CST）
+
+- CC Switch 报告上游在 `/responses` 返回 HTTP 413。`a97458d` 将 413 纳入其他兼容渠道的重试条件，并避免把单请求体积限制计为渠道故障或打开熔断；所有渠道均拒绝时仍返回最后的 413。实现不会改写或压缩请求体。
+- 发布前备份 `/opt/relay-station-backups/pre-v1.0.102-413-failover-20261001T013222Z/`：PostgreSQL custom dump 340513324 字节，`pg_restore --list` 通过；同时保留 `.env`、Compose 配置、旧镜像信息和源码归档。归档 SHA-256 为 `4253f9ccecf8e7998656e6e1c499c9240beeb357665b1fad57e6e9d9de5885e0`，对应 `origin/main` 的 `c1ff614`。
+- `docker compose run --rm migration` 成功；两个 API 副本已滚动更新为 `relay-station:v1.0.102` 并 healthy，Gateway、PostgreSQL、Redis healthy，`relay-station-worker.timer` active/enabled。`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health`、`https://hhtc.top/api/v1/health` 均返回 200。公网首页引用 `app.js?v=1.0.102`，其 SHA-256 与当前源码一致；运行容器的编译代码包含 413 重试与不熔断处理。
+- 本地 25 个测试文件 / 293 项测试通过，TypeScript 检查、构建、`git diff --check` 通过。没有发送真实大请求或付费模型调用。若同一请求超出所有上游网关限制，仍需压缩上下文/移除大日志或图片，或请提供商提高请求体限制。
