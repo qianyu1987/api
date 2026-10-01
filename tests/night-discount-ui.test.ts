@@ -60,8 +60,8 @@ describe('night discount administration UI', () => {
     expect(html).not.toContain('data-admin-form="night-discount-settings"')
   })
 
-  test('adds gpt-6-sol as a distinct fifth comparison model', () => {
-    expect(html).toContain('五模型价格对比')
+  test('keeps gpt-6-sol as a distinct comparison model after Luna removal', () => {
+    expect(html).toContain('四模型价格对比')
     expect(source).toContain("['gpt-6-sol', 'Sol 6']")
     expect(source.indexOf("['gpt-6-astra', 'Astra']")).toBeLessThan(source.indexOf("['gpt-6-sol', 'Sol 6']"))
     expect(source.indexOf("['gpt-6-sol', 'Sol 6']")).toBeLessThan(source.indexOf("['gpt-5.6-sol', 'Sol']"))

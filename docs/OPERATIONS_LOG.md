@@ -335,3 +335,18 @@
 - 在事务中仅更新 `gpt-6.1-sol` 用户售价及其 per-million 别名字段，微元四舍五入为输入/输出/cache-read `15533333/77733333/1566667`（`15.533333/77.733333/1.566667` 元/百万 Token），并写入一条 `model_price` 配置审计。渠道成本、7 条上游映射、模型状态、历史账单和价格快照未修改。
 - 变更前备份 `/opt/relay-station-backups/pre-gpt-6-1-sol-third-price-20260930T230120Z/`：PostgreSQL custom dump `340128674` 字节，容器内 `pg_restore --list` 校验通过，同时保存生产 `.env` 和 `docker-compose.yml`。
 - 复核三项价格与 `gpt-5.6-sol` 的三倍关系误差均不超过 1 微元；变更后两 API 副本仍为 `relay-station:v1.0.100` 且 healthy，Gateway/PostgreSQL/Redis healthy，`https://api.hhtc.top/healthz` 返回 200。改价期间出现的 1 笔正常进行中预扣随后自行结算，未人工干预；未发起新的付费验证请求。
+
+## gpt-6.1-sol 再降价 35%：2026-10-01 CST
+
+- 用户要求在当前网站售价基础上再降 35%。按变更前数据库微元值乘 `65%` 并四舍五入到微元，输入/输出/cache-read 售价从 `15533333/77733333/1566667` 调整为 `10096666/50526666/1018334`（`10.096666/50.526666/1.018334` 元/百万 Token）。
+- 生产事务仅更新 `model_prices` 的六个售价字段（标准列与 per-million 别名）并写入一条 `model_price` 配置审计；成本 `600000/3600000/48000`、`active`、7 条渠道映射、`pricing_tiers`、cache-write 字段、历史账单和价格快照未修改。新价格仍高于当前最低利润护栏。
+- 变更前备份 `/opt/relay-station-backups/pre-gpt-6-1-sol-discount-20261001T234725Z/`：PostgreSQL custom dump `340295747` 字节，`pg_restore --list` 校验通过，同时保存生产 `.env` 和 `docker-compose.yml`。
+- 变更后两 API 副本仍为 `relay-station:v1.0.100` 且 healthy，Gateway/PostgreSQL/Redis healthy；`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health` 和 `https://www.hhtc.top/` 均返回 200。未发起新的付费模型调用；本次无代码、镜像或部署变更。
+
+## GPT TOKEN 控制台体验迭代：本地前端改进（2026-10-01 CST）
+
+- 按用户确认的范围完成本地前端改进：普通钱包支付结果移入充值表单右侧并在窄屏上下排列；套餐和企业充值保留在各自区域显示支付结果；用户侧导航和接入说明统一使用“我的钱包”；首页主文案更新为“无限免费生图”，仅改展示文案，不改变标准图片赠送额度、限流或成本策略。
+- 免费智能增加任务型快捷提问、配额状态徽标、额度耗尽时的发送禁用、历史会话更新时间和错误状态清理；短剧创作增加流程提示、确认报价按钮、任务状态徽标与原生进度条，并将移动端任务列表改为卡片式布局。
+- 后台标签固定提供“经营概览”，并按“渠道与成本 / 价格与套餐 / 用户与订单 / 媒体与设置”分组；充值倍率展示跟随服务端配置，订单轮询对套餐、企业钱包和普通钱包使用对应成功文案；未修改后端 API、账务、支付、媒体报价、数据库或历史审计数据。静态资源查询参数已更新为 `styles-extra.css?v=1.0.62`、`app.js?v=1.0.101`。
+- 本地验证：25 个测试文件 / 290 项测试通过；TypeScript 类型检查、构建、前端语法检查和 `git diff --check` 通过。Impeccable detector 因缺少 HTML/CSS parser 使用正则降级扫描，未发现规则项；Chrome 1440px 与 390px 截图检查确认二维码布局、媒体流程、后台分组无横向溢出。补充验证显示桌面表单/二维码结果区域左右排列、窄屏上下排列；支付轮询按结果容器隔离，旧订单响应不会覆盖新订单，paid 但到账记录不一致时保留明确异常状态。
+- 当前状态：改动仅在本地工作树，未提交、未推送、未部署生产；未创建支付订单、未发起付费媒体或模型调用。截图保存在 `/Volumes/brainos/CodexMedia/generated/gpt-token-ui-20261001/`。

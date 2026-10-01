@@ -39,6 +39,9 @@
     const ratio = topupMultiplierLabel()
     const title = $('#wallet-recharge-title'); if (title) title.textContent = '充值 1 元，到账 ' + ratio + ' 元'
     const mark = $('#wallet-recharge-ratio'); if (mark) mark.textContent = '1 : ' + ratio
+    const markWrap = mark?.closest('.wallet-recharge-mark'); if (markWrap) markWrap.setAttribute('aria-label', '充值倍率 1 比 ' + ratio)
+    const tag = $('#topup-offer-tag'); if (tag) tag.textContent = '1:' + ratio + ' 到账'
+    const description = $('#wallet-recharge-description'); if (description) description.textContent = '当前钱包充值按 1:' + ratio + ' 计算：支付金额按微信订单记录，到账金额进入 API 钱包；月套餐额度不参与此倍率。'
     updateTopupCreditHint()
   }
   function updateTopupCreditHint() {
@@ -65,6 +68,8 @@
       const minimumNode = $('#enterprise-overview-minimum'); if (minimumNode) minimumNode.textContent = '—'
       const ratioNode = $('#enterprise-overview-ratio'); if (ratioNode) ratioNode.textContent = '—'
       const formula = $('#enterprise-recharge-formula'); if (formula) formula.textContent = '企业方案暂不可用'
+      const ratioNote = $('#enterprise-recharge-ratio-note'); if (ratioNote) ratioNote.textContent = '企业充值方案暂不可用'
+      const tag = $('#enterprise-topup-offer-tag'); if (tag) tag.textContent = '暂不可用'
       const input = $('#enterprise-topup-form [name="amount"]'); if (input) input.disabled = true
       const button = $('#enterprise-topup-form [type="submit"]'); if (button) button.disabled = true
       const hint = $('#enterprise-topup-hint'); if (hint) hint.textContent = '请稍后刷新企业充值方案。'
@@ -78,6 +83,8 @@
     const minimumNode = $('#enterprise-overview-minimum'); if (minimumNode) minimumNode.textContent = money({ micros: minimum })
     const ratioNode = $('#enterprise-overview-ratio'); if (ratioNode) ratioNode.textContent = ratio
     const formula = $('#enterprise-recharge-formula'); if (formula) formula.textContent = money({ micros: minimum }) + ' → ' + money({ micros: credit })
+    const ratioNote = $('#enterprise-recharge-ratio-note'); if (ratioNote) ratioNote.textContent = '最低充值 · ' + ratio + ' 到账'
+    const tag = $('#enterprise-topup-offer-tag'); if (tag) tag.textContent = ratio + ' 到账'
     const input = $('#enterprise-topup-form [name="amount"]')
     if (input) {
       input.disabled = false
@@ -374,7 +381,7 @@
   function show(view) {
     $$('.view').forEach((node) => node.classList.toggle('active-view', node.id === 'view-' + view))
     $$('.nav-item').forEach((node) => { const active = node.dataset.view === view; node.classList.toggle('active', active); if (active) node.setAttribute('aria-current', 'page'); else node.removeAttribute('aria-current') })
-    const names = { chat:'免费智能', overview: '总览', recharge: '充值与套餐', keys: 'API Keys', media: '短剧创作', gallery: '素材广场', usage: '用量明细', affiliate: '邀请返利', downloads: '下载入口', admin: '管理后台' }
+    const names = { chat:'免费智能', overview: '总览', recharge: '我的钱包', keys: 'API Keys', media: '短剧创作', gallery: '素材广场', usage: '用量明细', affiliate: '邀请返利', downloads: '下载入口', admin: '管理后台' }
     $('#view-title').textContent = names[view] || '总览'
     $('.sidebar').classList.remove('open')
     if (view === 'chat') loadChat()
@@ -488,22 +495,29 @@
       error.textContent = loadError.message + '，请稍后重新进入本页。'
     }
   }
-  function renderPayment(data) {
+  const paymentTimers = new Map()
+  function renderPayment(data, targetId = 'payment-result', orderLabel = '钱包充值') {
+    const result = $('#' + targetId); if (!result) return
+    const previousTimer = paymentTimers.get(targetId)
+    if (previousTimer) { clearInterval(previousTimer); paymentTimers.delete(targetId) }
     const payment = data.payment || {}; const provider = '微信'; const raw = payment.qrCode || payment.codeUrl || ''
     const image = payment.qrImage || payment.qrDataUrl || data.qrImage || (String(raw).startsWith('data:image/') ? raw : '')
     const codeUrl = payment.codeUrl || (!String(raw).startsWith('data:image/') ? raw : '')
-    $('#payment-result').classList.remove('hidden')
     const creditNote = data.walletCreditAmount ? '支付 ' + money(data.amount) + '，钱包到账 ' + money(data.walletCreditAmount) + '。' : ''
-    $('#payment-result').innerHTML = '<div class="payment-layout">' + (image ? '<img class="payment-qr" src="' + esc(image) + '" alt="' + provider + '支付二维码">' : '') + '<div class="payment-details"><strong id="payment-status">订单已创建</strong><p id="payment-status-note">请使用' + provider + (image ? '扫描二维码' : '打开支付链接') + '完成支付。' + creditNote + '到账后余额会自动更新。</p>' + (codeUrl ? '<div class="copy-line"><code id="payment-code">' + esc(codeUrl) + '</code><button type="button" class="small-button" data-copy="payment-code">复制支付链接</button></div>' : '<p class="form-error">支付渠道未返回二维码，请稍后重试。</p>') + '</div></div>'
-    $('#payment-result').scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    const codeId = targetId + '-code'
+    result.classList.remove('hidden')
+    result.innerHTML = '<div class="payment-layout">' + (image ? '<img class="payment-qr" src="' + esc(image) + '" alt="' + provider + '支付二维码">' : '') + '<div class="payment-details"><span class="payment-order-label">' + esc(orderLabel) + '</span><strong class="payment-status">订单已创建</strong><p class="payment-status-note">请使用' + provider + (image ? '扫描二维码' : '打开支付链接') + '完成支付。' + creditNote + '到账后余额会自动更新。</p>' + (codeUrl ? '<div class="copy-line"><code id="' + esc(codeId) + '">' + esc(codeUrl) + '</code><button type="button" class="small-button" data-copy="' + esc(codeId) + '">复制支付链接</button></div>' : '<p class="form-error">支付渠道未返回二维码，请稍后重试。</p>') + '</div></div>'
+    result.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     if (data.orderId) {
       const started = Date.now(); let paymentPollInFlight = false; const timer = setInterval(async () => {
-        if (Date.now() - started > 31 * 60 * 1000) return clearInterval(timer)
+        if (paymentTimers.get(targetId) !== timer) { clearInterval(timer); return }
+        if (Date.now() - started > 31 * 60 * 1000) { clearInterval(timer); paymentTimers.delete(targetId); return }
         if (paymentPollInFlight) return
         paymentPollInFlight = true
-        try { const order = await api('/api/me/orders/' + encodeURIComponent(data.orderId)); if (order.creditStatus === 'credited') { clearInterval(timer); $('#payment-status').textContent = '到账成功'; $('#payment-status-note').textContent = order.creditMessage + (order.creditedAmountMicros ? ' ' + money({ micros: order.creditedAmountMicros }) : '') + '，正在刷新账户信息。'; await Promise.all([loadOverview(), loadRecharge()]) } else if (order.status === 'paid') { $('#payment-status').textContent = '支付成功'; $('#payment-status-note').textContent = order.creditMessage || '正在自动核对到账，请稍候。' } else if (['failed', 'expired', 'closed'].includes(order.status)) { clearInterval(timer); const labels = { failed: '失败', expired: '已过期', closed: '已关闭' }; $('#payment-status').textContent = '订单' + (labels[order.status] || order.status); $('#payment-status-note').textContent = '请重新创建订单。' } } catch { /* keep polling while the session is valid */ }
+        try { const order = await api('/api/me/orders/' + encodeURIComponent(data.orderId)); if (paymentTimers.get(targetId) !== timer) return; const status = result.querySelector('.payment-status'); const note = result.querySelector('.payment-status-note'); if (order.creditStatus === 'credited') { clearInterval(timer); paymentTimers.delete(targetId); const successLabel = order.kind === 'subscription' ? '套餐已生效' : order.topup_offer_code === 'enterprise' ? '企业钱包到账成功' : '到账成功'; if (status) status.textContent = successLabel; if (note) note.textContent = order.creditMessage + (order.creditedAmountMicros ? ' ' + money({ micros: order.creditedAmountMicros }) : '') + '，正在刷新账户信息。'; await Promise.all([loadOverview(), loadRecharge()]) } else if (order.status === 'paid' && order.creditStatus === 'inconsistent') { if (status) status.textContent = '到账核对异常'; if (note) note.textContent = order.creditMessage || '支付已成功，但到账记录暂未核对一致，请联系客服。' } else if (order.status === 'paid') { if (status) status.textContent = '支付成功'; if (note) note.textContent = order.creditMessage || '正在自动核对到账，请稍候。' } else if (['failed', 'expired', 'closed'].includes(order.status)) { clearInterval(timer); paymentTimers.delete(targetId); const labels = { failed: '失败', expired: '已过期', closed: '已关闭' }; if (status) status.textContent = '订单' + (labels[order.status] || order.status); if (note) note.textContent = '请重新创建订单。' } } catch { /* keep polling while the session is valid */ }
         finally { paymentPollInFlight = false }
       }, 3000)
+      paymentTimers.set(targetId, timer)
     }
   }
   async function loadUsage(reset) {
@@ -659,10 +673,6 @@
     return table([], [])
   }
   async function loadAdmin(tab) {
-    if (!document.querySelector('[data-admin-tab="overview"]')) {
-      const first = document.querySelector('.admin-tabs .tab');
-      if (first) first.insertAdjacentHTML('beforebegin', '<button class="tab" type="button" data-admin-tab="overview">经营概览</button>')
-    }
     state.adminTab = tab
     $$('.admin-tabs .tab').forEach((node) => node.classList.toggle('active', node.dataset.adminTab === tab))
     const endpoints = { 'media-admin': '/api/admin/media', overview: '/api/admin/overview', channels: '/api/admin/channels', 'channel-costs': '/api/admin/channel-costs', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', 'enterprise-leads': '/api/admin/enterprise-leads', settings: '/api/admin/settings' }
@@ -796,6 +806,9 @@
   }
 
   const mediaForm = $('#media-form')
+  $('#media-tasks').setAttribute('aria-live', 'polite')
+  $('#media-tasks').setAttribute('aria-label', '创作任务状态')
+  $('#media-create').textContent = '确认报价并生成'
   let mediaQuote = null, mediaNonce = null, mediaTimer = null, quoteTimer = null, quoteVersion = 0, mediaBusy = false, originalPrompt = null
   const mediaTaskInputs = new Map()
   function mediaPayload() {
@@ -832,7 +845,7 @@
       const labels={queued:'等待生成资源',submitting:'正在安排生成',processing:'生成中',unknown:'正在确认生成状态',completed:'已完成',failed:'失败，额度已自动退回'}
       const statusLabel=t=>t.kind==='video'&&t.queueStatus==='waiting'?'等待生成资源':t.kind==='video'&&t.queueStatus==='switching'?'正在切换生成服务':t.kind==='video'&&t.queueStatus==='accepted'?'视频生成中':labels[t.status]||'处理中'
       const statusMessage=t=>t.resultUrl?'':t.status==='failed'?(t.error||'暂时无法安排生成，额度已全部退回'):t.kind==='video'&&t.queueStatus==='waiting'?'系统会自动安排生成，请耐心等待':t.kind==='video'&&t.queueStatus==='switching'?'正在尝试可用生成服务':t.kind==='video'&&t.queueStatus==='accepted'?'视频正在生成中':'等待生成'
-      $('#media-tasks').innerHTML=table(['类型 / 时间','进度','钱包额度','结果','操作'],tasks.items.map(t=>'<tr><td>'+(t.kind==='video'?'视频生成':'图片生成')+'<small class="subline">'+date(t.createdAt)+'</small></td><td>'+esc(statusLabel(t))+' '+Number(t.progress)+'%</td><td>'+money({micros:t.chargeMicros})+' · '+(t.gift?'免费福利 · '+(t.reserved?'使用中':t.status==='completed'?'已使用':'已退回'):t.charged?'已扣费':t.reserved?'冻结中':t.refundStatus==='returned'?'已自动退回':'已释放')+'</td><td>'+(t.resultUrl?'<a href="'+esc(t.resultUrl)+'" target="_blank" rel="noopener noreferrer">查看 / 下载作品</a>':esc(statusMessage(t)))+(t.nextRetryAt&&!t.resultUrl?'<small class="subline">下次自动处理：'+date(t.nextRetryAt)+'</small>':'')+'</td><td>'+(t.canCancel?'<button class="small-button danger-button" type="button" data-media-cancel="'+esc(t.id)+'">取消排队</button>':t.canRetry?'<button class="small-button" type="button" data-media-retry="'+esc(t.id)+'">'+(t.status==='completed'?'再次创作':'重新生成')+'</button>':'—')+'</td></tr>'))
+      const taskRows=tasks.items.map(t=>{const progress=Math.max(0,Math.min(100,Number(t.progress)||0));const state=t.status==='failed'?'bad':t.status==='completed'?'good':'pending';const moneyState=t.gift?'免费福利 · '+(t.reserved?'使用中':t.status==='completed'?'已使用':'已退回'):t.charged?'已扣费':t.reserved?'冻结中':t.refundStatus==='returned'?'已自动退回':'已释放';const result=t.resultUrl?'<a href="'+esc(t.resultUrl)+'" target="_blank" rel="noopener noreferrer">查看 / 下载作品</a>':esc(statusMessage(t));const action=t.canCancel?'<button class="small-button danger-button" type="button" data-media-cancel="'+esc(t.id)+'">取消排队</button>':t.canRetry?'<button class="small-button" type="button" data-media-retry="'+esc(t.id)+'">'+(t.status==='completed'?'再次创作':'重新生成')+'</button>':'—';return '<tr><td data-label="类型 / 时间"><strong>'+(t.kind==='video'?'视频生成':'图片生成')+'</strong><small class="subline">'+date(t.createdAt)+'</small></td><td data-label="进度"><span class="media-task-state '+state+'">'+esc(statusLabel(t))+'</span><progress max="100" value="'+progress+'" aria-label="生成进度 '+progress+'%">'+progress+'%</progress><small class="subline">'+progress+'%</small></td><td data-label="钱包额度">'+money({micros:t.chargeMicros})+' · '+moneyState+'</td><td data-label="结果">'+result+(t.nextRetryAt&&!t.resultUrl?'<small class="subline">下次自动处理：'+date(t.nextRetryAt)+'</small>':'')+'</td><td data-label="操作">'+action+'</td></tr>'}).join('');$('#media-tasks').innerHTML=table(['类型 / 时间','进度','钱包额度','结果','操作'],taskRows,'暂无创作任务')
       if(tasks.items.some(t=>t.reserved||(!['completed','failed'].includes(t.status)))&&!document.hidden&&$('#view-media').classList.contains('active-view'))mediaTimer=setTimeout(loadMedia,5000)
     } catch(error){$('#media-error').textContent=error.message}
   }
@@ -931,18 +944,18 @@
   $('#media-restore').addEventListener('click',()=>{if(originalPrompt!==null){$('#media-prompt').value=originalPrompt;originalPrompt=null;$('#media-restore').classList.add('hidden');$('#media-expand-status').textContent='已恢复原文';scheduleMediaQuote()}})
   document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(mediaTimer)}else if($('#view-media').classList.contains('active-view')&&state.user)loadMedia()})
   updateMediaControls()
-  let chatId=null, chatController=null, chatPoll=null, chatPending=null, chatEpoch=0
+  let chatId=null, chatController=null, chatPoll=null, chatPending=null, chatEpoch=0, chatQuotaBlocked=false
   const chatDrafts=new Map()
   const chatStorage=()=> 'chat-pending-'+state.user.id
   const chatVisible=()=> !document.hidden && $('#view-chat').classList.contains('active-view')
   function sizeChatInput(){const input=$('#chat-input');input.style.height='0px';input.style.height=Math.min(168,Math.max(56,input.scrollHeight))+'px'}
-  function chatBusy(busy){$('#chat-send').classList.toggle('hidden',busy);$('#chat-stop').classList.toggle('hidden',!busy);$('#chat-input').readOnly=busy;$('#chat-new').disabled=busy;$('#chat-mobile-new').disabled=busy;$('#chat-delete').disabled=busy||!chatId;$('#chat-stop').disabled=!chatController}
+  function chatBusy(busy){$('#chat-send').classList.toggle('hidden',busy);$('#chat-stop').classList.toggle('hidden',!busy);$('#chat-input').readOnly=busy;$('#chat-new').disabled=busy;$('#chat-mobile-new').disabled=busy;$('#chat-delete').disabled=busy||!chatId;$('#chat-stop').disabled=!chatController;$('#chat-send').disabled=busy||chatQuotaBlocked;$('#chat-send').title=chatQuotaBlocked?'今日免费次数已用完，请明日再试':'发送消息'}
   function chatBottom(){const b=$('#chat-messages');b.scrollTop=b.scrollHeight;$('#chat-latest').classList.add('hidden')}
   function chatNearBottom(){const b=$('#chat-messages');return b.scrollHeight-b.scrollTop-b.clientHeight<100}
   function chatSaveDraft(){chatDrafts.set(chatId||'new',$('#chat-input').value)}
-  async function selectChat(id){if(chatController||chatPending)return;chatSaveDraft();chatId=id;$('#chat-input').value=chatDrafts.get(id)||'';sizeChatInput();$('#chat-history-dialog').close();await loadChat(true)}
+  async function selectChat(id){if(chatController||chatPending)return;chatSaveDraft();chatId=id;$('#chat-input').value=chatDrafts.get(id)||'';$('#chat-error').textContent='';sizeChatInput();$('#chat-history-dialog').close();await loadChat(true)}
   function chatArticle(role,text,status=false){const a=document.createElement('article');a.className='chat-message '+(role==='你'?'chat-user':'chat-answer');const label=document.createElement('strong');label.textContent=role;const p=document.createElement('p');p.textContent=text;if(status)p.className='chat-message-status';a.append(label,p);if(role==='AI'&&!status){const copy=document.createElement('button');copy.type='button';copy.className='chat-copy';copy.textContent='复制回答';copy.onclick=async()=>{try{await copyText(text);toast('回答已复制')}catch(e){toast(e.message,true)}};a.append(copy)}return a}
-  function renderChat(items,force=false){const box=$('#chat-messages'),near=force||chatNearBottom(),top=box.scrollTop;box.replaceChildren();if(!items.length&&!chatPending){const empty=document.createElement('div');empty.className='chat-empty';const h=document.createElement('h4');h.textContent='今天，想聊些什么？';const p=document.createElement('p');p.textContent='写下问题，或从下面的灵感开始。';empty.append(h,p);for(const text of ['帮我安排一周简单又营养的晚餐','帮我写一段温暖的生日祝福','帮我规划一个轻松的周末']){const b=document.createElement('button');b.type='button';b.textContent=text;b.onclick=()=>{$('#chat-input').value=text;chatSaveDraft();sizeChatInput();$('#chat-input').focus()};empty.append(b)}box.append(empty)}
+  function renderChat(items,force=false){const box=$('#chat-messages'),near=force||chatNearBottom(),top=box.scrollTop;box.replaceChildren();if(!items.length&&!chatPending){const empty=document.createElement('div');empty.className='chat-empty';const h=document.createElement('h4');h.textContent='今天，想聊些什么？';const p=document.createElement('p');p.textContent='从一个具体任务开始，AI 会帮你把想法整理成结果。';empty.append(h,p);for(const text of ['帮我生成一段生图提示词','帮我写一个短剧分镜大纲','把这段文案改得更专业','帮我设计一个 API 调用示例']){const b=document.createElement('button');b.type='button';b.className='chat-suggestion';b.setAttribute('aria-label','使用快捷提问：'+text);b.textContent=text;b.onclick=()=>{$('#chat-input').value=text;chatSaveDraft();sizeChatInput();$('#chat-input').focus()};empty.append(b)}box.append(empty)}
     for(const t of items){box.append(chatArticle('你',t.content));box.append(chatArticle('AI',t.status==='completed'?t.answer:t.error_message||'正在回复…',t.status!=='completed'))}
     if(chatPending&&chatPending.conversation===chatId&&!items.some(t=>t.request_id===chatPending.id)){box.append(chatArticle('你',chatPending.content),chatArticle('AI',chatPending.unknown?'正在确认结果，请勿重复发送…':'正在回复…',true))}
     if(near)chatBottom();else{box.scrollTop=top;$('#chat-latest').classList.remove('hidden')}
@@ -951,10 +964,10 @@
   async function loadChat(force=false){if(!state.user)return;const epoch=++chatEpoch;try{
     if(!chatPending){try{chatPending=JSON.parse(sessionStorage.getItem(chatStorage())||'null');if(chatPending&&!chatId)chatId=chatPending.conversation}catch{}}
     const [quota,list]=await Promise.all([api('/api/me/chat/quota'),api('/api/me/chat/conversations')]);if(epoch!==chatEpoch)return
-    $('#chat-quota').textContent='今日剩余 '+Math.max(0,quota.limit-quota.used)+' / '+quota.limit+' 次'+(quota.platformAvailable?'':' · 全站今日次数已用完')
+    const remaining=Math.max(0,quota.limit-quota.used);chatQuotaBlocked=remaining<=0||quota.platformAvailable===false;const quotaNode=$('#chat-quota');quotaNode.textContent='今日剩余 '+remaining+' / '+quota.limit+' 次'+(quota.platformAvailable?'':' · 全站今日次数已用完');quotaNode.dataset.state=chatQuotaBlocked?'blocked':remaining<=Math.ceil(quota.limit*.1)?'warning':'ready';quotaNode.setAttribute('aria-live','polite')
     if(!chatId&&list.items.length)chatId=list.items[0].id
     const current=list.items.find(t=>t.id===chatId);$('#chat-title').textContent=current?.title||'新对话';$('#chat-title').title=current?.title||'新对话'
-    for(const selector of ['#chat-list','#chat-mobile-list']){const box=$(selector);box.replaceChildren();for(const item of list.items){const b=document.createElement('button');b.type='button';b.className='chat-history-item';b.textContent=item.title;b.title=item.title;b.setAttribute('aria-current',String(item.id===chatId));b.onclick=()=>selectChat(item.id).catch(e=>$('#chat-error').textContent=e.message);box.append(b)}}
+    for(const selector of ['#chat-list','#chat-mobile-list']){const box=$(selector);box.replaceChildren();for(const item of list.items){const b=document.createElement('button');b.type='button';b.className='chat-history-item';b.title=item.title;b.setAttribute('aria-current',String(item.id===chatId));const title=document.createElement('span');title.textContent=item.title;const meta=document.createElement('small');meta.textContent=item.updated_at?date(item.updated_at):'';b.append(title,meta);b.onclick=()=>selectChat(item.id).catch(e=>$('#chat-error').textContent=e.message);box.append(b)}}
     const result=chatId?await api('/api/me/chat/conversations/'+chatId+'/messages'):{items:[]};if(epoch!==chatEpoch)return
     const terminal=chatPending&&result.items.find(t=>t.request_id===chatPending.id&&t.status!=='pending')
     if(terminal){if(terminal.status==='completed'){$('#chat-input').value='';chatDrafts.delete(chatId);$('#chat-error').textContent=''}else{$('#chat-input').value=terminal.content;$('#chat-error').textContent=terminal.error_message||'生成失败，请重试'}chatPending=null;sessionStorage.removeItem(chatStorage());sizeChatInput()}
@@ -971,7 +984,7 @@
   $('#chat-history-close').onclick=()=>$('#chat-history-dialog').close()
   $('#chat-history-dialog').onclick=e=>{if(e.target===e.currentTarget){const r=e.currentTarget.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)e.currentTarget.close()}}
   $('#chat-delete').onclick=async()=>{if(!chatId||chatController||chatPending||!confirm('删除当前对话？对话将从历史列表移除，账单保留。'))return;try{await api('/api/me/chat/conversations/'+chatId,{method:'DELETE'});chatDrafts.delete(chatId);chatId=null;$('#chat-input').value='';await loadChat(true)}catch(e){$('#chat-error').textContent=e.message}}
-  $('#chat-new').onclick=async()=>{if(chatController||chatPending)return;try{chatSaveDraft();const row=await api('/api/me/chat/conversations',{method:'POST',body:'{}'});chatId=row.id;$('#chat-input').value='';sizeChatInput();$('#chat-history-dialog').close();await loadChat(true);$('#chat-input').focus()}catch(e){$('#chat-error').textContent=e.message}}
+  $('#chat-new').onclick=async()=>{if(chatController||chatPending)return;try{$('#chat-error').textContent='';chatSaveDraft();const row=await api('/api/me/chat/conversations',{method:'POST',body:'{}'});chatId=row.id;$('#chat-input').value='';sizeChatInput();$('#chat-history-dialog').close();await loadChat(true);$('#chat-input').focus()}catch(e){$('#chat-error').textContent=e.message}}
   $('#chat-mobile-new').onclick=()=>$('#chat-new').click()
   $('#chat-stop').onclick=()=>{chatController?.abort();$('#chat-error').textContent='已请求停止，正在确认最终结果。'}
   $('#chat-form').onsubmit=async event=>{event.preventDefault();if(chatController||chatPending&&!chatPending.retryable)return;const content=$('#chat-input').value.trim();if(!content)return
@@ -1077,7 +1090,7 @@
   })
   $('#topup-form').addEventListener('submit', async (event) => {
     event.preventDefault(); const button = event.currentTarget.querySelector('[type="submit"]'); const data = new FormData(event.currentTarget); pending(button, true, '正在创建…')
-    try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'wallet_topup', offerCode: 'standard', amountMicros: yuanToMicros(data.get('amount')).toString(), paymentMethod: 'wechat' }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }
+    try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'wallet_topup', offerCode: 'standard', amountMicros: yuanToMicros(data.get('amount')).toString(), paymentMethod: 'wechat' }) }), 'payment-result', '普通钱包充值') } catch (error) { toast(error.message, true) } finally { pending(button, false) }
   })
   $('#topup-form [name="amount"]').addEventListener('input', updateTopupCreditHint)
   $('#enterprise-topup-form').addEventListener('submit', async (event) => {
@@ -1089,7 +1102,7 @@
       if (amountMicros % 10000n !== 0n) throw new Error('企业充值金额最多保留两位小数')
       if (amountMicros < toMicros(state.enterpriseOffer.minimumAmountMicros)) throw new Error('企业充值最低 ' + money({ micros: state.enterpriseOffer.minimumAmountMicros }))
       error.textContent = ''; pending(button, true, '正在创建…')
-      renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'wallet_topup', offerCode: 'enterprise', amountMicros: amountMicros.toString(), paymentMethod: 'wechat' }) }))
+      renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'wallet_topup', offerCode: 'enterprise', amountMicros: amountMicros.toString(), paymentMethod: 'wechat' }) }), 'enterprise-payment-result', '企业钱包充值')
     } catch (submitError) { error.textContent = submitError.message; toast(submitError.message, true) } finally { pending(button, false) }
   })
   $('#enterprise-topup-form [name="amount"]').addEventListener('input', updateEnterpriseTopupHint)
@@ -1107,7 +1120,7 @@
   $('#enterprise-lead-form').addEventListener('input', (event) => { event.currentTarget.dataset.dirty = 'true' })
   $('#plans').addEventListener('click', async (event) => {
     const button = event.target.closest('.buy-plan'); if (!button) return; pending(button, true, '正在创建…')
-    try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'subscription', planId: button.dataset.id, amountMicros: button.dataset.amount, paymentMethod: 'wechat' }) })) } catch (error) { toast(error.message, true) } finally { pending(button, false) }
+    try { renderPayment(await api('/api/orders', { method: 'POST', body: JSON.stringify({ kind: 'subscription', planId: button.dataset.id, amountMicros: button.dataset.amount, paymentMethod: 'wechat' }) }), 'plan-payment-result', '30 天套餐') } catch (error) { toast(error.message, true) } finally { pending(button, false) }
   })
   $('#affiliate-convert').addEventListener('click', async (event) => {
     const button = event.currentTarget; pending(button, true, '兑换中…')
