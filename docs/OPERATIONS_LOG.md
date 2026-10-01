@@ -374,3 +374,11 @@
 - 未验证生产登录后的完整账户流程；无测试账号说明。真实支付与图片/视频生成未执行：生产支付是真实商户渠道，媒体会调用收费上游；完成这些测试前需确定支付金额上限、扫码付款人及单次媒体钱包/供应商成本预算。真实上游 413 重试也未发起，需有效账户且请求可能产生供应商费用。
 - 后续只读生产核验：首页、登录、注册静态路由、v1.0.102 脚本和 API health 均为 200；线上脚本哈希 `e969374fb49785122ae8b53b0e5671f942125f1863587feb7f1c9186ea24d162` 与 `origin/main:public/app.js` 一致。工作区脚本包含未发布的额度拦截修复，哈希不同。未登录的 `/api/orders` 和 `/api/me/media/quote` 均返回 401，未产生订单/媒体调用。
 - 管理员浏览器 E2E：登录和个人总览、只读后台经营概览均返回 200，管理后台可见且概览加载完成；退出后未认证个人总览返回 401。测试期间没有提交支付、媒体生成、用户/渠道/价格/站点配置或订单写操作，未保存账号凭据和业务数据。
+
+## 聊天额度拦截：v1.0.103 生产发布（2026-10-01 CST）
+
+- 提交 `bb748fe` 已推送 `origin/main`。聊天额度耗尽时，前端现在阻止按钮、桌面 Enter 和脚本 `requestSubmit()` 进入发送流程，避免先创建空会话再收到 429；服务端仍是最终配额边界。`/responses` 的 413 备用渠道回归随版本保留。
+- 发布前备份 `/opt/relay-station-backups/pre-v1.0.103-chat-quota-20261001T044353Z/` 已完成并校验：PostgreSQL custom dump 340,533,393 bytes，`pg_restore --list` 通过，`.env` 权限 0600，旧 `relay-station:v1.0.102` 镜像信息已保存。发布归档为 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.103/relay-station-v1.0.103.tar.gz`。
+- `docker compose run --rm migration` 成功，生产两个 API 副本已滚动更新为 `relay-station:v1.0.103` 并 healthy；Gateway、PostgreSQL、Redis healthy，`relay-station-worker.timer` active/enabled。`https://www.hhtc.top/healthz`、`https://www.hhtc.top/api/v1/health`、`https://api.hhtc.top/healthz` 返回 200，首页实际加载 `app.js?v=1.0.103`，线上脚本 SHA-256 `152c9e0e2b41c1c97c9c6b6a09c6a784e0687904862c1d1ebcea0abcb315e85d` 与源码一致。
+- 生产管理员浏览器复核通过：登录、`/api/me/overview` 和只读 `/api/admin/overview` 均返回 200，经营概览页面加载完成；退出后 `/api/me/overview` 返回 401。测试期间没有后台写操作、支付订单、媒体任务或真实上游调用。
+- 本地验证为 25 个测试文件 / 295 项测试通过，TypeScript 检查、构建、`public/app.js` 语法检查和 `git diff --check` 通过。真实支付、媒体生成和真实上游 413 重试仍未执行，避免产生费用；如果所有上游网关都拒绝同一大请求，仍需缩小请求体或提高提供商限制。

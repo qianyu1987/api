@@ -212,3 +212,10 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 - 未发起真实大请求或付费模型调用。若请求仍大于所有已配置上游网关的限制，最终仍会返回 413；需压缩上下文/移除大日志或图片，或请相应提供商提高请求体限制。
 - 2026-10-01 后续只读生产核验：`www.hhtc.top/`、`/login`、`/register`、`/app.js?v=1.0.102` 和 `/api/v1/health` 均返回 200；脚本 SHA-256 `e969374fb49785122ae8b53b0e5671f942125f1863587feb7f1c9186ea24d162` 与 `origin/main:public/app.js` 一致。当前工作区 `public/app.js` 含未发布聊天额度拦截，哈希不同，不可当成生产文件。无会话钱包下单与无认证媒体报价均返回 401，未创建订单或触发媒体供应商。匿名浏览器页面/响应检查与无 Key 的 20 MiB 入口边界测试不等于认证业务端到端、真实支付、媒体出片或上游 413 故障切换。
 - 提供管理员测试账号后完成生产浏览器认证检查：登录、`/api/me/overview`、只读 `/api/admin/overview` 均返回 200，管理员导航与经营概览正常；退出后公开界面恢复，个人总览请求返回 401。未访问或调用后台写入操作，也未执行真实支付或媒体生成；未在记录中保存凭据或业务数据。
+
+## 2026-10-01 聊天额度拦截：v1.0.103
+
+- 提交 `bb748fe` 已推送 `origin/main`。前端在额度耗尽时同时拦截发送按钮、桌面 Enter 和脚本 `requestSubmit()`；服务端原有配额拒绝仍保留。HTTP 413 渠道故障切换回归也随本版本保留。
+- 发布前备份为 `/opt/relay-station-backups/pre-v1.0.103-chat-quota-20261001T044353Z/`，PostgreSQL custom dump 为 340,533,393 bytes 且 `pg_restore --list` 通过；生产 `.env` 权限保持 0600，旧 `relay-station:v1.0.102` 镜像信息已保存。发布归档位于 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.103/relay-station-v1.0.103.tar.gz`。
+- `docker compose run --rm migration` 成功；生产两个 API 副本均为 `relay-station:v1.0.103` / healthy，Gateway、PostgreSQL、Redis healthy，`relay-station-worker.timer` active/enabled。`https://www.hhtc.top/healthz`、`https://www.hhtc.top/api/v1/health`、`https://api.hhtc.top/healthz` 返回 200；首页加载 `app.js?v=1.0.103`，线上脚本 SHA-256 为 `152c9e0e2b41c1c97c9c6b6a09c6a784e0687904862c1d1ebcea0abcb315e85d`，与源码一致。
+- 管理员浏览器复核通过：登录、个人总览和只读管理概览均为 200，管理后台经营概览可见；退出后 `/api/me/overview` 返回 401。测试未执行后台写操作、支付、媒体生成或真实上游请求；未记录账号凭据或业务数据。
