@@ -33,7 +33,7 @@ function routing() {
     if (sql.includes('failure_count = 0')) row.circuit_open_until = null
     return []
   }) }
-  return { rows, service: new ChannelService(db as any, config) }
+  return { rows, db, service: new ChannelService(db as any, config) }
 }
 function respond(host: string, status = 200, responseModel = model) {
   agent.get(`http://${host}.test`).intercept({ path: '/v1/chat/completions', method: 'POST' })
@@ -92,6 +92,14 @@ describe('sol fallback routing', () => {
     const result = await call(service)
     expect(result.channel.id).toBe('fallback')
     expect(result.attempts.map(a => a.statusCode)).toEqual([status, 200]); await result.response.body.dump()
+  })
+  test('fails over provider payload limits without opening a channel circuit', async () => {
+    const { service, db } = routing(); respond('real', 413); respond('fallback', 200, upstream)
+    const result = await call(service)
+    expect(result.channel.id).toBe('fallback')
+    expect(result.attempts.map(a => a.statusCode)).toEqual([413, 200])
+    expect(db.query.mock.calls.some(([sql]) => String(sql).includes('failure_count = failure_count + 1'))).toBe(false)
+    await result.response.body.dump()
   })
   test.each(['UND_ERR_HEADERS_TIMEOUT', 'ECONNRESET'])('fails over %s', async code => {
     const { service } = routing()

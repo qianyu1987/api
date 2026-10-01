@@ -82,7 +82,7 @@ describe('channel failover policy', () => {
     const body = rewriteRequestBody(Buffer.from(JSON.stringify(input)), 'gpt-5.5', 'agnes-2.5-flash', '/responses?stream=true')
     expect(JSON.parse(String(body))).toEqual({ ...input, model: 'agnes-2.5-flash' })
   })
-  test.each([401, 403, 408, 429, 500, 502, 503, 599])('fails over retryable provider HTTP %i', (status) => {
+  test.each([401, 403, 408, 413, 429, 500, 502, 503, 599])('fails over retryable provider HTTP %i', (status) => {
     expect(shouldFailover(status)).toBe(true)
   })
 

@@ -105,7 +105,7 @@ function shouldFailover(status: number): boolean {
   // should not block another configured channel from serving the model.
   // The relay still returns the final provider response when every channel
   // fails, so client errors remain visible to the caller.
-  return status === 401 || status === 403 || status === 408 || status === 429 || status >= 500
+  return status === 401 || status === 403 || status === 408 || status === 413 || status === 429 || status >= 500
 }
 
 export function isInvalidApiResponse(status: number, headers: Record<string, unknown>): boolean {
@@ -413,7 +413,9 @@ export class ChannelService {
           await this.markSuccess(channel.id).catch(() => undefined)
           return { response, channel, attempts, upstreamModel, ...(agnesResponses ? { responseAdapter: 'agnes_responses' as const } : {}) }
         }
-        await this.markFailure(channel.id).catch(() => undefined)
+        // A 413 can depend on the size limit of this provider's gateway. Try
+        // another channel, but don't open a circuit for a request-specific limit.
+        if (response.statusCode !== 413) await this.markFailure(channel.id).catch(() => undefined)
         // A retryable response can only be returned when it is the final
         // channel attempt. Earlier bodies must be drained before failover; do
         // not retain one of those drained responses and accidentally return it
