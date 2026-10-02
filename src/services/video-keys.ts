@@ -369,6 +369,8 @@ export class VideoKeyService {
       await client.query(`UPDATE video_key_usage_daily SET reserved_seconds=GREATEST(0,reserved_seconds-$3),used_seconds=used_seconds+$3,updated_at=now() WHERE key_id=$1 AND usage_day=$2`, [task.video_provider_key_id, task.quota_day, amount])
       await client.query(`UPDATE media_tasks SET quota_seconds_used=quota_seconds_used+$2,quota_seconds_reserved=0,upstream_id=COALESCE(upstream_id,$3) WHERE id=$1 AND upstream_id IS NULL`, [taskId, amount, upstreamTaskId])
       await client.query(`UPDATE video_provider_keys SET success_count=success_count+1,last_success_at=now(),failure_count=0,cooldown_until=NULL,updated_at=now() WHERE id=$1`, [task.video_provider_key_id])
+      await client.query(`UPDATE video_attempts SET outcome='accepted',accepted=true,upstream_task_id=$2
+        WHERE task_id=$1 AND attempt_no=(SELECT max(attempt_no) FROM video_attempts WHERE task_id=$1)`, [taskId, upstreamTaskId])
       return true
     })
   }
