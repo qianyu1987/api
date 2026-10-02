@@ -594,6 +594,15 @@ td.admin-action-cell { display: table-cell; vertical-align: middle; }
 .admin-tab-group { display: inline-flex; align-items: center; gap: 2px; padding: 4px; border: 1px solid var(--line); background: #f8fbfa; flex: none; }
 .admin-tab-label { padding: 0 8px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; white-space: nowrap; }
 .admin-tab-group .tab { min-height: 40px; padding: 0 12px; border-bottom-width: 2px; }
+.video-channel-summary { margin-bottom: 0; }
+.video-key-quota { min-width: 150px; display: grid; gap: 5px; }
+.video-key-quota progress { width: 100%; height: 7px; accent-color: var(--accent); }
+.video-key-quota small { color: var(--muted); font-variant-numeric: tabular-nums; }
+.video-key-actions { min-width: 250px; max-width: 360px; }
+.video-price-panel { display: grid; grid-template-columns: minmax(200px, .8fr) minmax(320px, 1.2fr); gap: 18px; padding: 18px 20px; border: 1px solid var(--line); background: var(--surface); }
+.video-price-panel > div { min-width: 0; }
+.video-price-panel strong { display: block; margin: 2px 0 4px; font-size: 21px; }
+.video-price-panel .admin-note { margin: 0; }
 #chat-quota { display: inline-flex; align-items: center; gap: 6px; width: fit-content; padding: 3px 8px; border-radius: 999px; background: #edf5f3; color: #356761; }
 #chat-quota[data-state="warning"] { background: #fff7e6; color: #7a4c08; }
 #chat-quota[data-state="blocked"] { background: #fcefed; color: var(--danger); }
@@ -619,6 +628,7 @@ td.admin-action-cell { display: table-cell; vertical-align: middle; }
   .media-flow-guide i { flex: none; }
   .admin-tabs { display: flex; overflow-x: auto; flex-wrap: nowrap; margin-right: -16px; padding-right: 16px; }
   .admin-tab-group { flex: none; }
+  .video-price-panel { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 600px) {

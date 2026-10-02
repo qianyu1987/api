@@ -564,6 +564,58 @@
       const m = data.metrics || {}; const mv = (v) => v?.yuan || '0'
       return '<div class="summary-strip"><span>请求 <strong>' + integer(m.requests) + '</strong></span><span>收入 <strong>' + mv(m.revenue) + '</strong></span><span>模型成本 <strong>' + mv(m.cost) + '</strong></span><span>毛利 <strong>' + mv(m.grossProfit) + '</strong></span><span>返利 <strong>' + mv(m.rebates) + '</strong></span><span>净利润 <strong>' + mv(m.netProfit) + '</strong></span></div><div class="notice">最低毛利线：' + ((data.minimumMarginBps || 3000) / 100) + '% · 未处理告警：' + (data.alerts || []).length + '</div>' + ((data.alerts || []).length ? '<div class="notice"><ul>' + data.alerts.map(alert => '<li>' + esc(alert.message) + '</li>').join('') + '</ul></div>' : '') + (m.pendingCostRequests ? '<p class="admin-note">本期 ' + integer(m.pendingCostRequests) + ' 笔兜底请求尚无经核实的渠道成本，以上成本和利润包含估算。</p>' : '') + table(['渠道', '请求', '失败', '状态'], (data.channels || []).map((c) => '<tr><td>' + esc(c.name) + '</td><td>' + integer(c.requests) + '</td><td>' + integer(c.failures) + '</td><td>' + (c.circuit_open_until && new Date(c.circuit_open_until).getTime() > Date.now() ? '<span class="state bad">熔断</span>' : '<span class="state good">正常</span>') + '</td></tr>'), '暂无渠道数据')
     }
+    if (tab === 'video-channels') {
+      const keys = data.keys || data.items || []
+      const queue = data.queue || data.tasks || []
+      const summary = data.summary || data.metrics || {}
+      const pricing = data.pricing || data.price || {}
+      const number = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback
+      const seconds = (value) => number(value).toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+      const keyLimit = item => number(item.dailyLimitSeconds ?? item.daily_limit_seconds ?? item.limitSeconds ?? item.limit_seconds, 500)
+      const keyUsed = item => number(item.usedSeconds ?? item.used_seconds ?? item.quotaSecondsUsed ?? item.quota_seconds_used)
+      const keyReserved = item => number(item.reservedSeconds ?? item.reserved_seconds ?? item.quotaSecondsReserved ?? item.quota_seconds_reserved)
+      const keyRemaining = item => Math.max(0, keyLimit(item) - keyUsed(item) - keyReserved(item))
+      const masked = item => item.maskedKey || item.masked_key || (item.keyLast4 || item.key_last4 ? '••••' + String(item.keyLast4 || item.key_last4) : '已加密保存')
+      const statusLabel = item => {
+        const status = String(item.status || '').toLowerCase()
+        if (item.enabled === false || status === 'disabled' || status === 'paused') return '<span class="state bad">已暂停</span>'
+        if (item.circuitOpen || item.circuit_open_until || status === 'circuit_open' || status === 'circuit-open') return '<span class="state bad">熔断冷却</span>'
+        if (item.probeStatus === 'failed' || item.probe_status === 'failed' || status === 'probe_failed') return '<span class="state bad">待探测</span>'
+        if (keyRemaining(item) <= 0) return '<span class="state bad">今日已用完</span>'
+        if (keyRemaining(item) <= keyLimit(item) * 0.1) return '<span class="state pending">接近上限</span>'
+        return '<span class="state good">可用</span>'
+      }
+      const summaryValue = (keys, names, fallback = 0) => { for (const name of names) if (summary[name] != null) return summary[name]; return fallback }
+      const available = summaryValue(keys, ['availableKeys', 'available_keys'], keys.filter(item => item.enabled !== false && keyRemaining(item) > 0).length)
+      const remaining = summaryValue(keys, ['remainingSeconds', 'remaining_seconds', 'todayRemainingSeconds', 'today_remaining_seconds'], keys.reduce((total, item) => total + keyRemaining(item), 0))
+      const queued = summaryValue(keys, ['queuedTasks', 'queued_tasks', 'queueLength', 'queue_length'], queue.length)
+      const fastest = summaryValue(keys, ['fastestKeyLabel', 'fastest_key_label'], keys.filter(item => item.enabled !== false).sort((a, b) => number(a.p95Ms ?? a.p95_ms ?? a.ewmaMs ?? a.ewma_ms, Infinity) - number(b.p95Ms ?? b.p95_ms ?? b.ewmaMs ?? b.ewma_ms, Infinity))[0]?.accountLabel || '—')
+      const pricePerSecond = pricing.pricePerSecondMicros ?? pricing.price_per_second_micros ?? 35000
+      const guardOk = pricing.available !== false && pricing.enabled !== false && pricing.marginOk !== false && pricing.margin_ok !== false
+      const specs = pricing.specs || [{ seconds: 4 }, { seconds: 10 }, { seconds: 12 }]
+      const specPrices = specs.map(spec => { const length = number(spec.seconds ?? spec.durationSeconds ?? spec.duration_seconds); const micros = spec.priceMicros ?? spec.price_micros ?? (Number(pricePerSecond) * length); return length ? length + ' 秒 ¥' + microsToYuan(micros) : '' }).filter(Boolean).join(' · ')
+      const editor = form('video-key', [
+        field('accountLabel', '账号标签', '', 'text', 'required maxlength="120" placeholder="例如 Agnes 账号 01"'),
+        field('apiKey', 'Agnes Key', '', 'password', 'required autocomplete="new-password" placeholder="仅写入加密存储，不会显示"'),
+        field('dailyLimitSeconds', '每日额度（秒）', '500', 'number', 'min="1" max="86400" required'),
+        field('maxConcurrency', '最大并发', '1', 'number', 'min="1" max="32" required'),
+        field('priority', '优先级', '100', 'number', 'min="0" max="100000" required'),
+        field('timezone', '额度时区', 'Asia/Shanghai', 'text', 'required readonly'),
+        check('enabled', '启用 Key', false),
+        check('videoGenerationEnabled', '允许视频生成', false),
+        check('promptExpansionEnabled', '允许提示词扩展', false),
+        '<p class="admin-note wide">每个 Key 对应一个 Coding Plan 账号。新增或轮换后必须通过无计费连接测试，服务端会按北京时间原子预留每日秒数。</p>'
+      ], '添加 Agnes Key')
+      const rows = keys.map(item => {
+        const limit = keyLimit(item); const used = keyUsed(item); const reserved = keyReserved(item); const pct = Math.max(0, Math.min(100, ((used + reserved) / Math.max(1, limit)) * 100)); const inFlight = number(item.activeTasks ?? item.active_tasks ?? item.currentTasks ?? item.current_tasks); const p50 = item.p50Ms ?? item.p50_ms; const p95 = item.p95Ms ?? item.p95_ms; const serialized = esc(JSON.stringify(item, (name, value) => ['key', 'apiKey', 'encryptedKey', 'encrypted_key', 'secret', 'token'].includes(name) ? undefined : value))
+        return '<tr><td><strong>' + esc(item.accountLabel || item.account_label || '未命名账号') + '</strong><small class="subline">' + masked(item) + '</small></td><td><div class="video-key-quota"><progress max="100" value="' + pct.toFixed(2) + '" aria-label="今日已用 ' + pct.toFixed(0) + '%">' + pct.toFixed(0) + '%</progress><small>' + seconds(used) + ' / ' + seconds(limit) + ' 秒' + (reserved ? ' · 预留 ' + seconds(reserved) : '') + '</small></div></td><td>' + statusLabel(item) + '<small class="subline">并发 ' + inFlight + ' / ' + number(item.maxConcurrency ?? item.max_concurrency, 1) + '</small></td><td>' + (p50 == null ? '—' : seconds(p50) + ' ms') + '<small class="subline">P95 ' + (p95 == null ? '—' : seconds(p95) + ' ms') + '</small></td><td>' + date(item.lastSuccessAt || item.last_success_at) + '<small class="subline">失败 ' + number(item.failureCount ?? item.failure_count) + ' 次</small></td><td><div class="row-actions video-key-actions"><button class="small-button video-key-edit" type="button" data-item="' + serialized + '">编辑</button><button class="small-button" type="button" data-video-key-action="probe" data-id="' + esc(item.id) + '">测试</button><button class="small-button" type="button" data-video-key-action="rotate" data-id="' + esc(item.id) + '">轮换</button><button class="small-button" type="button" data-video-key-action="reset" data-id="' + esc(item.id) + '">重置今日额度</button><button class="small-button danger-button" type="button" data-video-key-action="disable" data-id="' + esc(item.id) + '" data-label="' + esc(item.accountLabel || item.account_label || '') + '" ' + (item.enabled === false ? 'disabled' : '') + '>暂停</button></div></td></tr>'
+      })
+      const queueRows = queue.map(item => '<tr><td><strong>' + esc(item.username || item.userName || '—') + '</strong><small class="subline">' + esc(item.kind === 'video' ? '视频' : item.kind || '—') + '</small></td><td>' + seconds(item.seconds ?? item.durationSeconds ?? item.duration_seconds) + ' 秒</td><td><span class="state ' + (item.status === 'failed' ? 'bad' : item.status === 'completed' ? 'good' : 'pending') + '">' + esc(item.statusLabel || item.status || '排队中') + '</span></td><td>' + esc(item.accountLabel || item.account_label || '待分配') + '</td><td>' + date(item.createdAt || item.created_at || item.queuedAt || item.queued_at) + '</td><td>' + number(item.attempts ?? item.submitAttempts ?? item.submit_attempts) + '</td><td>' + esc(item.lastFailureReason || item.last_failure_reason || '—') + '</td></tr>')
+      const cost = pricing.actualCostPerSecondMicros ?? pricing.actual_cost_per_second_micros ?? pricing.costPerSecondMicros ?? pricing.cost_per_second_micros
+      const margin = pricing.marginPercent ?? pricing.margin_percent
+      const pricingNote = guardOk ? '<span class="state good">可售</span>' : '<span class="state bad">暂不可用</span>'
+      return '<div class="summary-strip video-channel-summary"><span>可用 Key <strong>' + integer(available) + '</strong></span><span>今日剩余 <strong>' + seconds(remaining) + ' 秒</strong></span><span>排队任务 <strong>' + integer(queued) + '</strong></span><span>当前最快 <strong>' + esc(fastest) + '</strong></span></div>' + editor + '<section class="video-price-panel"><div><p class="admin-section-title">视频售价</p><strong>¥' + microsToYuan(pricePerSecond) + ' / 秒</strong><p class="admin-note">' + esc(specPrices || '4 秒 ¥0.14 · 10 秒 ¥0.35 · 12 秒 ¥0.42') + '</p></div><div><p class="admin-section-title">成本与毛利保护</p><p>' + pricingNote + (cost == null ? ' · 实际成本待录入' : ' · 成本 ¥' + microsToYuan(cost) + ' / 秒') + (margin == null ? '' : ' · 毛利 ' + Number(margin).toFixed(2) + '%') + '</p><small class="muted">售价固定为 ¥0.035 / 秒；成本不足时服务端禁止启用规格。</small></div></section>' + table(['账号 / Key', '今日用量', '状态 / 并发', '提交延迟', '最近成功', '操作'], rows, '尚未添加 Agnes Key') + '<div class="section-heading compact-heading"><div><h4>视频队列</h4><p class="muted">仅显示安全摘要，不展示上游任务编号或原始 Key。</p></div></div>' + table(['用户', '时长', '状态', '分配 Key', '排队时间', '尝试', '最后失败原因'], queueRows, '当前没有排队任务')
+    }
     if (tab === 'media-admin') {
       const prices = data.prices || []; const channels = data.channels || []
       const mediaRows=(data.tasks||[]).map(t=>'<tr><td><div class="admin-media-preview">'+(t.result_url?(t.kind==='video'?'<video src="/api/admin/media/tasks/'+esc(t.id)+'/result" muted preload="metadata"></video>':'<img src="/api/admin/media/tasks/'+esc(t.id)+'/result" alt="作品预览" loading="lazy">'):'<span>无结果</span>')+'</div></td><td>'+esc(t.username)+'<small class="subline">'+date(t.created_at)+'</small></td><td>'+(t.kind==='video'?'视频':'图片')+'<small class="subline">'+esc(t.status)+'</small></td><td>'+(t.kind==='video'?(t.accepted_at?'<span class="state good">已接单</span>':'<span class="state '+(t.submit_attempts?'bad':'')+'">'+(t.submit_attempts?'切换中':'排队中')+'</span>'):'—')+'<small class="subline">尝试 '+Number(t.submit_attempts||0)+(t.next_attempt_at?' · 下次 '+date(t.next_attempt_at):'')+'</small>'+(t.error_category?'<small class="subline">'+esc(t.error_category)+'</small>':'')+'</td><td><input class="gallery-title-input" data-gallery-title="'+esc(t.id)+'" maxlength="80" value="'+esc(t.gallery_title||'')+'" placeholder="公开标题"></td><td><span class="state '+(t.gallery_status==='published'?'good':'bad')+'">'+({published:'已发布',hidden:'已隐藏',private:'未发布'}[t.gallery_status]||'未发布')+'</span>'+(t.gallery_featured?'<small class="subline">精选作品</small>':'')+'</td><td><div class="row-actions">'+(t.status==='completed'?'<button class="small-button" type="button" data-gallery-action="publish" data-featured="'+String(t.gallery_featured===true)+'" data-id="'+esc(t.id)+'">发布</button><button class="small-button" type="button" data-gallery-action="feature" data-featured="'+String(t.gallery_featured===true)+'" data-id="'+esc(t.id)+'">'+(t.gallery_featured?'取消精选':'设为精选')+'</button><button class="small-button" type="button" data-gallery-action="hide" data-id="'+esc(t.id)+'">隐藏</button><button class="small-button danger-button" type="button" data-gallery-action="private" data-id="'+esc(t.id)+'">移出广场</button>':'—')+'</div></td></tr>')
@@ -677,7 +729,15 @@
     $$('.admin-tabs .tab').forEach((node) => node.classList.toggle('active', node.dataset.adminTab === tab))
     const endpoints = { 'media-admin': '/api/admin/media', overview: '/api/admin/overview', channels: '/api/admin/channels', 'channel-costs': '/api/admin/channel-costs', prices: '/api/admin/prices', 'fixed-prices': '/api/admin/fixed-prices', plans: '/api/admin/plans', users: '/api/admin/users', orders: '/api/admin/orders', 'admin-usage': '/api/admin/usage', resets: '/api/admin/subscription-resets', 'affiliate-admin': '/api/admin/affiliate', 'enterprise-leads': '/api/admin/enterprise-leads', settings: '/api/admin/settings' }
     $('#admin-content').innerHTML = '<p class="empty">正在加载…</p>'
-    try { $('#admin-content').innerHTML = renderAdmin(tab, await api(endpoints[tab])); if (tab === 'channel-costs') { const editor = $('[data-admin-form="channel-cost"]'); if (state.selectedCostChannel && (state.channelCostData.channels || []).some(c => c.id === state.selectedCostChannel)) setFormValue(editor, 'channelId', state.selectedCostChannel); refreshChannelCostEditor(true) } } catch (error) { $('#admin-content').innerHTML = '<p class="empty">加载失败，请稍后重试</p>'; toast(error.message, true) }
+    try {
+      let data
+      if (tab === 'video-channels') {
+        const [overview, keys, queue] = await Promise.all([api('/api/admin/video/overview'), api('/api/admin/video/keys'), api('/api/admin/video/queue')])
+        data = { ...overview, keys: keys.keys || keys.items || [], queue: queue.queue || queue.items || queue.tasks || [] }
+      } else data = await api(endpoints[tab])
+      $('#admin-content').innerHTML = renderAdmin(tab, data)
+      if (tab === 'channel-costs') { const editor = $('[data-admin-form="channel-cost"]'); if (state.selectedCostChannel && (state.channelCostData.channels || []).some(c => c.id === state.selectedCostChannel)) setFormValue(editor, 'channelId', state.selectedCostChannel); refreshChannelCostEditor(true) }
+    } catch (error) { $('#admin-content').innerHTML = '<p class="empty">加载失败，请稍后重试</p>'; toast(error.message, true) }
   }
 
   let galleryKind = ''
@@ -713,6 +773,13 @@
     if (kind === 'fixed-price') {
       Object.entries({ httpMethod: item.http_method, pathPattern: item.path_pattern, requestedModel: item.requested_model, selectors: JSON.stringify(item.selectors || {}), unitMode: item.unit_mode || 'request', unitPath: item.unit_path || '', costYuan: microsToYuan(item.cost_micros), sellYuan: microsToYuan(item.sell_micros), matchPriority: item.match_priority, enabled: item.enabled }).forEach(([key, value]) => setFormValue(editor, key, value))
       editor.dataset.manualSell = 'true'
+    }
+    if (kind === 'video-key') {
+      Object.entries({ accountLabel: item.accountLabel || item.account_label, dailyLimitSeconds: item.dailyLimitSeconds ?? item.daily_limit_seconds ?? 500, maxConcurrency: item.maxConcurrency ?? item.max_concurrency ?? 1, priority: item.priority ?? 100, timezone: item.timezone || 'Asia/Shanghai', enabled: item.enabled, videoGenerationEnabled: item.videoGenerationEnabled ?? item.video_generation_enabled, promptExpansionEnabled: item.promptExpansionEnabled ?? item.prompt_expansion_enabled }).forEach(([key, value]) => setFormValue(editor, key, value))
+      const key = editor.elements.namedItem('apiKey'); key.value = ''; key.required = false; key.placeholder = '留空则保持现有加密 Key'
+      editor.querySelector('[type="submit"]').textContent = '保存视频 Key'
+      let cancel = editor.querySelector('[data-cancel-video-key-edit]')
+      if (!cancel) { cancel = document.createElement('button'); cancel.type = 'button'; cancel.className = 'button'; cancel.dataset.cancelVideoKeyEdit = ''; cancel.textContent = '取消编辑'; editor.querySelector('.form-actions').prepend(cancel) }
     }
     if (kind === 'plan') Object.entries({ code: item.code, name: item.name, priceYuan: microsToYuan(item.price_micros), quotaYuan: microsToYuan(item.quota_micros), displayOrder: item.display_order, active: item.active && item.enabled }).forEach(([key, value]) => setFormValue(editor, key, value))
     editor.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -765,9 +832,15 @@
       delete payload.discountPercent
     }
     if (kind === 'channel') { try { payload.modelMap = JSON.parse(payload.modelMap || '{}') } catch { throw new Error('模型映射必须是合法 JSON') } }
+    if (kind === 'video-key') {
+      if (!payload.accountLabel?.trim()) throw new Error('请填写账号标签')
+      if (payload.id && !payload.apiKey) delete payload.apiKey
+      if (!payload.timezone) payload.timezone = 'Asia/Shanghai'
+    }
     if (kind === 'fixed-price' && editor.dataset.manualSell !== 'true') delete payload.sellYuan
     const endpoints = { 'media-price': '/api/admin/media/prices', channel: '/api/admin/channels', 'channel-cost': '/api/admin/channel-costs', price: '/api/admin/prices', 'fixed-price': '/api/admin/fixed-prices', plan: '/api/admin/plans', 'affiliate-settings': '/api/admin/affiliate/settings', 'site-settings': '/api/admin/settings/site', 'profit-settings': '/api/admin/settings/profit', 'night-discount-settings': '/api/admin/settings/night-discount' }
-    const method = kind === 'affiliate-settings' || kind === 'profit-settings' || kind === 'night-discount-settings' ? 'PATCH' : kind === 'site-settings' ? 'PUT' : 'POST'
+    const method = kind === 'affiliate-settings' || kind === 'profit-settings' || kind === 'night-discount-settings' ? 'PATCH' : kind === 'site-settings' ? 'PUT' : kind === 'video-key' && payload.id ? 'PATCH' : 'POST'
+    const endpoint = kind === 'video-key' ? '/api/admin/video/keys' + (payload.id ? '/' + encodeURIComponent(payload.id) : '') : endpoints[kind]
     if (kind === 'channel-cost') {
       payload.highContextMultiplierBps = Math.round(10000 + Number(payload.highContextIncreasePercent) * 100)
       payload.expectedUpdatedAt = editor.dataset.expectedUpdatedAt || null
@@ -777,7 +850,7 @@
     const button = editor.querySelector('[type="submit"]'); if (button.disabled) return
     const cancel = editor.querySelector('[data-cancel-channel-edit]'); if (cancel) cancel.disabled = true
     pending(button, true, '保存中…')
-    try { await api(endpoints[kind], { method, body: JSON.stringify(payload) }); toast(kind === 'channel' ? (payload.id ? '渠道修改已保存' : '渠道已新增') : '已保存'); if (kind === 'site-settings') await loadSite(); await loadAdmin(kind === 'affiliate-settings' ? 'affiliate-admin' : state.adminTab) } catch (error) { if (kind === 'channel-cost') $('#channel-cost-error').textContent = error.message; throw error } finally { pending(button, false); if (cancel) cancel.disabled = false }
+    try { await api(endpoint, { method, body: JSON.stringify(payload) }); toast(kind === 'channel' ? (payload.id ? '渠道修改已保存' : '渠道已新增') : kind === 'video-key' ? (payload.id ? '视频 Key 修改已保存' : '视频 Key 已添加') : '已保存'); if (kind === 'site-settings') await loadSite(); await loadAdmin(kind === 'affiliate-settings' ? 'affiliate-admin' : state.adminTab) } catch (error) { if (kind === 'channel-cost') $('#channel-cost-error').textContent = error.message; throw error } finally { pending(button, false); if (cancel) cancel.disabled = false }
   }
   async function deleteAdmin(kind, id, button) {
     const endpoint = { channel: '/api/admin/channels/' + encodeURIComponent(id), price: '/api/admin/prices/' + encodeURIComponent(id), 'fixed-price': '/api/admin/fixed-prices/' + encodeURIComponent(id), plan: '/api/admin/plans/' + encodeURIComponent(id) }[kind]
@@ -1161,12 +1234,39 @@
     try { await submitAdmin(editor) } catch (error) { toast(error.message, true) }
   })
   $('#admin-content').addEventListener('click', async (event) => {
-    const target = event.target; const bootstrap = target.closest('[data-bootstrap]'); const edit = target.closest('.admin-edit'); const remove = target.closest('.admin-delete'); const attempts = target.closest('.admin-attempts'); const resetPlan = target.closest('.admin-reset-plan'); const walletAdjust = target.closest('.wallet-adjust')
+    const target = event.target; const bootstrap = target.closest('[data-bootstrap]'); const edit = target.closest('.admin-edit'); const videoEdit = target.closest('.video-key-edit'); const videoAction = target.closest('[data-video-key-action]'); const remove = target.closest('.admin-delete'); const attempts = target.closest('.admin-attempts'); const resetPlan = target.closest('.admin-reset-plan'); const walletAdjust = target.closest('.wallet-adjust')
     const cancelChannelEdit = target.closest('[data-cancel-channel-edit]')
     if (cancelChannelEdit) {
       const editor = cancelChannelEdit.closest('form'); editor.reset(); editor.elements.namedItem('id')?.remove()
       const key = editor.elements.namedItem('apiKey'); key.required = true; key.placeholder = ''
       editor.querySelector('[type="submit"]').textContent = '新增渠道'; cancelChannelEdit.remove(); editor.elements.namedItem('name').focus(); return
+    }
+    const cancelVideoKeyEdit = target.closest('[data-cancel-video-key-edit]')
+    if (cancelVideoKeyEdit) {
+      const editor = cancelVideoKeyEdit.closest('form'); editor.reset(); editor.elements.namedItem('id')?.remove()
+      const key = editor.elements.namedItem('apiKey'); key.required = true; key.placeholder = '仅写入加密存储，不会显示'
+      editor.querySelector('[type="submit"]').textContent = '添加 Agnes Key'; cancelVideoKeyEdit.remove(); editor.elements.namedItem('accountLabel').focus(); return
+    }
+    if (videoEdit) { try { editAdmin('video-key', JSON.parse(videoEdit.dataset.item)) } catch { toast('无法读取这条视频 Key 配置', true) }; return }
+    if (videoAction) {
+      const id = videoAction.dataset.id; const action = videoAction.dataset.videoKeyAction
+      if (!id) return
+      if (action === 'disable' && !confirm('确定暂停「' + (videoAction.dataset.label || '此视频 Key') + '」？正在生成的任务不会被中断。')) return
+      if (action === 'reset' && !confirm('确定重置此 Key 的今日额度？该操作会写入审计记录。')) return
+      if (action === 'rotate') {
+        const replacement = prompt('粘贴新的 Agnes Key。提交后仅保留加密值，原 Key 会停止接收新任务。', '')
+        if (!replacement?.trim()) return
+        pending(videoAction, true, '轮换中…')
+        try { await api('/api/admin/video/keys/' + encodeURIComponent(id) + '/rotate', { method: 'POST', body: JSON.stringify({ apiKey: replacement.trim() }) }); toast('视频 Key 已轮换，请重新测试后启用'); await loadAdmin('video-channels') } catch (error) { toast(error.message, true); pending(videoAction, false) }
+        return
+      }
+      pending(videoAction, true, action === 'probe' ? '测试中…' : action === 'reset' ? '重置中…' : '暂停中…')
+      try {
+        const endpoint = '/api/admin/video/keys/' + encodeURIComponent(id) + (action === 'probe' ? '/probe' : action === 'reset' ? '/reset-usage' : '')
+        const options = { method: action === 'disable' ? 'PATCH' : 'POST', body: JSON.stringify(action === 'disable' ? { enabled: false, videoGenerationEnabled: false } : action === 'reset' ? { reason: '管理员从视频渠道后台手动重置今日额度' } : {}) }
+        await api(endpoint, options); toast(action === 'probe' ? '连接测试完成' : action === 'reset' ? '今日额度已重置' : '视频 Key 已暂停'); await loadAdmin('video-channels')
+      } catch (error) { toast(error.message, true); pending(videoAction, false) }
+      return
     }
     const orderReconcile=target.closest('[data-order-reconcile]')
     if(orderReconcile){pending(orderReconcile,true,'核对中…');try{const result=await api('/api/admin/orders/'+encodeURIComponent(orderReconcile.dataset.orderReconcile)+'/reconcile',{method:'POST'});toast(result.creditRepaired?'补账完成，审计记录已保存':result.creditMessage||'到账核对完成');await loadAdmin('orders')}catch(e){toast(e.message,true);pending(orderReconcile,false)}return}
