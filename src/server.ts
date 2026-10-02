@@ -664,6 +664,10 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const fixedUnit = priceMode === 'fixed'
       ? BigInt(b.fixedUnitPriceYuan !== undefined ? yuanInput(b.fixedUnitPriceYuan, '视频单秒售价', false) : moneyInput(b.fixedUnitPriceMicros ?? 35000, '视频单秒售价', false))
       : 0n
+    if (priceMode === 'fixed') {
+      const minimumUnitPrice = mediaPrice(normal > actual ? normal : actual, rules.walletTopupMultiplierBps, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps)
+      if (fixedUnit < minimumUnitPrice) throw Object.assign(new Error('视频固定售价低于成本保护线，暂不能启用'), { statusCode: 400 })
+    }
     return db.tx(async client=>{
       const channel=await client.query("SELECT id,base_url FROM channels WHERE id=$1 AND deleted_at IS NULL AND base_url IN ('https://apihub.agnes-ai.com/v1','https://cdn.yyapi.cloud/v1','https://ripp.best/v1')",[b.channelId]);if(!channel.rows.length)throw Object.assign(new Error('请选择已允许的媒体渠道'),{statusCode:400})
       const expected=b.model==='gpt-image-2'?'https://cdn.yyapi.cloud/v1':b.model==='gpt-image-2.5'?'https://ripp.best/v1':'https://apihub.agnes-ai.com/v1';if(channel.rows[0].base_url!==expected)throw Object.assign(new Error('该规格与所选媒体渠道不匹配'),{statusCode:400})
