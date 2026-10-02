@@ -514,7 +514,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     reply.raw.once('close',close)
     try {return await chat.send(u.id,String((request.params as any).id),request.body,controller.signal)} finally {reply.raw.removeListener('close',close)}
   })
-  const media = new MediaService(db, config)
+  const media = new MediaService(db, config, videoKeys)
   registerMediaApi(app, auth, media)
   const mediaUser = async (request: any, reply: any) => {
     const raw = bearer(request.headers.authorization)
@@ -2072,7 +2072,7 @@ export async function start(): Promise<void> {
     }
     services.app.log.warn({ err: error }, 'database bootstrap unavailable; serving health/static routes')
   }
-  const media = new MediaService(services.db, config)
+  const media = new MediaService(services.db, config, services.videoKeys)
   let mediaBusy = false
   const mediaTimer = setInterval(() => { if(mediaBusy)return;mediaBusy=true;void media.tick().catch((error)=>services.app.log.error({ err: error }, 'Media worker tick failed')).finally(()=>{mediaBusy=false}) }, 3000)
   mediaTimer.unref()

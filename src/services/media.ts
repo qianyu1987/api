@@ -4,6 +4,7 @@ import type { AppConfig } from '../config.js'
 import { decryptSecret } from '../lib/crypto.js'
 import { mediaError, mediaPrice, validateMedia, mediaResultUrl, agnesVideoQueueFull } from '../lib/media.js'
 import { profitRules } from './profit.js'
+import type { VideoKeyService } from './video-keys.js'
 
 const canonical = (v: any): string => JSON.stringify(v, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.keys(value).sort().map(k => [k, value[k]])) : value)
 const sensitiveVisualTerms = ['前凸后翘','胸部挺拔','胸部丰满','丰满胸部','饱满胸部','臀部圆润','丰满臀部','极少服饰','衣着暴露','衣着清凉','挑逗姿势','挑逗性','露骨性感','性感身材','透视服装','裸露身体','裸体','内衣写真','色情']
@@ -127,7 +128,7 @@ export function welcomeGift(input: {model:string;size:string;units:number}, bala
   return null
 }
 export class MediaService {
-  constructor(private db: Database, private config: AppConfig) {}
+  constructor(private db: Database, private config: AppConfig, private videoKeys?: VideoKeyService) {}
   async catalog() {
     const rows = await this.db.query<any>('SELECT p.model,p.size,p.enabled,p.normal_cost_micros,p.channel_id,c.enabled AS channel_enabled,c.deleted_at FROM media_prices p LEFT JOIN channels c ON c.id=p.channel_id ORDER BY p.model,p.size')
     return { items: rows.map(p => { const kind = p.model === 'agnes-video-2.5-flash' ? 'video' : 'image'; const freeStandard = p.model === 'agnes-image-2.5-flash'; const item: any = { kind, size: p.size, available: Boolean(p.enabled && (freeStandard || p.normal_cost_micros > 0) && p.channel_enabled && !p.deleted_at) }; if (kind === 'image') { item.engine = p.model === 'gpt-image-2' ? 'pro' : p.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'; item.label = p.model === 'gpt-image-2' ? '专业图片 · gpt-image-2.0' : p.model === 'gpt-image-2.5' ? '增强图片 · gpt-image-2.5（顶级画质）' : '标准图片 · 免费' } return item }), walletOnly: true }
@@ -359,8 +360,20 @@ export class MediaService {
         await this.db.query("UPDATE media_tasks SET lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE id=$1 AND status='unknown' AND finished_at IS NULL",[task.id]);return
       }
       let channel:any
-      if(submitting&&task.kind==='video') channel=await this.resolveVideoChannel(task)
-      else channel=await this.db.one<any>(submitting
+      if (submitting && task.kind === 'video' && this.videoKeys) {
+        const seconds = Number(task.request_payload?.seconds || task.user_input?.seconds || 0)
+        const selected = await this.videoKeys.reserveForTask(String(task.id), seconds)
+        if (!selected) {
+          const next = new Date(Date.now() + mediaRetryDelayMs(Number(task.submit_attempts || 1)))
+          await this.db.query("UPDATE media_tasks SET status='queued',last_retry_code='no_video_key',error_message='正在等待可用视频 Key',lease_until=NULL,next_attempt_at=$2,next_poll_at=$2 WHERE id=$1 AND status='submitting' AND finished_at IS NULL", [task.id, next])
+          return
+        }
+        task.channel_id = selected.channelId
+        channel = { id: selected.channelId, base_url: selected.baseUrl, encrypted_api_key: selected.encryptedApiKey, enabled: true }
+        await this.videoKeys.recordAttempt({ taskId: String(task.id), keyId: selected.id, attemptNo: Number(task.submit_attempts || 1), outcome: 'submitted' }).catch(() => undefined)
+      }
+      if (!channel && submitting && task.kind === 'video') channel = await this.resolveVideoChannel(task)
+      else if (!channel) channel=await this.db.one<any>(submitting
         ? 'SELECT * FROM channels WHERE id=$1 AND enabled AND deleted_at IS NULL AND encrypted_api_key IS NOT NULL'
         : 'SELECT * FROM channels WHERE id=$1',[task.channel_id])
       if(!channel?.encrypted_api_key){
@@ -388,8 +401,8 @@ export class MediaService {
       const responseText=await response.text()
       let data:any=null;try{data=JSON.parse(responseText)}catch{ /* handled below without persisting body */ }
       const queueRejected=task.kind==='video'&&submitting&&!hasUpstreamTaskId(data)&&(response.status===429||agnesVideoQueueFull(response.status,data))
-      if(queueRejected){await this.requeueVideo(task,channel,response.status===429?'rate_limited':'queue_full');return}
-      if(!response.ok){if(submitting&&task.kind==='video'&&response.status===503)throw new Error('uncertain response');if(submitting&&[400,401,403,404,422].includes(response.status)){await this.finish(task.id,false,null,response.status===400||response.status===422?'提示词未通过上游审核，额度已全部退回':'暂时无法安排生成，额度已全部退回',undefined,undefined,'upstream_rejected');return}throw new Error('uncertain response')}
+      if(queueRejected){if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined); if (this.videoKeys) await this.videoKeys.recordAttempt({ taskId: String(task.id), keyId: task.video_provider_key_id, attemptNo: Number(task.submit_attempts || 1), statusCode: response.status, outcome: response.status === 429 ? 'rate_limited' : 'queue_full' }).catch(() => undefined); await this.requeueVideo(task,channel,response.status===429?'rate_limited':'queue_full');return}
+      if(!response.ok){if(submitting&&task.kind==='video'&&response.status===503)throw new Error('uncertain response');if(submitting&&[400,401,403,404,422].includes(response.status)){if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined);await this.finish(task.id,false,null,response.status===400||response.status===422?'提示词未通过上游审核，额度已全部退回':'暂时无法安排生成，额度已全部退回',undefined,undefined,'upstream_rejected');return}throw new Error('uncertain response')}
       if(data===null)throw new Error('invalid upstream response')
       if(task.kind==='image'){
         const result=mediaResultUrl(data)
@@ -411,7 +424,11 @@ export class MediaService {
         const videoId=[data.video_id,data.id,data.task_id,data.data?.video_id,data.data?.id,data.data?.task_id].find((value:any)=>typeof value==='string'&&value.length>0)
         if(typeof videoId!=='string'||videoId.length>256)throw new Error('missing video id')
         await this.markMediaSuccess(String(channel.id))
-        const accepted=await this.db.query<any>("UPDATE media_tasks SET upstream_id=$2,status='processing',accepted_at=COALESCE(accepted_at,now()),uncertain_since=NULL,error_message=NULL,lease_until=NULL,next_attempt_at=now(),next_poll_at=now()+interval '5 seconds' WHERE id=$1 AND status='submitting' AND finished_at IS NULL AND (lease_until IS NULL OR lease_until>now()) RETURNING id",[task.id,videoId])
+        if (this.videoKeys) {
+          const acceptedByPool = await this.videoKeys.acceptTask(String(task.id), videoId)
+          if (!acceptedByPool) return
+        }
+        const accepted=await this.db.query<any>("UPDATE media_tasks SET upstream_id=COALESCE(upstream_id,$2),status='processing',accepted_at=COALESCE(accepted_at,now()),uncertain_since=NULL,error_message=NULL,lease_until=NULL,next_attempt_at=now(),next_poll_at=now()+interval '5 seconds' WHERE id=$1 AND status='submitting' AND finished_at IS NULL AND (lease_until IS NULL OR lease_until>now()) RETURNING id",[task.id,videoId])
         if(!accepted.length)return
         return
       }
