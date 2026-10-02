@@ -1171,7 +1171,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const q = (request.query || {}) as any
     const from = q.from ? dateFilter(q.from) : new Date(Date.now() - 24 * 60 * 60 * 1000)
     const to = q.to ? dateFilter(q.to, true) : new Date()
-    const [usage, orders, fees, alerts, channelsSummary, costAlerts] = await Promise.all([
+    const [usage, orders, fees, alerts, channelsSummary, costAlerts, video] = await Promise.all([
       db.one<any>(`SELECT count(*)::int AS requests, COALESCE(sum(charge_micros),0)::bigint AS revenue,
         COALESCE(sum(cost_micros),0)::bigint AS cost, COALESCE(sum(profit_micros),0)::bigint AS gross_profit,
         COALESCE(sum(CASE WHEN success THEN 0 ELSE charge_micros END),0)::bigint AS failed_charge,
@@ -1186,12 +1186,27 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         COALESCE(x.requests,0)::int AS requests,COALESCE(x.failures,0)::int AS failures
         FROM channels c LEFT JOIN (SELECT final_channel_id,count(*) AS requests,count(*) FILTER(WHERE NOT success) AS failures FROM usage_logs WHERE started_at >= $1 AND started_at < $2 GROUP BY final_channel_id) x ON x.final_channel_id=c.id WHERE c.deleted_at IS NULL ORDER BY c.priority,c.name`, [from, to]),
       fallbackCostAlerts(db),
+      db.one<any>(`SELECT
+        count(*)::int AS tasks,
+        count(*) FILTER (WHERE status='completed')::int AS completed_tasks,
+        COALESCE(sum(charge_micros) FILTER (WHERE status='completed'),0)::bigint AS revenue,
+        COALESCE(sum(actual_cost_micros) FILTER (WHERE status='completed'),0)::bigint AS cost,
+        COALESCE(sum(charge_micros) FILTER (WHERE status='failed'),0)::bigint AS refunds,
+        COALESCE(sum(quota_seconds_used),0)::bigint AS seconds_used,
+        COALESCE(sum(quota_seconds_reserved),0)::bigint AS seconds_reserved
+        FROM media_tasks WHERE kind='video' AND created_at >= $1 AND created_at < $2`, [from, to]),
     ])
     const revenue = BigInt(String(usage?.revenue || 0)); const cost = BigInt(String(usage?.cost || 0)); const rebates = BigInt(String(fees?.rebates || 0))
     const net = revenue - cost - rebates
     return { period: { from: from.toISOString(), to: to.toISOString() }, minimumMarginBps: await settingInt(db, 'profit_min_margin_bps', 5000), globalDiscountBps: await settingInt(db, 'global_token_discount_bps', 0), metrics: {
       requests: Number(usage?.requests || 0), revenue: publicMoney(revenue), cost: publicMoney(cost), grossProfit: publicMoney(revenue - cost), rebates: publicMoney(rebates), netProfit: publicMoney(net), paidOrders: Number(orders?.paid_orders || 0), paid: publicMoney(orders?.paid), failedCharge: publicMoney(usage?.failed_charge), avgLatencyMs: Number(usage?.avg_latency || 0),
       pendingCostRequests: Number(usage?.pending_cost_requests || 0),
+      video: {
+        tasks: Number(video?.tasks || 0), completedTasks: Number(video?.completed_tasks || 0),
+        revenue: publicMoney(video?.revenue), cost: publicMoney(video?.cost), refunds: publicMoney(video?.refunds),
+        secondsUsed: Number(video?.seconds_used || 0), secondsReserved: Number(video?.seconds_reserved || 0),
+        profit: publicMoney(BigInt(String(video?.revenue || 0)) - BigInt(String(video?.cost || 0)) - BigInt(String(video?.refunds || 0))),
+      },
     }, alerts: [...costAlerts, ...alerts], channels: channelsSummary }
   })
 
@@ -1203,7 +1218,16 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       count(*)::int AS requests,COALESCE(sum(charge_micros),0)::bigint AS revenue,COALESCE(sum(cost_micros),0)::bigint AS cost,COALESCE(sum(profit_micros),0)::bigint AS profit,
       count(*) FILTER (WHERE ${pendingFallbackCostSql})::int AS pending_cost_requests
       FROM usage_logs WHERE started_at >= $1 AND started_at < $2 GROUP BY requested_model,final_channel_name_snapshot ORDER BY profit ASC LIMIT 500`, [from, to])
-    return { from: from.toISOString(), to: to.toISOString(), items: rows.map((r) => ({ ...r, revenue: publicMoney(r.revenue), cost: publicMoney(r.cost), profit: publicMoney(r.profit), marginBps: Number(r.revenue) ? Number((BigInt(String(r.profit)) * 10000n) / BigInt(String(r.revenue))) : 0 })) }
+    const video = await db.one<any>(`SELECT count(*) FILTER (WHERE status='completed')::int AS completed_tasks,
+      COALESCE(sum(charge_micros) FILTER (WHERE status='completed'),0)::bigint AS revenue,
+      COALESCE(sum(actual_cost_micros) FILTER (WHERE status='completed'),0)::bigint AS cost,
+      COALESCE(sum(charge_micros) FILTER (WHERE status='failed'),0)::bigint AS refunds,
+      COALESCE(sum(quota_seconds_used),0)::bigint AS seconds_used
+      FROM media_tasks WHERE kind='video' AND created_at >= $1 AND created_at < $2`, [from, to])
+    return { from: from.toISOString(), to: to.toISOString(), items: rows.map((r) => ({ ...r, revenue: publicMoney(r.revenue), cost: publicMoney(r.cost), profit: publicMoney(r.profit), marginBps: Number(r.revenue) ? Number((BigInt(String(r.profit)) * 10000n) / BigInt(String(r.revenue))) : 0 })), video: {
+      completedTasks: Number(video?.completed_tasks || 0), revenue: publicMoney(video?.revenue), cost: publicMoney(video?.cost), refunds: publicMoney(video?.refunds), secondsUsed: Number(video?.seconds_used || 0),
+      profit: publicMoney(BigInt(String(video?.revenue || 0)) - BigInt(String(video?.cost || 0)) - BigInt(String(video?.refunds || 0))),
+    } }
   })
   app.get('/api/admin/profit/subscriptions', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
@@ -2078,7 +2102,16 @@ export async function start(): Promise<void> {
   }
   const media = new MediaService(services.db, config, services.videoKeys)
   let mediaBusy = false
-  const mediaTimer = setInterval(() => { if(mediaBusy)return;mediaBusy=true;void media.tick().catch((error)=>services.app.log.error({ err: error }, 'Media worker tick failed')).finally(()=>{mediaBusy=false}) }, 3000)
+  const mediaTimer = setInterval(() => {
+    if (mediaBusy) return
+    mediaBusy = true
+    // Four independent database leases let each API replica make progress on
+    // several jobs while SKIP LOCKED and per-Key max_concurrency still cap
+    // actual upstream submissions.
+    void Promise.all(Array.from({ length: 4 }, () => media.tick()))
+      .catch((error) => services.app.log.error({ err: error }, 'Media worker tick failed'))
+      .finally(() => { mediaBusy = false })
+  }, 3000)
   mediaTimer.unref()
   let creditBusy = false
   const creditTimer = setInterval(() => { if(creditBusy)return;creditBusy=true;void services.orders.reconcilePending(25).catch(()=>services.app.log.error('Order credit reconciliation failed')).finally(()=>{creditBusy=false}) }, 30000)

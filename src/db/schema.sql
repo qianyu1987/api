@@ -1160,6 +1160,11 @@ INSERT INTO media_prices(model,size) VALUES
  ('gpt-image-2','1K'),
  ('gpt-image-2.5','1K'),
  ('agnes-video-2.5-flash','720P') ON CONFLICT DO NOTHING;
+-- Video sales use the stable per-second price by default. Administrators can
+-- disable the row when the verified provider cost fails the margin guardrail.
+UPDATE media_prices
+SET price_mode='fixed', fixed_unit_price_micros=35000, updated_at=now()
+WHERE model='agnes-video-2.5-flash' AND size='720P' AND fixed_unit_price_micros=0;
 CREATE TABLE IF NOT EXISTS media_tasks (
  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
  user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,

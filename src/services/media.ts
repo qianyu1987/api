@@ -130,13 +130,18 @@ export function welcomeGift(input: {model:string;size:string;units:number}, bala
 export class MediaService {
   constructor(private db: Database, private config: AppConfig, private videoKeys?: VideoKeyService) {}
   async catalog() {
-    const rows = await this.db.query<any>('SELECT p.model,p.size,p.enabled,p.normal_cost_micros,p.channel_id,c.enabled AS channel_enabled,c.deleted_at FROM media_prices p LEFT JOIN channels c ON c.id=p.channel_id ORDER BY p.model,p.size')
-    return { items: rows.map(p => { const kind = p.model === 'agnes-video-2.5-flash' ? 'video' : 'image'; const freeStandard = p.model === 'agnes-image-2.5-flash'; const item: any = { kind, size: p.size, available: Boolean(p.enabled && (freeStandard || p.normal_cost_micros > 0) && p.channel_enabled && !p.deleted_at) }; if (kind === 'image') { item.engine = p.model === 'gpt-image-2' ? 'pro' : p.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'; item.label = p.model === 'gpt-image-2' ? '专业图片 · gpt-image-2.0' : p.model === 'gpt-image-2.5' ? '增强图片 · gpt-image-2.5（顶级画质）' : '标准图片 · 免费' } return item }), walletOnly: true }
+    const rows = await this.db.query<any>(`SELECT p.model,p.size,p.enabled,p.normal_cost_micros,p.channel_id,c.enabled AS channel_enabled,c.deleted_at,
+      EXISTS (SELECT 1 FROM video_provider_keys vk WHERE p.model='agnes-video-2.5-flash' AND vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed') AS video_pool_enabled
+      FROM media_prices p LEFT JOIN channels c ON c.id=p.channel_id ORDER BY p.model,p.size`)
+    return { items: rows.map(p => { const kind = p.model === 'agnes-video-2.5-flash' ? 'video' : 'image'; const freeStandard = p.model === 'agnes-image-2.5-flash'; const item: any = { kind, size: p.size, available: Boolean(p.enabled && (freeStandard || p.normal_cost_micros > 0) && (kind === 'video' ? p.video_pool_enabled : p.channel_enabled && !p.deleted_at)) }; if (kind === 'image') { item.engine = p.model === 'gpt-image-2' ? 'pro' : p.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'; item.label = p.model === 'gpt-image-2' ? '专业图片 · gpt-image-2.0' : p.model === 'gpt-image-2.5' ? '增强图片 · gpt-image-2.5（顶级画质）' : '标准图片 · 免费' } return item }), walletOnly: true }
   }
   async quote(userId: string, body: any, db: Pick<Database, 'query' | 'one'> = this.db) {
     const input = validateMedia(body)
     const price = await db.one<any>('SELECT p.*,c.enabled AS channel_enabled,c.deleted_at FROM media_prices p LEFT JOIN channels c ON c.id=p.channel_id WHERE p.model=$1 AND p.size=$2', [input.model,input.size])
-    if (!price?.enabled || !price.channel_enabled || price.deleted_at || !price.cost_source) mediaError('此规格暂未开放，尚未扣费，请选择其他规格或稍后再试',503)
+    // Video jobs are allowed into the queue while every key is busy or
+    // temporarily unavailable; the worker will keep them queued until a
+    // candidate becomes eligible or the existing queue window expires.
+    if (!price?.enabled || (input.kind === 'video' ? false : !price.channel_enabled || price.deleted_at) || !price.cost_source) mediaError('此规格暂未开放，尚未扣费，请选择其他规格或稍后再试',503)
     const settings = Object.fromEntries((await db.query<any>('SELECT key,value FROM app_settings')).map(r=>[r.key,r.value]))
     const rules = profitRules(settings)
     // Use the largest historical recharge ratio, not just today's promotion.
@@ -264,6 +269,13 @@ export class MediaService {
       const column=gift.kind==='image'?'images_remaining':'video_seconds_remaining'
       await client.query(`UPDATE media_welcome_gifts SET ${column}=${column}+$2 WHERE user_id=$1`,[task.user_id,gift.units])
     }
+    if (!success && task.kind === 'video' && task.video_provider_key_id && task.quota_day && Number(task.quota_seconds_reserved || 0) > 0) {
+      const seconds = Number(task.quota_seconds_reserved)
+      await client.query(`UPDATE video_key_usage_daily
+        SET reserved_seconds=GREATEST(0,reserved_seconds-$3), released_seconds=released_seconds+$3, updated_at=now()
+        WHERE key_id=$1 AND usage_day=$2`, [task.video_provider_key_id, task.quota_day, seconds])
+      await client.query('UPDATE media_tasks SET quota_seconds_reserved=0 WHERE id=$1', [id])
+    }
     if(success&&content&&contentType)await client.query('INSERT INTO media_task_assets(task_id,content_type,content) VALUES($1,$2,$3) ON CONFLICT(task_id) DO NOTHING',[id,contentType,content])
     await client.query('UPDATE media_tasks SET status=$2,result_url=$3,error_message=$4,last_retry_code=COALESCE($5,last_retry_code),progress=100,finished_at=now(),lease_until=NULL,uncertain_since=NULL WHERE id=$1 AND status NOT IN (\'completed\',\'failed\')',[id,success?'completed':'failed',success&&content?'stored://media/'+id:url,message,retryCode || null])
   }
@@ -369,6 +381,7 @@ export class MediaService {
           return
         }
         task.channel_id = selected.channelId
+        task.video_provider_key_id = selected.id
         channel = { id: selected.channelId, base_url: selected.baseUrl, encrypted_api_key: selected.encryptedApiKey, enabled: true }
         await this.videoKeys.recordAttempt({ taskId: String(task.id), keyId: selected.id, attemptNo: Number(task.submit_attempts || 1), outcome: 'submitted' }).catch(() => undefined)
       }
@@ -397,11 +410,12 @@ export class MediaService {
       const expectedProvider = task.model === 'gpt-image-2' ? 'https://cdn.yyapi.cloud' : task.model === 'gpt-image-2.5' ? 'https://ripp.best' : task.model === 'agnes-video-2.5-flash' ? 'https://apihub.agnes-ai.com' : null
       if (expectedProvider && origin.origin !== expectedProvider) { await this.finish(task.id,false,null,'媒体渠道与模型不匹配，冻结额度已释放',undefined,undefined,'channel_mismatch'); return }
       const url=submitting?origin.origin+'/v1/'+(task.kind==='image'?'images/generations':'videos'):origin.origin+'/agnesapi?video_id='+encodeURIComponent(task.upstream_id)+'&model_name='+encodeURIComponent(task.model)
+      const upstreamStartedAt = Date.now()
       const response=await fetch(url,{method:submitting?'POST':'GET',headers:{authorization:'Bearer '+decryptSecret(channel.encrypted_api_key,this.config.channelEncryptionKey),'content-type':'application/json'},...(submitting?{body:JSON.stringify(task.request_payload)}:{}),signal:AbortSignal.timeout(submitting?360000:30000),redirect:'error'})
       const responseText=await response.text()
       let data:any=null;try{data=JSON.parse(responseText)}catch{ /* handled below without persisting body */ }
       const queueRejected=task.kind==='video'&&submitting&&!hasUpstreamTaskId(data)&&(response.status===429||agnesVideoQueueFull(response.status,data))
-      if(queueRejected){if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined); if (this.videoKeys) await this.videoKeys.recordAttempt({ taskId: String(task.id), keyId: task.video_provider_key_id, attemptNo: Number(task.submit_attempts || 1), statusCode: response.status, outcome: response.status === 429 ? 'rate_limited' : 'queue_full' }).catch(() => undefined); await this.requeueVideo(task,channel,response.status===429?'rate_limited':'queue_full');return}
+      if(queueRejected){if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined); if (this.videoKeys) await this.videoKeys.recordAttempt({ taskId: String(task.id), keyId: task.video_provider_key_id, attemptNo: Number(task.submit_attempts || 1), statusCode: response.status, durationMs: Date.now()-upstreamStartedAt, outcome: response.status === 429 ? 'rate_limited' : 'queue_full' }).catch(() => undefined); await this.requeueVideo(task,channel,response.status===429?'rate_limited':'queue_full');return}
       if(!response.ok){if(submitting&&task.kind==='video'&&response.status===503)throw new Error('uncertain response');if(submitting&&[400,401,403,404,422].includes(response.status)){if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined);await this.finish(task.id,false,null,response.status===400||response.status===422?'提示词未通过上游审核，额度已全部退回':'暂时无法安排生成，额度已全部退回',undefined,undefined,'upstream_rejected');return}throw new Error('uncertain response')}
       if(data===null)throw new Error('invalid upstream response')
       if(task.kind==='image'){
@@ -427,6 +441,7 @@ export class MediaService {
         if (this.videoKeys) {
           const acceptedByPool = await this.videoKeys.acceptTask(String(task.id), videoId)
           if (!acceptedByPool) return
+          await this.videoKeys.recordAttempt({ taskId: String(task.id), keyId: task.video_provider_key_id, attemptNo: Number(task.submit_attempts || 1), statusCode: response.status, durationMs: Date.now()-upstreamStartedAt, outcome: 'accepted', upstreamTaskId: videoId, accepted: true }).catch(() => undefined)
         }
         const accepted=await this.db.query<any>("UPDATE media_tasks SET upstream_id=COALESCE(upstream_id,$2),status='processing',accepted_at=COALESCE(accepted_at,now()),uncertain_since=NULL,error_message=NULL,lease_until=NULL,next_attempt_at=now(),next_poll_at=now()+interval '5 seconds' WHERE id=$1 AND status='submitting' AND finished_at IS NULL AND (lease_until IS NULL OR lease_until>now()) RETURNING id",[task.id,videoId])
         if(!accepted.length)return

@@ -212,12 +212,29 @@ export class VideoKeyService {
     return (await this.adminRows()).map((row) => publicRow(row, this.config))
   }
 
-  async overview(): Promise<{ keys: VideoKeyAdmin[]; availableKeys: number; remainingSeconds: number; queueCount: number; fastestKey: VideoKeyAdmin | null }> {
+  async overview(): Promise<{ keys: VideoKeyAdmin[]; availableKeys: number; remainingSeconds: number; queueCount: number; fastestKey: VideoKeyAdmin | null; pricing: Record<string, unknown> }> {
     const keys = await this.list()
     const available = keys.filter((key) => key.status === 'ready' || key.status === 'near_limit')
     const queueRows = await this.db.query<{ count: string }>(`SELECT count(*)::text AS count FROM media_tasks WHERE kind='video' AND status IN ('queued','submitting')`)
     const fastest = [...available].sort((a, b) => (a.latencyP95Ms ?? Number.POSITIVE_INFINITY) - (b.latencyP95Ms ?? Number.POSITIVE_INFINITY) || a.priority - b.priority || a.id.localeCompare(b.id))[0] || null
-    return { keys, availableKeys: available.length, remainingSeconds: available.reduce((sum, key) => sum + key.remainingSeconds, 0), queueCount: Number(queueRows[0]?.count || 0), fastestKey: fastest }
+    const price = await this.db.one<any>(`SELECT enabled,price_mode,fixed_unit_price_micros,actual_cost_micros,cost_source
+      FROM media_prices WHERE model=$1 AND size='720P'`, [AGNES_VIDEO_MODEL])
+    const unit = Number(price?.fixed_unit_price_micros || VIDEO_UNIT_PRICE_MICROS)
+    const actual = Number(price?.actual_cost_micros || 0)
+    return {
+      keys, availableKeys: available.length,
+      remainingSeconds: available.reduce((sum, key) => sum + key.remainingSeconds, 0),
+      queueCount: Number(queueRows[0]?.count || 0), fastestKey: fastest,
+      pricing: {
+        pricePerSecondMicros: unit,
+        specs: [4, 10, 12].map((seconds) => ({ seconds, priceMicros: unit * seconds })),
+        actualCostPerSecondMicros: actual,
+        costSource: price?.cost_source || null,
+        enabled: Boolean(price?.enabled),
+        available: Boolean(price?.enabled && price?.price_mode === 'fixed' && unit > 0),
+        marginPercent: unit > 0 ? ((unit - actual) / unit) * 100 : 0,
+      },
+    }
   }
 
   async add(input: VideoKeyInput, actorId?: string): Promise<VideoKeyAdmin> {
@@ -394,5 +411,16 @@ export class VideoKeyService {
 
   async recordAttempt(input: { taskId: string; keyId?: string | null; attemptNo: number; statusCode?: number | null; outcome: string; durationMs?: number | null; errorCode?: string | null; errorMessage?: string | null; upstreamTaskId?: string | null; accepted?: boolean }): Promise<void> {
     await this.db.query(`INSERT INTO video_attempts(task_id,key_id,attempt_no,status_code,outcome,duration_ms,error_code,error_message,upstream_task_id,accepted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(task_id,attempt_no) DO UPDATE SET status_code=EXCLUDED.status_code,outcome=EXCLUDED.outcome,duration_ms=EXCLUDED.duration_ms,error_code=EXCLUDED.error_code,error_message=EXCLUDED.error_message,upstream_task_id=EXCLUDED.upstream_task_id,accepted=EXCLUDED.accepted`, [input.taskId, input.keyId || null, integer(input.attemptNo, 1, 1, 1_000_000), input.statusCode ?? null, input.outcome, input.durationMs ?? null, input.errorCode || null, input.errorMessage ? String(input.errorMessage).slice(0, 500) : null, input.upstreamTaskId || null, Boolean(input.accepted)])
+    if (!input.keyId) return
+    if (input.durationMs != null && Number.isFinite(Number(input.durationMs))) {
+      await this.db.query(`UPDATE video_provider_keys SET
+        latency_p50_ms=(SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)::int FROM video_attempts WHERE key_id=$1 AND duration_ms IS NOT NULL),
+        latency_p95_ms=(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::int FROM video_attempts WHERE key_id=$1 AND duration_ms IS NOT NULL),
+        updated_at=now() WHERE id=$1`, [input.keyId])
+    }
+    if (input.accepted || input.outcome === 'accepted' || input.outcome === 'submitted') return
+    await this.db.query(`UPDATE video_provider_keys SET failure_count=failure_count+1,
+      cooldown_until=CASE WHEN failure_count+1 >= 3 THEN now()+interval '30 seconds' ELSE cooldown_until END,
+      updated_at=now() WHERE id=$1`, [input.keyId])
   }
 }

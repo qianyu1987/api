@@ -602,6 +602,9 @@
         field('maxConcurrency', '最大并发', '1', 'number', 'min="1" max="32" required'),
         field('priority', '优先级', '100', 'number', 'min="0" max="100000" required'),
         field('timezone', '额度时区', 'Asia/Shanghai', 'text', 'required readonly'),
+        field('subscriptionCostYuan', '订阅成本（元，可选）', '', 'text', 'inputmode="decimal" placeholder="例如 99"'),
+        field('subscriptionDurationDays', '有效天数', '', 'number', 'min="1" max="3660" placeholder="例如 30"'),
+        field('actualCostPerSecondYuan', '核实实际成本（元/秒，可选）', '', 'text', 'inputmode="decimal" placeholder="优先使用核实成本"'),
         check('enabled', '启用 Key', false),
         check('videoGenerationEnabled', '允许视频生成', false),
         check('promptExpansionEnabled', '允许提示词扩展', false),
@@ -776,7 +779,7 @@
       editor.dataset.manualSell = 'true'
     }
     if (kind === 'video-key') {
-      Object.entries({ accountLabel: item.accountLabel || item.account_label, dailyLimitSeconds: item.dailyLimitSeconds ?? item.daily_limit_seconds ?? 500, maxConcurrency: item.maxConcurrency ?? item.max_concurrency ?? 1, priority: item.priority ?? 100, timezone: item.timezone || 'Asia/Shanghai', enabled: item.enabled, videoGenerationEnabled: item.videoGenerationEnabled ?? item.video_generation_enabled, promptExpansionEnabled: item.promptExpansionEnabled ?? item.prompt_expansion_enabled }).forEach(([key, value]) => setFormValue(editor, key, value))
+      Object.entries({ accountLabel: item.accountLabel || item.account_label, dailyLimitSeconds: item.dailyLimitSeconds ?? item.daily_limit_seconds ?? 500, maxConcurrency: item.maxConcurrency ?? item.max_concurrency ?? 1, priority: item.priority ?? 100, timezone: item.timezone || 'Asia/Shanghai', subscriptionCostYuan: item.subscriptionCostMicros == null ? '' : microsToYuan(item.subscriptionCostMicros), subscriptionDurationDays: item.subscriptionDurationDays ?? item.subscription_duration_days ?? '', actualCostPerSecondYuan: item.actualCostPerSecondMicros == null ? '' : microsToYuan(item.actualCostPerSecondMicros), enabled: item.enabled, videoGenerationEnabled: item.videoGenerationEnabled ?? item.video_generation_enabled, promptExpansionEnabled: item.promptExpansionEnabled ?? item.prompt_expansion_enabled }).forEach(([key, value]) => setFormValue(editor, key, value))
       const key = editor.elements.namedItem('apiKey'); key.value = ''; key.required = false; key.placeholder = '留空则保持现有加密 Key'
       editor.querySelector('[type="submit"]').textContent = '保存视频 Key'
       let cancel = editor.querySelector('[data-cancel-video-key-edit]')
@@ -837,6 +840,12 @@
       if (!payload.accountLabel?.trim()) throw new Error('请填写账号标签')
       if (payload.id && !payload.apiKey) delete payload.apiKey
       if (!payload.timezone) payload.timezone = 'Asia/Shanghai'
+      for (const [fieldName, targetName] of [['subscriptionCostYuan', 'subscriptionCostMicros'], ['actualCostPerSecondYuan', 'actualCostPerSecondMicros']]) {
+        if (String(payload[fieldName] ?? '').trim()) {
+          try { payload[targetName] = yuanToMicros(payload[fieldName]) .toString() } catch { throw new Error('视频 Key 成本必须是有效人民币金额') }
+        } else payload[targetName] = null
+        delete payload[fieldName]
+      }
     }
     if (kind === 'fixed-price' && editor.dataset.manualSell !== 'true') delete payload.sellYuan
     const endpoints = { 'media-price': '/api/admin/media/prices', channel: '/api/admin/channels', 'channel-cost': '/api/admin/channel-costs', price: '/api/admin/prices', 'fixed-price': '/api/admin/fixed-prices', plan: '/api/admin/plans', 'affiliate-settings': '/api/admin/affiliate/settings', 'site-settings': '/api/admin/settings/site', 'profit-settings': '/api/admin/settings/profit', 'night-discount-settings': '/api/admin/settings/night-discount' }
@@ -1253,7 +1262,12 @@
       const id = videoAction.dataset.id; const action = videoAction.dataset.videoKeyAction
       if (!id) return
       if (action === 'disable' && !confirm('确定暂停「' + (videoAction.dataset.label || '此视频 Key') + '」？正在生成的任务不会被中断。')) return
-      if (action === 'reset' && !confirm('确定重置此 Key 的今日额度？该操作会写入审计记录。')) return
+      let resetReason = ''
+      if (action === 'reset') {
+        if (!confirm('确定重置此 Key 的今日额度？该操作会写入审计记录。')) return
+        resetReason = prompt('请输入重置原因（至少 4 个字符）', '') || ''
+        if (resetReason.trim().length < 4) { toast('重置原因至少需要 4 个字符', true); return }
+      }
       if (action === 'rotate') {
         const replacement = prompt('粘贴新的 Agnes Key。提交后仅保留加密值，原 Key 会停止接收新任务。', '')
         if (!replacement?.trim()) return
@@ -1264,7 +1278,7 @@
       pending(videoAction, true, action === 'probe' ? '测试中…' : action === 'reset' ? '重置中…' : '暂停中…')
       try {
         const endpoint = '/api/admin/video/keys/' + encodeURIComponent(id) + (action === 'probe' ? '/probe' : action === 'reset' ? '/reset-usage' : '')
-        const options = { method: action === 'disable' ? 'PATCH' : 'POST', body: JSON.stringify(action === 'disable' ? { enabled: false, videoGenerationEnabled: false } : action === 'reset' ? { reason: '管理员从视频渠道后台手动重置今日额度' } : {}) }
+        const options = { method: action === 'disable' ? 'PATCH' : 'POST', body: JSON.stringify(action === 'disable' ? { enabled: false, videoGenerationEnabled: false } : action === 'reset' ? { reason: resetReason.trim() } : {}) }
         await api(endpoint, options); toast(action === 'probe' ? '连接测试完成' : action === 'reset' ? '今日额度已重置' : '视频 Key 已暂停'); await loadAdmin('video-channels')
       } catch (error) { toast(error.message, true); pending(videoAction, false) }
       return
