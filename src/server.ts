@@ -41,6 +41,7 @@ import { mediaPrice } from './lib/media.js'
 import { ChatService } from './services/chat.js'
 import { ChannelCostService } from './services/channel-costs.js'
 import { LayaShadow } from './services/laya-shadow.js'
+import { VideoKeyService } from './services/video-keys.js'
 import { requiredWalletSell, type PricingRules } from './services/pricing.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -57,6 +58,7 @@ export type RelayApp = {
   orders: OrderService
   mail: MailService
   profit: ProfitService
+  videoKeys: VideoKeyService
 }
 
 
@@ -433,6 +435,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   const orders = new OrderService(db, affiliate, config)
   const mail = new MailService(db, config)
   const profit = new ProfitService(db, config.walletTopupMultiplierBps)
+  const videoKeys = new VideoKeyService(db, config)
   const layaShadow = new LayaShadow(config.layaShadow)
 
   await app.register(sensible)
@@ -657,11 +660,15 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const source=cleanText(b.costSource,'成本来源',512)
     if(!source)throw Object.assign(new Error('请填写已核实成本来源'),{statusCode:400})
     const rules=await profit.overview();mediaPrice(normal>actual?normal:actual,rules.walletTopupMultiplierBps,rules.paymentFeeRateBps,rules.affiliateRateBps,rules.minimumMarginBps)
+    const priceMode = b.model === 'agnes-video-2.5-flash' && b.priceMode === 'fixed' ? 'fixed' : 'cost_plus_margin'
+    const fixedUnit = priceMode === 'fixed'
+      ? BigInt(b.fixedUnitPriceYuan !== undefined ? yuanInput(b.fixedUnitPriceYuan, '视频单秒售价', false) : moneyInput(b.fixedUnitPriceMicros ?? 35000, '视频单秒售价', false))
+      : 0n
     return db.tx(async client=>{
       const channel=await client.query("SELECT id,base_url FROM channels WHERE id=$1 AND deleted_at IS NULL AND base_url IN ('https://apihub.agnes-ai.com/v1','https://cdn.yyapi.cloud/v1','https://ripp.best/v1')",[b.channelId]);if(!channel.rows.length)throw Object.assign(new Error('请选择已允许的媒体渠道'),{statusCode:400})
       const expected=b.model==='gpt-image-2'?'https://cdn.yyapi.cloud/v1':b.model==='gpt-image-2.5'?'https://ripp.best/v1':'https://apihub.agnes-ai.com/v1';if(channel.rows[0].base_url!==expected)throw Object.assign(new Error('该规格与所选媒体渠道不匹配'),{statusCode:400})
       const before=await client.query('SELECT * FROM media_prices WHERE model=$1 AND size=$2 FOR UPDATE',[b.model,b.size]);if(!before.rows.length)throw Object.assign(new Error('模型规格无效'),{statusCode:400})
-      const after=await client.query('UPDATE media_prices SET channel_id=$1,normal_cost_micros=$2,actual_cost_micros=$3,cost_source=$4,enabled=$5,updated_at=now() WHERE model=$6 AND size=$7 RETURNING *',[b.channelId,normal.toString(),actual.toString(),source,b.enabled===true,b.model,b.size])
+      const after=await client.query('UPDATE media_prices SET channel_id=$1,normal_cost_micros=$2,actual_cost_micros=$3,cost_source=$4,price_mode=$5,fixed_unit_price_micros=$6,enabled=$7,updated_at=now() WHERE model=$8 AND size=$9 RETURNING *',[b.channelId,normal.toString(),actual.toString(),source,priceMode,fixedUnit.toString(),b.enabled===true,b.model,b.size])
       await client.query("INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'media_price',$2,$3,$4)",[actor.id,b.model+':'+b.size,JSON.stringify(before.rows[0]),JSON.stringify(after.rows[0])]);return {ok:true}
     })
   })
@@ -1113,6 +1120,46 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const force = String((request.query as any)?.refreshBalance || '') === '1'
     const [items, alerts, balances] = await Promise.all([channels.allForAdmin(), fallbackCostAlerts(db), channels.upstreamBalances(force)])
     return { items: items.map(item => ({ ...item, upstreamBalance: balances[item.id], fallbackCostPending: alerts.some(alert => alert.resource_id === item.id) })) }
+  })
+
+  // Agnes video keys have a separate admin surface. Responses only contain
+  // masked credentials and aggregate queue/usage data.
+  app.get('/api/admin/video/overview', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    return videoKeys.overview()
+  })
+  app.get('/api/admin/video/keys', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    return { items: await videoKeys.list() }
+  })
+  app.post('/api/admin/video/keys', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    try { return await videoKeys.add(request.body as any, actor.id) } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
+  app.patch('/api/admin/video/keys/:id', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    try { return await videoKeys.update(String((request.params as any).id), request.body as any, actor.id) } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
+  app.post('/api/admin/video/keys/:id/probe', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    try { return await videoKeys.probe(String((request.params as any).id), actor.id) } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
+  app.post('/api/admin/video/keys/:id/rotate', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    try { return await videoKeys.rotate(String((request.params as any).id), String((request.body as any)?.apiKey || ''), actor.id) } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
+  app.post('/api/admin/video/keys/:id/reset-usage', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    try { await videoKeys.resetUsage(String((request.params as any).id), String((request.body as any)?.reason || ''), actor.id); return { ok: true } } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
+  app.get('/api/admin/video/queue', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const rows = await db.query<any>(`SELECT mt.id,mt.user_id,u.username,mt.status,mt.request_payload->>'seconds' AS seconds,
+      mt.video_provider_key_id,vk.account_label,mt.queue_started_at,mt.submit_attempts,mt.last_retry_code,
+      (SELECT va.error_message FROM video_attempts va WHERE va.task_id=mt.id ORDER BY va.attempt_no DESC LIMIT 1) AS last_error
+      FROM media_tasks mt JOIN users u ON u.id=mt.user_id LEFT JOIN video_provider_keys vk ON vk.id=mt.video_provider_key_id
+      WHERE mt.kind='video' AND mt.status NOT IN ('completed','failed') ORDER BY mt.queue_started_at,mt.id LIMIT 200`)
+    return { items: rows.map((row) => ({ id: row.id, userId: row.user_id, username: row.username, status: row.status, seconds: Number(row.seconds || 0), accountLabel: row.account_label || null, queuedAt: row.queue_started_at, submitAttempts: Number(row.submit_attempts || 0), lastRetryCode: row.last_retry_code || null, lastError: row.last_error || null })) }
   })
 
   app.get('/api/admin/overview', async (request, reply) => {
@@ -1988,7 +2035,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     return layaShadow.snapshot()
   })
   app.addHook('onClose', async () => { await layaShadow.close(); await redis.close() })
-  return { app, db, redis, config, auth, billing, affiliate, channels, orders, mail, profit }
+  return { app, db, redis, config, auth, billing, affiliate, channels, orders, mail, profit, videoKeys }
 }
 
 async function recordAttempts(db: Database, requestId: string, attempts: any[], failedAttemptCostMicros = 0n): Promise<void> {

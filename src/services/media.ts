@@ -143,8 +143,11 @@ export class MediaService {
     const multiplier = Math.max(rules.walletTopupMultiplierBps,this.config.walletTopupMultiplierBps,Number(ratio?.bps || 10000))
     const normal = BigInt(price.normal_cost_micros)*BigInt(input.units), actual = BigInt(price.actual_cost_micros)*BigInt(input.units)
     const freeStandard = input.model === 'agnes-image-2.5-flash'
-    let charge = freeStandard ? 0n : mediaPrice(normal > actual ? normal : actual,multiplier,rules.paymentFeeRateBps,rules.affiliateRateBps,rules.minimumMarginBps)
-    const snapshot = { normalCostMicros:normal.toString(),actualCostMicros:actual.toString(),multiplierBps:multiplier,feeBps:rules.paymentFeeRateBps,rebateBps:rules.affiliateRateBps,marginBps:rules.minimumMarginBps,costSource:price.cost_source,priceUpdatedAt:price.updated_at,chargeMicros:charge.toString() }
+    const fixedMode = input.kind === 'video' && price.price_mode === 'fixed' && Number(price.fixed_unit_price_micros || 0) > 0
+    let charge = freeStandard ? 0n : fixedMode
+      ? BigInt(price.fixed_unit_price_micros) * BigInt(input.units)
+      : mediaPrice(normal > actual ? normal : actual,multiplier,rules.paymentFeeRateBps,rules.affiliateRateBps,rules.minimumMarginBps)
+    const snapshot = { normalCostMicros:normal.toString(),actualCostMicros:actual.toString(),multiplierBps:multiplier,feeBps:rules.paymentFeeRateBps,rebateBps:rules.affiliateRateBps,marginBps:rules.minimumMarginBps,costSource:price.cost_source,priceUpdatedAt:price.updated_at,priceMode:fixedMode?'fixed':'cost_plus_margin',fixedUnitPriceMicros:fixedMode?String(price.fixed_unit_price_micros):null,chargeMicros:charge.toString() }
     const cash = charge * 10000n / BigInt(multiplier)
     Object.assign(snapshot,{estimatedRevenueMicros:cash.toString(),estimatedFeesMicros:(cash*BigInt(rules.paymentFeeRateBps)/10000n).toString(),estimatedRebateMicros:(cash*BigInt(rules.affiliateRateBps)/10000n).toString(),estimatedProfitMicros:(cash-cash*BigInt(rules.paymentFeeRateBps+rules.affiliateRateBps)/10000n-actual).toString()})
     const giftRow = await db.one<any>('SELECT images_remaining,video_seconds_remaining FROM media_welcome_gifts WHERE user_id=$1',[userId])

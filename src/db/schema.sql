@@ -1139,10 +1139,21 @@ CREATE TABLE IF NOT EXISTS media_prices (
   normal_cost_micros BIGINT NOT NULL DEFAULT 0 CHECK(normal_cost_micros >= 0),
   actual_cost_micros BIGINT NOT NULL DEFAULT 0 CHECK(actual_cost_micros >= 0),
   cost_source TEXT NOT NULL DEFAULT '',
+  -- Video sales can use a fixed per-second price independent of the current
+  -- wallet promotion multiplier. Token/image rows keep the historical mode.
+  price_mode TEXT NOT NULL DEFAULT 'cost_plus_margin',
+  fixed_unit_price_micros BIGINT NOT NULL DEFAULT 0 CHECK(fixed_unit_price_micros >= 0),
   enabled BOOLEAN NOT NULL DEFAULT false,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY(model,size)
+  PRIMARY KEY(model,size),
+  CHECK(price_mode IN ('cost_plus_margin','fixed'))
 );
+ALTER TABLE media_prices ADD COLUMN IF NOT EXISTS price_mode TEXT NOT NULL DEFAULT 'cost_plus_margin';
+ALTER TABLE media_prices ADD COLUMN IF NOT EXISTS fixed_unit_price_micros BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE media_prices DROP CONSTRAINT IF EXISTS media_prices_price_mode_check;
+ALTER TABLE media_prices ADD CONSTRAINT media_prices_price_mode_check CHECK(price_mode IN ('cost_plus_margin','fixed'));
+ALTER TABLE media_prices DROP CONSTRAINT IF EXISTS media_prices_fixed_unit_price_micros_check;
+ALTER TABLE media_prices ADD CONSTRAINT media_prices_fixed_unit_price_micros_check CHECK(fixed_unit_price_micros >= 0);
 INSERT INTO media_prices(model,size) VALUES
  ('agnes-image-2.5-flash','1K'),('agnes-image-2.5-flash','2K'),
  ('agnes-image-2.5-flash','3K'),('agnes-image-2.5-flash','4K'),
@@ -1221,6 +1232,110 @@ ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS gallery_moderated_by UUID REFER
 ALTER TABLE media_tasks DROP CONSTRAINT IF EXISTS media_tasks_gallery_status_check;
 ALTER TABLE media_tasks ADD CONSTRAINT media_tasks_gallery_status_check CHECK(gallery_status IN ('private','published','hidden'));
 CREATE INDEX IF NOT EXISTS media_tasks_gallery_idx ON media_tasks(gallery_featured DESC,finished_at DESC,id DESC) WHERE gallery_status='published' AND status='completed';
+
+-- Agnes video keys are kept separate from general chat/image channels so an
+-- account's Coding Plan quota can be audited and scheduled independently.
+CREATE TABLE IF NOT EXISTS video_provider_keys (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  channel_id UUID NOT NULL UNIQUE REFERENCES channels(id) ON DELETE RESTRICT,
+  account_label TEXT NOT NULL,
+  daily_limit_seconds INTEGER NOT NULL DEFAULT 500,
+  timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+  max_concurrency INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 100,
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  video_generation_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  prompt_expansion_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  probe_status TEXT NOT NULL DEFAULT 'pending',
+  last_probe_at TIMESTAMPTZ,
+  last_probe_error TEXT,
+  last_success_at TIMESTAMPTZ,
+  latency_p50_ms INTEGER,
+  latency_p95_ms INTEGER,
+  success_count INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  cooldown_until TIMESTAMPTZ,
+  subscription_cost_micros BIGINT,
+  subscription_duration_days INTEGER,
+  actual_cost_per_second_micros BIGINT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK(char_length(trim(account_label)) BETWEEN 1 AND 128),
+  CHECK(daily_limit_seconds > 0 AND daily_limit_seconds <= 86400),
+  CHECK(max_concurrency BETWEEN 1 AND 64),
+  CHECK(priority >= 0),
+  CHECK(probe_status IN ('pending','passed','failed')),
+  CHECK(success_count >= 0 AND failure_count >= 0),
+  CHECK(latency_p50_ms IS NULL OR latency_p50_ms >= 0),
+  CHECK(latency_p95_ms IS NULL OR latency_p95_ms >= 0),
+  CHECK(subscription_cost_micros IS NULL OR subscription_cost_micros >= 0),
+  CHECK(subscription_duration_days IS NULL OR subscription_duration_days > 0),
+  CHECK(actual_cost_per_second_micros IS NULL OR actual_cost_per_second_micros >= 0)
+);
+CREATE INDEX IF NOT EXISTS video_provider_keys_available_idx
+  ON video_provider_keys(enabled, video_generation_enabled, priority, id);
+
+-- One row per key and local calendar day. The row is locked while reserving
+-- seconds, which prevents two API replicas from overselling a plan.
+CREATE TABLE IF NOT EXISTS video_key_usage_daily (
+  key_id UUID NOT NULL REFERENCES video_provider_keys(id) ON DELETE CASCADE,
+  usage_day DATE NOT NULL,
+  reserved_seconds INTEGER NOT NULL DEFAULT 0,
+  used_seconds INTEGER NOT NULL DEFAULT 0,
+  released_seconds INTEGER NOT NULL DEFAULT 0,
+  limit_seconds INTEGER NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY(key_id, usage_day),
+  CHECK(reserved_seconds >= 0 AND used_seconds >= 0 AND released_seconds >= 0),
+  CHECK(limit_seconds > 0 AND limit_seconds <= 86400),
+  CHECK(used_seconds + reserved_seconds <= limit_seconds)
+);
+CREATE INDEX IF NOT EXISTS video_key_usage_day_idx ON video_key_usage_daily(usage_day, key_id);
+
+CREATE TABLE IF NOT EXISTS video_attempts (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  task_id UUID NOT NULL REFERENCES media_tasks(id) ON DELETE CASCADE,
+  key_id UUID REFERENCES video_provider_keys(id) ON DELETE SET NULL,
+  attempt_no INTEGER NOT NULL,
+  status_code INTEGER,
+  outcome TEXT NOT NULL DEFAULT 'unknown',
+  duration_ms INTEGER,
+  error_code TEXT,
+  error_message TEXT,
+  upstream_task_id TEXT,
+  accepted BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK(attempt_no > 0),
+  CHECK(status_code IS NULL OR status_code BETWEEN 100 AND 599),
+  CHECK(duration_ms IS NULL OR duration_ms >= 0),
+  CHECK(outcome IN ('submitted','accepted','rate_limited','queue_full','rejected','timeout','network_error','unknown'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS video_attempts_task_no_unique ON video_attempts(task_id, attempt_no);
+CREATE INDEX IF NOT EXISTS video_attempts_key_cursor_idx ON video_attempts(key_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS video_attempts_queue_cursor_idx ON video_attempts(created_at DESC, id DESC);
+
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS video_provider_key_id UUID REFERENCES video_provider_keys(id) ON DELETE SET NULL;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS quota_day DATE;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS quota_seconds_reserved INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS quota_seconds_used INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS selection_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE media_tasks DROP CONSTRAINT IF EXISTS media_tasks_quota_seconds_reserved_check;
+ALTER TABLE media_tasks ADD CONSTRAINT media_tasks_quota_seconds_reserved_check CHECK(quota_seconds_reserved >= 0);
+ALTER TABLE media_tasks DROP CONSTRAINT IF EXISTS media_tasks_quota_seconds_used_check;
+ALTER TABLE media_tasks ADD CONSTRAINT media_tasks_quota_seconds_used_check CHECK(quota_seconds_used >= 0);
+CREATE INDEX IF NOT EXISTS media_tasks_video_key_idx ON media_tasks(video_provider_key_id, status, created_at DESC);
+
+-- Preserve an already configured Agnes video channel as an unverified pool
+-- entry. It stays disabled until an administrator runs the no-cost probe.
+INSERT INTO video_provider_keys(channel_id,account_label,enabled,video_generation_enabled,probe_status)
+SELECT c.id, c.name, false, false, 'pending'
+FROM channels c
+WHERE c.base_url='https://apihub.agnes-ai.com/v1'
+  AND c.model_map ? 'agnes-video-2.5-flash'
+  AND c.encrypted_api_key IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM video_provider_keys vk WHERE vk.channel_id=c.id)
+ON CONFLICT(channel_id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS media_task_assets (
  task_id UUID PRIMARY KEY REFERENCES media_tasks(id) ON DELETE CASCADE,
