@@ -127,6 +127,10 @@ export function usageDayForTimezone(timezone = 'Asia/Shanghai', now = new Date()
   return now.toISOString().slice(0, 10)
 }
 
+export function validTimezone(timezone: string): boolean {
+  try { new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(); return true } catch { return false }
+}
+
 export function maskProviderKey(raw: string | null | undefined): string | null {
   if (!raw) return null
   const value = String(raw)
@@ -225,6 +229,7 @@ export class VideoKeyService {
     const timezone = String(input.timezone || 'Asia/Shanghai').trim()
     // Validate before creating a channel so a bad timezone cannot leave a
     // half-created provider credential behind.
+    if (!validTimezone(timezone)) throw new Error('时区无效')
     usageDayForTimezone(timezone)
     const encrypted = input.apiKey?.trim() ? encryptSecret(input.apiKey.trim(), this.config.channelEncryptionKey) : null
     if (!input.channelId && !encrypted) throw new Error('新增 Agnes Key 必须填写 Key')
@@ -258,6 +263,7 @@ export class VideoKeyService {
     const maxConcurrency = input.maxConcurrency === undefined ? Number(before.max_concurrency) : integer(input.maxConcurrency, 1, 1, 64)
     const priority = input.priority === undefined ? Number(before.priority) : integer(input.priority, 100, 0, 1_000_000)
     const timezone = input.timezone === undefined ? before.timezone : String(input.timezone || '').trim()
+    if (!validTimezone(timezone)) throw new Error('时区无效')
     usageDayForTimezone(timezone)
     const enabled = input.enabled === undefined ? Boolean(before.enabled) : Boolean(input.enabled)
     const videoEnabled = input.videoGenerationEnabled === undefined ? Boolean(before.video_generation_enabled) : Boolean(input.videoGenerationEnabled)
