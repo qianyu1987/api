@@ -130,10 +130,13 @@ export function welcomeGift(input: {model:string;size:string;units:number}, bala
 export class MediaService {
   constructor(private db: Database, private config: AppConfig, private videoKeys?: VideoKeyService) {}
   async catalog() {
-    const rows = await this.db.query<any>(`SELECT p.model,p.size,p.enabled,p.normal_cost_micros,p.channel_id,c.enabled AS channel_enabled,c.deleted_at,
+    const rows = await this.db.query<any>(`SELECT p.model,p.size,p.enabled,p.normal_cost_micros,p.actual_cost_micros,p.fixed_unit_price_micros,p.channel_id,c.enabled AS channel_enabled,c.deleted_at,
       EXISTS (SELECT 1 FROM video_provider_keys vk WHERE p.model='agnes-video-2.5-flash' AND vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed') AS video_pool_enabled
       FROM media_prices p LEFT JOIN channels c ON c.id=p.channel_id ORDER BY p.model,p.size`)
-    return { items: rows.map(p => { const kind = p.model === 'agnes-video-2.5-flash' ? 'video' : 'image'; const freeStandard = p.model === 'agnes-image-2.5-flash'; const item: any = { kind, size: p.size, available: Boolean(p.enabled && (freeStandard || p.normal_cost_micros > 0) && (kind === 'video' ? p.video_pool_enabled : p.channel_enabled && !p.deleted_at)) }; if (kind === 'image') { item.engine = p.model === 'gpt-image-2' ? 'pro' : p.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'; item.label = p.model === 'gpt-image-2' ? '专业图片 · gpt-image-2.0' : p.model === 'gpt-image-2.5' ? '增强图片 · gpt-image-2.5（顶级画质）' : '标准图片 · 免费' } return item }), walletOnly: true }
+    const settings = Object.fromEntries((await this.db.query<any>('SELECT key,value FROM app_settings')).map((row) => [row.key, row.value]))
+    const rules = profitRules(settings)
+    const multiplier = Math.max(rules.walletTopupMultiplierBps, this.config.walletTopupMultiplierBps)
+    return { items: rows.map(p => { const kind = p.model === 'agnes-video-2.5-flash' ? 'video' : 'image'; const freeStandard = p.model === 'agnes-image-2.5-flash'; const videoFloor = kind === 'video' ? mediaPrice(BigInt(p.actual_cost_micros || 0), multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps) : 0n; const videoMarginOk = kind !== 'video' || BigInt(p.fixed_unit_price_micros || 0) >= videoFloor; const item: any = { kind, size: p.size, available: Boolean(p.enabled && (freeStandard || p.normal_cost_micros > 0) && (kind === 'video' ? p.video_pool_enabled && videoMarginOk : p.channel_enabled && !p.deleted_at)) }; if (kind === 'image') { item.engine = p.model === 'gpt-image-2' ? 'pro' : p.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'; item.label = p.model === 'gpt-image-2' ? '专业图片 · gpt-image-2.0' : p.model === 'gpt-image-2.5' ? '增强图片 · gpt-image-2.5（顶级画质）' : '标准图片 · 免费' } return item }), walletOnly: true }
   }
   async quote(userId: string, body: any, db: Pick<Database, 'query' | 'one'> = this.db) {
     const input = validateMedia(body)
@@ -153,6 +156,10 @@ export class MediaService {
     let charge = freeStandard ? 0n : fixedMode
       ? BigInt(price.fixed_unit_price_micros) * BigInt(input.units)
       : mediaPrice(normal > actual ? normal : actual,multiplier,rules.paymentFeeRateBps,rules.affiliateRateBps,rules.minimumMarginBps)
+    if (fixedMode) {
+      const minimum = mediaPrice(actual > normal ? actual : normal, multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps)
+      if (BigInt(price.fixed_unit_price_micros) < minimum) mediaError('视频售价暂不可用，当前成本未达到最低毛利保护线', 503)
+    }
     const snapshot = { normalCostMicros:normal.toString(),actualCostMicros:actual.toString(),multiplierBps:multiplier,feeBps:rules.paymentFeeRateBps,rebateBps:rules.affiliateRateBps,marginBps:rules.minimumMarginBps,costSource:price.cost_source,priceUpdatedAt:price.updated_at,priceMode:fixedMode?'fixed':'cost_plus_margin',fixedUnitPriceMicros:fixedMode?String(price.fixed_unit_price_micros):null,chargeMicros:charge.toString() }
     const cash = charge * 10000n / BigInt(multiplier)
     Object.assign(snapshot,{estimatedRevenueMicros:cash.toString(),estimatedFeesMicros:(cash*BigInt(rules.paymentFeeRateBps)/10000n).toString(),estimatedRebateMicros:(cash*BigInt(rules.affiliateRateBps)/10000n).toString(),estimatedProfitMicros:(cash-cash*BigInt(rules.paymentFeeRateBps+rules.affiliateRateBps)/10000n-actual).toString()})

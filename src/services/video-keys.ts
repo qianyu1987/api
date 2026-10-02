@@ -1,6 +1,8 @@
 import { decryptSecret, encryptSecret } from '../lib/crypto.js'
 import { Database, one, query, type DbClient } from '../db/index.js'
 import type { AppConfig } from '../config.js'
+import { mediaPrice } from '../lib/media.js'
+import { profitRules } from './profit.js'
 
 export const AGNES_VIDEO_BASE_URL = 'https://apihub.agnes-ai.com/v1'
 export const AGNES_VIDEO_MODEL = 'agnes-video-2.5-flash'
@@ -221,6 +223,11 @@ export class VideoKeyService {
       FROM media_prices WHERE model=$1 AND size='720P'`, [AGNES_VIDEO_MODEL])
     const unit = Number(price?.fixed_unit_price_micros || VIDEO_UNIT_PRICE_MICROS)
     const actual = Number(price?.actual_cost_micros || 0)
+    const settings = Object.fromEntries((await this.db.query<any>('SELECT key,value FROM app_settings')).map((row) => [row.key, row.value]))
+    const rules = profitRules(settings)
+    const multiplier = Math.max(rules.walletTopupMultiplierBps, this.config.walletTopupMultiplierBps)
+    const minimumUnit = Number(mediaPrice(BigInt(actual), multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps))
+    const marginOk = unit >= minimumUnit
     return {
       keys, availableKeys: available.length,
       remainingSeconds: available.reduce((sum, key) => sum + key.remainingSeconds, 0),
@@ -231,7 +238,8 @@ export class VideoKeyService {
         actualCostPerSecondMicros: actual,
         costSource: price?.cost_source || null,
         enabled: Boolean(price?.enabled),
-        available: Boolean(price?.enabled && price?.price_mode === 'fixed' && unit > 0),
+        available: Boolean(price?.enabled && price?.price_mode === 'fixed' && unit > 0 && marginOk),
+        marginOk,
         marginPercent: unit > 0 ? ((unit - actual) / unit) * 100 : 0,
       },
     }
