@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { fixedVideoPriceMicros, maskProviderKey, rankVideoCandidates, usageDayForTimezone, VIDEO_UNIT_PRICE_MICROS } from '../src/services/video-keys.js'
+import { deriveVideoKeyCost, fixedVideoPriceMicros, maskProviderKey, rankVideoCandidates, usageDayForTimezone, VIDEO_UNIT_PRICE_MICROS } from '../src/services/video-keys.js'
 
 describe('Agnes video key pool helpers', () => {
   test('uses the Asia/Shanghai calendar day instead of UTC near midnight', () => {
@@ -18,6 +18,17 @@ describe('Agnes video key pool helpers', () => {
     expect(fixedVideoPriceMicros(4)).toBe(140000n)
     expect(fixedVideoPriceMicros(10)).toBe(350000n)
     expect(fixedVideoPriceMicros(12)).toBe(420000n)
+  })
+
+  test('prefers verified per-second cost and amortizes subscription cost across 500 seconds/day', () => {
+    expect(deriveVideoKeyCost([
+      { actual_cost_per_second_micros: '1200', subscription_cost_micros: '999999', subscription_duration_days: 30 },
+      { actual_cost_per_second_micros: null, subscription_cost_micros: '15000000', subscription_duration_days: 30 },
+    ])).toEqual({ micros: 1200n, source: 'mixed_key_costs' })
+    expect(deriveVideoKeyCost([
+      { actual_cost_per_second_micros: null, subscription_cost_micros: '1000001', subscription_duration_days: 30 },
+    ])).toEqual({ micros: 67n, source: 'subscription_cost_per_second_micros' })
+    expect(deriveVideoKeyCost([{ actual_cost_per_second_micros: null, subscription_cost_micros: null, subscription_duration_days: null }])).toEqual({ micros: null, source: null })
   })
 
   test('ranks idle, fast and high-priority keys deterministically', () => {

@@ -25,6 +25,16 @@ describe('media pricing and input',()=>{
   const q=await s.quote('user',{kind:'image',engine:'pro',prompt:'test',size:'1K'})
   expect(q.chargeMicros).toBe('1250');expect(q.snapshot).toMatchObject({multiplierBps:50000,marginBps:5000,rebateBps:1000})
  })
+ test('uses an Agnes key actual cost for video margin and cost snapshots',async()=>{
+  const db:any={
+   one:vi.fn(async(sql:string)=>sql.includes('media_prices')?{enabled:true,channel_enabled:false,cost_source:'',normal_cost_micros:'1',actual_cost_micros:'1',price_mode:'fixed',fixed_unit_price_micros:'35000',channel_id:'channel'}:null),
+   query:vi.fn(async(sql:string)=>sql.includes('video_provider_keys')?[{actual_cost_per_second_micros:'1200',subscription_cost_micros:null,subscription_duration_days:null}]:[]),
+  }
+  const s=new MediaService(db,{walletTopupMultiplierBps:30000} as any)
+  const q=await s.quote('user',{kind:'video',prompt:'test',seconds:10,size:'720P'})
+  expect(q.chargeMicros).toBe('350000')
+  expect(q.snapshot).toMatchObject({actualCostMicros:'12000',costSource:'actual_cost_per_second_micros'})
+ })
  test.each([{kind:'video',size:'1080P'},{kind:'video',seconds:13},{kind:'video',mode:'reference'},{kind:'video',mode:'text',images:['https://example.com/a']},{kind:'video',mode:'keyframe'},{kind:'image',size:'100K'},{kind:'image',n:2},{kind:'image',images:['http://localhost/a']}])('rejects unsupported request %j',p=>{expect(()=>validateMedia({prompt:'test',...p})).toThrow()})
  test('only accepts HTTPS result links',()=>{expect(mediaResultUrl({data:[{url:'https://example.com/x.png'}]})).toBe('https://example.com/x.png');expect(mediaResultUrl({url:'javascript:alert(1)'})).toBeNull();expect(mediaResultUrl({metadata:{url:'https://example.com/video.mp4'}})).toBe('https://example.com/video.mp4')})
 })

@@ -144,6 +144,49 @@ export function fixedVideoPriceMicros(seconds: number): bigint {
   return BigInt(units) * BigInt(VIDEO_UNIT_PRICE_MICROS)
 }
 
+export type VideoKeyCost = {
+  micros: bigint | null
+  source: 'actual_cost_per_second_micros' | 'subscription_cost_per_second_micros' | 'mixed_key_costs' | null
+}
+
+function nonNegativeMicros(value: unknown): bigint | null {
+  if (value === null || value === undefined || value === '') return null
+  const text = String(value)
+  return /^\d+$/.test(text) ? BigInt(text) : null
+}
+
+/**
+ * Resolve the conservative per-second cost of the configured Agnes pool.
+ * An explicitly verified actual cost wins per key; otherwise the subscription
+ * cost is amortized across its valid days and the contracted 500 seconds/day.
+ * The highest key cost is used so adding a more expensive account cannot make
+ * the fixed public price pass the margin guardrail by accident.
+ */
+export function deriveVideoKeyCost(rows: Array<Pick<VideoKeyRow, 'actual_cost_per_second_micros' | 'subscription_cost_micros' | 'subscription_duration_days'>>): VideoKeyCost {
+  let maximum: bigint | null = null
+  let actualCount = 0
+  let subscriptionCount = 0
+  for (const row of rows) {
+    const actual = nonNegativeMicros(row.actual_cost_per_second_micros)
+    let cost = actual
+    if (actual !== null) actualCount += 1
+    else {
+      const subscription = nonNegativeMicros(row.subscription_cost_micros)
+      const days = Number(row.subscription_duration_days)
+      if (subscription !== null && Number.isInteger(days) && days > 0) {
+        const divisor = BigInt(days) * BigInt(VIDEO_DAILY_LIMIT_SECONDS)
+        cost = (subscription + divisor - 1n) / divisor
+        subscriptionCount += 1
+      }
+    }
+    if (cost !== null && (maximum === null || cost > maximum)) maximum = cost
+  }
+  const source = maximum === null ? null : actualCount > 0 && subscriptionCount > 0
+    ? 'mixed_key_costs'
+    : actualCount > 0 ? 'actual_cost_per_second_micros' : 'subscription_cost_per_second_micros'
+  return { micros: maximum, source }
+}
+
 function statusFor(row: VideoKeyRow, remaining: number): VideoKeyAdmin['status'] {
   if (!row.enabled || !row.video_generation_enabled) return 'paused'
   if (row.probe_status === 'failed') return 'probe_failed'
@@ -219,15 +262,20 @@ export class VideoKeyService {
     const available = keys.filter((key) => key.status === 'ready' || key.status === 'near_limit')
     const queueRows = await this.db.query<{ count: string }>(`SELECT count(*)::text AS count FROM media_tasks WHERE kind='video' AND status IN ('queued','submitting')`)
     const fastest = [...available].sort((a, b) => (a.latencyP95Ms ?? Number.POSITIVE_INFINITY) - (b.latencyP95Ms ?? Number.POSITIVE_INFINITY) || a.priority - b.priority || a.id.localeCompare(b.id))[0] || null
-    const price = await this.db.one<any>(`SELECT enabled,price_mode,fixed_unit_price_micros,actual_cost_micros,cost_source
+    const price = await this.db.one<any>(`SELECT enabled,price_mode,fixed_unit_price_micros,normal_cost_micros,actual_cost_micros,cost_source
       FROM media_prices WHERE model=$1 AND size='720P'`, [AGNES_VIDEO_MODEL])
+    const keyCostRows = await this.db.query<any>(`SELECT actual_cost_per_second_micros,subscription_cost_micros,subscription_duration_days
+      FROM video_provider_keys WHERE actual_cost_per_second_micros IS NOT NULL
+        OR (subscription_cost_micros IS NOT NULL AND subscription_duration_days IS NOT NULL)`)
+    const keyCost = deriveVideoKeyCost(keyCostRows)
+    const fallbackActual = Math.max(Number(price?.actual_cost_micros || 0), Number(price?.normal_cost_micros || 0))
+    const actual = keyCost.micros ?? BigInt(fallbackActual)
     const unit = Number(price?.fixed_unit_price_micros || VIDEO_UNIT_PRICE_MICROS)
-    const actual = Number(price?.actual_cost_micros || 0)
     const settings = Object.fromEntries((await this.db.query<any>('SELECT key,value FROM app_settings')).map((row) => [row.key, row.value]))
     const rules = profitRules(settings)
     const multiplier = Math.max(rules.walletTopupMultiplierBps, this.config.walletTopupMultiplierBps)
-    const minimumUnit = Number(mediaPrice(BigInt(actual), multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps))
-    const marginOk = unit >= minimumUnit
+    const minimumUnit = actual > 0n ? Number(mediaPrice(actual, multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps)) : 0
+    const marginOk = actual > 0n && unit >= minimumUnit
     return {
       keys, availableKeys: available.length,
       remainingSeconds: available.reduce((sum, key) => sum + key.remainingSeconds, 0),
@@ -235,12 +283,12 @@ export class VideoKeyService {
       pricing: {
         pricePerSecondMicros: unit,
         specs: [4, 10, 12].map((seconds) => ({ seconds, priceMicros: unit * seconds })),
-        actualCostPerSecondMicros: actual,
-        costSource: price?.cost_source || null,
+        actualCostPerSecondMicros: Number(actual),
+        costSource: keyCost.source || price?.cost_source || null,
         enabled: Boolean(price?.enabled),
         available: Boolean(price?.enabled && price?.price_mode === 'fixed' && unit > 0 && marginOk),
         marginOk,
-        marginPercent: unit > 0 ? ((unit - actual) / unit) * 100 : 0,
+        marginPercent: unit > 0 ? ((unit - Number(actual)) / unit) * 100 : 0,
       },
     }
   }

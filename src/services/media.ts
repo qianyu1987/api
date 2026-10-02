@@ -4,7 +4,7 @@ import type { AppConfig } from '../config.js'
 import { decryptSecret } from '../lib/crypto.js'
 import { mediaError, mediaPrice, validateMedia, mediaResultUrl, agnesVideoQueueFull } from '../lib/media.js'
 import { profitRules } from './profit.js'
-import type { VideoKeyService } from './video-keys.js'
+import { deriveVideoKeyCost, type VideoKeyService } from './video-keys.js'
 
 const canonical = (v: any): string => JSON.stringify(v, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.keys(value).sort().map(k => [k, value[k]])) : value)
 const sensitiveVisualTerms = ['前凸后翘','胸部挺拔','胸部丰满','丰满胸部','饱满胸部','臀部圆润','丰满臀部','极少服饰','衣着暴露','衣着清凉','挑逗姿势','挑逗性','露骨性感','性感身材','透视服装','裸露身体','裸体','内衣写真','色情']
@@ -136,31 +136,44 @@ export class MediaService {
     const settings = Object.fromEntries((await this.db.query<any>('SELECT key,value FROM app_settings')).map((row) => [row.key, row.value]))
     const rules = profitRules(settings)
     const multiplier = Math.max(rules.walletTopupMultiplierBps, this.config.walletTopupMultiplierBps)
-    return { items: rows.map(p => { const kind = p.model === 'agnes-video-2.5-flash' ? 'video' : 'image'; const freeStandard = p.model === 'agnes-image-2.5-flash'; const videoFloor = kind === 'video' ? mediaPrice(BigInt(p.actual_cost_micros || 0), multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps) : 0n; const videoMarginOk = kind !== 'video' || BigInt(p.fixed_unit_price_micros || 0) >= videoFloor; const item: any = { kind, size: p.size, available: Boolean(p.enabled && (freeStandard || p.normal_cost_micros > 0) && (kind === 'video' ? p.video_pool_enabled && videoMarginOk : p.channel_enabled && !p.deleted_at)) }; if (kind === 'image') { item.engine = p.model === 'gpt-image-2' ? 'pro' : p.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'; item.label = p.model === 'gpt-image-2' ? '专业图片 · gpt-image-2.0' : p.model === 'gpt-image-2.5' ? '增强图片 · gpt-image-2.5（顶级画质）' : '标准图片 · 免费' } return item }), walletOnly: true }
+    const keyCostRows = await this.db.query<any>(`SELECT actual_cost_per_second_micros,subscription_cost_micros,subscription_duration_days
+      FROM video_provider_keys WHERE actual_cost_per_second_micros IS NOT NULL
+        OR (subscription_cost_micros IS NOT NULL AND subscription_duration_days IS NOT NULL)`)
+    const keyCost = deriveVideoKeyCost(keyCostRows)
+    return { items: rows.map(p => { const kind = p.model === 'agnes-video-2.5-flash' ? 'video' : 'image'; const freeStandard = p.model === 'agnes-image-2.5-flash'; const fallbackCost = BigInt(Math.max(Number(p.actual_cost_micros || 0), Number(p.normal_cost_micros || 0))); const effectiveVideoCost = keyCost.micros ?? fallbackCost; const videoFloor = kind === 'video' && effectiveVideoCost > 0n ? mediaPrice(effectiveVideoCost, multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps) : 0n; const videoMarginOk = kind !== 'video' || (effectiveVideoCost > 0n && BigInt(p.fixed_unit_price_micros || 0) > 0n && BigInt(p.fixed_unit_price_micros || 0) >= videoFloor); const item: any = { kind, size: p.size, available: Boolean(p.enabled && (freeStandard || p.normal_cost_micros > 0) && (kind === 'video' ? p.video_pool_enabled && videoMarginOk : p.channel_enabled && !p.deleted_at)) }; if (kind === 'image') { item.engine = p.model === 'gpt-image-2' ? 'pro' : p.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'; item.label = p.model === 'gpt-image-2' ? '专业图片 · gpt-image-2.0' : p.model === 'gpt-image-2.5' ? '增强图片 · gpt-image-2.5（顶级画质）' : '标准图片 · 免费' } return item }), walletOnly: true }
   }
   async quote(userId: string, body: any, db: Pick<Database, 'query' | 'one'> = this.db) {
     const input = validateMedia(body)
     const price = await db.one<any>('SELECT p.*,c.enabled AS channel_enabled,c.deleted_at FROM media_prices p LEFT JOIN channels c ON c.id=p.channel_id WHERE p.model=$1 AND p.size=$2', [input.model,input.size])
+    const keyCostRows = input.kind === 'video' ? await db.query<any>(`SELECT actual_cost_per_second_micros,subscription_cost_micros,subscription_duration_days
+      FROM video_provider_keys WHERE actual_cost_per_second_micros IS NOT NULL
+        OR (subscription_cost_micros IS NOT NULL AND subscription_duration_days IS NOT NULL)`) : []
+    const keyCost = deriveVideoKeyCost(keyCostRows)
     // Video jobs are allowed into the queue while every key is busy or
     // temporarily unavailable; the worker will keep them queued until a
     // candidate becomes eligible or the existing queue window expires.
-    if (!price?.enabled || (input.kind === 'video' ? false : !price.channel_enabled || price.deleted_at) || !price.cost_source) mediaError('此规格暂未开放，尚未扣费，请选择其他规格或稍后再试',503)
+    if (!price?.enabled || (input.kind === 'video' ? false : !price.channel_enabled || price.deleted_at) || (!price.cost_source && keyCost.micros === null)) mediaError('此规格暂未开放，尚未扣费，请选择其他规格或稍后再试',503)
     const settings = Object.fromEntries((await db.query<any>('SELECT key,value FROM app_settings')).map(r=>[r.key,r.value]))
     const rules = profitRules(settings)
     // Use the largest historical recharge ratio, not just today's promotion.
     const ratio = await db.one<any>(`SELECT COALESCE(max(topup_multiplier_bps),10000)::int AS bps FROM orders WHERE kind='wallet_topup' AND status='paid'`)
     const multiplier = Math.max(rules.walletTopupMultiplierBps,this.config.walletTopupMultiplierBps,Number(ratio?.bps || 10000))
-    const normal = BigInt(price.normal_cost_micros)*BigInt(input.units), actual = BigInt(price.actual_cost_micros)*BigInt(input.units)
+    const normalUnit = BigInt(price.normal_cost_micros || 0)
+    const fallbackActualUnit = BigInt(price.actual_cost_micros || 0)
+    const effectiveActualUnit = input.kind === 'video' ? (keyCost.micros ?? (normalUnit > fallbackActualUnit ? normalUnit : fallbackActualUnit)) : fallbackActualUnit
+    const normal = normalUnit*BigInt(input.units), actual = effectiveActualUnit*BigInt(input.units)
     const freeStandard = input.model === 'agnes-image-2.5-flash'
     const fixedMode = input.kind === 'video' && price.price_mode === 'fixed' && Number(price.fixed_unit_price_micros || 0) > 0
     let charge = freeStandard ? 0n : fixedMode
       ? BigInt(price.fixed_unit_price_micros) * BigInt(input.units)
       : mediaPrice(normal > actual ? normal : actual,multiplier,rules.paymentFeeRateBps,rules.affiliateRateBps,rules.minimumMarginBps)
     if (fixedMode) {
-      const minimum = mediaPrice(actual > normal ? actual : normal, multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps)
+      // fixed_unit_price_micros is a per-second price; compare it against a
+      // per-second cost before applying the requested clip duration.
+      const minimum = mediaPrice(effectiveActualUnit > normalUnit ? effectiveActualUnit : normalUnit, multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps)
       if (BigInt(price.fixed_unit_price_micros) < minimum) mediaError('视频售价暂不可用，当前成本未达到最低毛利保护线', 503)
     }
-    const snapshot = { normalCostMicros:normal.toString(),actualCostMicros:actual.toString(),multiplierBps:multiplier,feeBps:rules.paymentFeeRateBps,rebateBps:rules.affiliateRateBps,marginBps:rules.minimumMarginBps,costSource:price.cost_source,priceUpdatedAt:price.updated_at,priceMode:fixedMode?'fixed':'cost_plus_margin',fixedUnitPriceMicros:fixedMode?String(price.fixed_unit_price_micros):null,chargeMicros:charge.toString() }
+    const snapshot = { normalCostMicros:normal.toString(),actualCostMicros:actual.toString(),multiplierBps:multiplier,feeBps:rules.paymentFeeRateBps,rebateBps:rules.affiliateRateBps,marginBps:rules.minimumMarginBps,costSource:keyCost.source || price.cost_source,priceUpdatedAt:price.updated_at,priceMode:fixedMode?'fixed':'cost_plus_margin',fixedUnitPriceMicros:fixedMode?String(price.fixed_unit_price_micros):null,chargeMicros:charge.toString() }
     const cash = charge * 10000n / BigInt(multiplier)
     Object.assign(snapshot,{estimatedRevenueMicros:cash.toString(),estimatedFeesMicros:(cash*BigInt(rules.paymentFeeRateBps)/10000n).toString(),estimatedRebateMicros:(cash*BigInt(rules.affiliateRateBps)/10000n).toString(),estimatedProfitMicros:(cash-cash*BigInt(rules.paymentFeeRateBps+rules.affiliateRateBps)/10000n-actual).toString()})
     const giftRow = await db.one<any>('SELECT images_remaining,video_seconds_remaining FROM media_welcome_gifts WHERE user_id=$1',[userId])
