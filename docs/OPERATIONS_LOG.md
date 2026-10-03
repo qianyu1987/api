@@ -409,3 +409,13 @@
 - 发布前生产备份位于 `/opt/relay-station-backups/pre-v1.0.111-quota-reset-20261003T121400Z`：PostgreSQL dump 267384821 字节，容器内 `pg_restore --list` 校验通过，同时保存生产 `.env`、Compose 配置和旧镜像信息。Migration 成功。
 - 生产两个 API 副本均为 `relay-station:v1.0.111` 且 healthy，Gateway、PostgreSQL、Redis 正常；`https://www.hhtc.top/healthz`、`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health` 返回 200，首页静态资源已更新为 `app.js?v=1.0.111`。
 - 管理员按授权完成一次线上“刷新额度”：重置前为 `4/500` 秒（无预留），重置后为 `0/500` 秒、剩余 `500` 秒、`reserved=0`、`released=0`。审计日志已核对 `resource_type=video_provider_key_usage_reset`，包含重置前后秒数和管理员填写的原因。没有重新提交视频任务，也未修改价格、成本或 Agnes Key。
+
+## Agnes 额度来源更正：v1.0.112（2026-10-03 CST）
+
+- 用户指出 `0/500` 与上游不符。核验发现前一版本的刷新只是清零本站 `video_key_usage_daily`，从未查询或重置 Agnes 配额；已接单 4 秒仍保存在 `media_tasks.quota_seconds_used`。因此不能将此前的本地清零称作上游额度同步。
+- 官方公开证据：`https://www.agnes-ai.com/en/docs/tokenplan` 规定视频按时长计量、500 秒/天、同账号同类型 Key 共用配额；订阅页前端使用网页登录令牌调用 `https://platform-backend.agnes-ai.com/api/user/subscription`，数据为 `usage.video_generation.daily`（limit、used、reset_at、time_range_start/end），控制台时间标注 UTC。以数据库中现有 API Key 对该准确地址进行一次只读请求返回 HTTP 401，未返回视频用量；未接入 Cookie、账号密码或网页令牌。文档未确认接单后失败是否退秒，本站的 4 秒不能当成供应商已确认用量。
+- 新增管理员核对接口，只增加漏记的本站接单秒数并保持预留、释放和日上限；超过限额返回 409。API 明确返回本站账本来源与上游 unknown 状态；页面将“今日剩余”改为“本站可分配”，用量显示“本站已接单”及“上游额度：未同步”。取消清零快捷入口，替换为“核对本站用量”；旧重置接口保护历史接单用量，返回 409。
+- 同步修复视频 submitting/unknown 的取消入口，避免请求已到上游但未收到编号时释放秒数；任务分配 UPDATE 必须返回有效行，否则回滚预留且不返回 Key。新增用量恢复/幂等/保持预留/跨日/超限/不清零/分配失效/权限/取消状态回归。28 个测试文件、333 项测试通过，TypeScript、构建、前端语法、diff 检查通过；设计规则扫描无发现。
+- 提交 `5e64267` 已推送 `origin/main`；发布归档 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.112-quota-source/relay-station-v1.0.112.tar.gz`，SHA-256 `280ca36b93ad8d2171555c62d56a47a88b31349d28aa5747f11564e1b20df654`。生产备份 `/opt/relay-station-backups/pre-v1.0.112-quota-source-20261003T140058Z/` 包含 PostgreSQL custom dump（267387074 字节、pg_restore 列表校验通过）、生产 .env、Compose、旧镜像信息与源码，旧 v1.0.111 镜像保留。
+- Migration 成功，两个 API 副本已部署 v1.0.112 且 healthy，Gateway/PostgreSQL/Redis healthy；www/api 健康接口与 API v1 health 200，首页加载 `app.js?v=1.0.112`。管理员在真实浏览器点击核对成功，本站已用 `0 -> 4`、预留 0、本地剩余 496，审计已确认；961px 桌面和390px手机页面无整体横向溢出。截图位于发布归档同目录的 `desktop.jpg`、`mobile.jpg`、`quota-result.jpg`。
+- 本次未创建新媒体、支付或模型请求，没有更改 Key、价格、成本或用户账务。上游实时额度仍未接通；等待核对上游已用/剩余秒数与重置窗口。模糊超时释放预留、配置编辑与接单的现有锁顺序不属于已完成的上游配额验证。

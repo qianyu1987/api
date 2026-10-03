@@ -1,6 +1,6 @@
 # GPT TOKEN / Relay Station 项目长期记忆
 
-最后核对：2026-10-01。这是跨会话交接记录，事实来源为用户指令、当前源码、Git 和实际运维结果。动态状态以重新检查为准；最近发布证据见 [OPERATIONS_LOG.md](OPERATIONS_LOG.md)。
+最后核对：2026-10-03。这是跨会话交接记录，事实来源为用户指令、当前源码、Git 和实际运维结果。动态状态以重新检查为准；最近发布证据见 [OPERATIONS_LOG.md](OPERATIONS_LOG.md)。
 
 ## 项目与范围
 
@@ -78,6 +78,8 @@ Node.js 22+、TypeScript、Fastify，PostgreSQL 是账务唯一事实来源，Re
 ## 上游额度显示的已知边界
 
 RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游账户钱包余额；单位换算依赖 `/api/status` 的 `quota_per_unit`。代码已标记 `scope='api_key'`，负配额显示为超额使用而非账户欠款。用户上游后台有钱与 Key 配额不足可以同时成立。不能用这次标签修复声称账户钱包余额已对齐；必要时核对官方账户余额接口，不索要或暴露凭据。Agnes 余额接口目前未支持。
+
+视频 Key 的 `video_key_usage_daily` 是本站接单/预留账本，不是 Agnes 实时配额。Agnes 官方控制台以网页登录令牌读取 `platform-backend.agnes-ai.com/api/user/subscription`，视频用量在 `usage.video_generation.daily`；2026-10-03 以现有 API Key 对此接口的只读请求返回 401。官方 TokenPlan 文档规定同账号同类型 Key 共用额度池，不能用多个 Key 复制同一个账号的 500 秒。本站北京时间额度桶与上游实际重置窗口不能未经验证视为相同；失败任务是否被上游退秒尚未确认。
 
 ## 最近上游运行事件
 
@@ -239,3 +241,11 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 - 提交 `23f28df` 已推送 `origin/main`；本地 28 个测试文件 / 314 项通过，TypeScript、构建和 `git diff --check` 通过。发布归档为 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.111-reset/relay-station-v1.0.111.tar.gz`。
 - 生产备份 `/opt/relay-station-backups/pre-v1.0.111-quota-reset-20261003T121400Z` 已完成，PostgreSQL dump 可由 `pg_restore --list` 读取。两个 API 副本已部署 `relay-station:v1.0.111` 且 healthy，Gateway/PostgreSQL/Redis 正常，公网健康接口 200。
 - 已按管理员授权在线刷新视频额度：审计前 `4/500` 秒、无预留；审计后 `0/500` 秒、剩余 `500` 秒。没有重新提交视频任务或修改价格、成本、Key。后续继续观察视频上游出片稳定性；本次额度刷新本身已完成并可审计。
+
+## 2026-10-03 额度来源更正与本站账本核对：v1.0.112
+
+- 用户指出上述 `0/500` 与上游不符。已确认 v1.0.111 只清零本站账本，不能重置或读取 Agnes 配额；此前“刷新完成”不得解释为已同步上游。按保留的任务接单秒数，后台核对已恢复本站 `4/500`、预留 0、本地剩余 496，审计为 `video_provider_key_usage_reconcile` 的 `0 -> 4`；这 4 秒仍不是已核实的 Agnes 扣秒量。
+- 新增管理员 `POST /api/admin/video/keys/:id/reconcile-usage`，只补回漏记的接单秒数，保留预留、释放量及日上限，不减记、不截断、不修改账务。Key/概览/核对响应标注 `quotaSource=local_ledger` 和 `upstreamQuota.status=unknown`；后台显示“本站已接单”“本站可分配”“上游额度：未同步”，将重置按钮替换为“核对本站用量”。旧重置接口拒绝已有接单、活动任务或预留（409）。
+- 视频 submitting/unknown 即使无上游任务号也不允许取消；预留必须成功绑定有效任务，否则事务回滚，防止已提交任务取消后漏记上游秒数。已有模糊超时后释放预留、普通配置编辑与接单的锁顺序仍需单独评估；不能称为所有上游账务行为均已验证。
+- 提交 `5e64267` 已推送并部署 `relay-station:v1.0.112`。28 个文件 / 333 项测试、类型检查、构建、前端语法和 diff 检查通过；两个 API 副本及 Gateway/PostgreSQL/Redis healthy，三个公网健康接口 200，首页脚本为 v1.0.112。桌面 961px 和手机 390px 无页面整体横向溢出，后台按钮实测恢复用量。
+- 生产备份 `/opt/relay-station-backups/pre-v1.0.112-quota-source-20261003T140058Z/`，PostgreSQL custom dump 267387074 字节且 `pg_restore --list` 可读；旧 v1.0.111 镜像、配置、源码归档保留。未提交新的视频任务、支付或模型调用；Key、价格与成本不变。仍未接通 API Key 可用的上游额度查询，需核对管理员提供的上游已用/剩余秒数和实际重置窗口。
