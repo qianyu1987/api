@@ -2105,10 +2105,10 @@ export async function start(): Promise<void> {
   const mediaTimer = setInterval(() => {
     if (mediaBusy) return
     mediaBusy = true
-    // Four independent database leases let each API replica make progress on
-    // several jobs while SKIP LOCKED and per-Key max_concurrency still cap
-    // actual upstream submissions.
-    void Promise.all(Array.from({ length: 4 }, () => media.tick()))
+    // Lease a bounded batch per replica. Each provider key is still selected
+    // under its own row lock and max_concurrency/quota checks, so replicas
+    // cannot oversubscribe a key while keeping several jobs in flight.
+    void media.tick(4)
       .catch((error) => services.app.log.error({ err: error }, 'Media worker tick failed'))
       .finally(() => { mediaBusy = false })
   }, 3000)

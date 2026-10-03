@@ -26,6 +26,7 @@ type VideoKeyRow = {
   last_success_at: string | Date | null
   latency_p50_ms: number | string | null
   latency_p95_ms: number | string | null
+  latency_ewma_ms: number | string | null
   success_count: number | string
   failure_count: number | string
   cooldown_until: string | Date | null
@@ -42,6 +43,7 @@ type VideoKeyRow = {
   released_seconds?: number | string | null
   limit_seconds?: number | string | null
   active_count?: number | string | null
+  queued_count?: number | string | null
 }
 
 export type VideoKeyAdmin = {
@@ -51,12 +53,14 @@ export type VideoKeyAdmin = {
   keySuffix: string | null
   dailyLimitSeconds: number
   usageDay: string
+  timezone: string
   reservedSeconds: number
   usedSeconds: number
   releasedSeconds: number
   remainingSeconds: number
   maxConcurrency: number
   activeCount: number
+  queuedCount: number
   priority: number
   enabled: boolean
   videoGenerationEnabled: boolean
@@ -67,6 +71,7 @@ export type VideoKeyAdmin = {
   lastSuccessAt: string | Date | null
   latencyP50Ms: number | null
   latencyP95Ms: number | null
+  latencyEwmaMs: number | null
   successCount: number
   failureCount: number
   cooldownUntil: string | Date | null
@@ -87,7 +92,9 @@ export type VideoKeySelection = {
   maxConcurrency: number
   activeCount: number
   priority: number
+  latencyEwmaMs: number | null
   latencyP95Ms: number | null
+  successRate: number
 }
 
 export type VideoKeyInput = {
@@ -210,15 +217,16 @@ function publicRow(row: VideoKeyRow, config: AppConfig): VideoKeyAdmin {
   }
   return {
     id: String(row.id), channelId: String(row.channel_id), accountLabel: row.account_label,
-    keySuffix, dailyLimitSeconds: limit, usageDay: String(row.usage_day || usageDayForTimezone(row.timezone)),
+    keySuffix, dailyLimitSeconds: limit, usageDay: String(row.usage_day || usageDayForTimezone(row.timezone)), timezone: row.timezone,
     reservedSeconds: reserved, usedSeconds: used, releasedSeconds: released,
     remainingSeconds: Math.max(0, limit - used - reserved), maxConcurrency: Number(row.max_concurrency),
-    activeCount: Number(row.active_count || 0), priority: Number(row.priority),
+    activeCount: Number(row.active_count || 0), queuedCount: Number(row.queued_count || 0), priority: Number(row.priority),
     enabled: Boolean(row.enabled), videoGenerationEnabled: Boolean(row.video_generation_enabled),
     promptExpansionEnabled: Boolean(row.prompt_expansion_enabled), probeStatus: row.probe_status,
     lastProbeAt: row.last_probe_at, lastProbeError: row.last_probe_error, lastSuccessAt: row.last_success_at,
     latencyP50Ms: row.latency_p50_ms === null || row.latency_p50_ms === undefined ? null : Number(row.latency_p50_ms),
     latencyP95Ms: row.latency_p95_ms === null || row.latency_p95_ms === undefined ? null : Number(row.latency_p95_ms),
+    latencyEwmaMs: row.latency_ewma_ms === null || row.latency_ewma_ms === undefined ? null : Number(row.latency_ewma_ms),
     successCount: Number(row.success_count || 0), failureCount: Number(row.failure_count || 0), cooldownUntil: row.cooldown_until,
     subscriptionCostMicros: row.subscription_cost_micros === null || row.subscription_cost_micros === undefined ? null : String(row.subscription_cost_micros),
     subscriptionDurationDays: row.subscription_duration_days === null || row.subscription_duration_days === undefined ? null : Number(row.subscription_duration_days),
@@ -228,13 +236,35 @@ function publicRow(row: VideoKeyRow, config: AppConfig): VideoKeyAdmin {
 }
 
 /** Stable speed/priority ordering used both by the worker and unit tests. */
-export function rankVideoCandidates<T extends { activeCount?: number | string; latencyP95Ms?: number | string | null; priority?: number | string; id: string }>(rows: T[]): T[] {
+export function rankVideoCandidates<T extends {
+  activeCount?: number | string | null
+  latencyP95Ms?: number | string | null
+  latencyEwmaMs?: number | string | null
+  successCount?: number | string
+  failureCount?: number | string
+  priority?: number | string
+  id: string
+}>(rows: T[]): T[] {
   return [...rows].sort((a, b) => {
     const active = Number(a.activeCount || 0) - Number(b.activeCount || 0)
     if (active) return active
+    const ae = a.latencyEwmaMs == null ? null : Number(a.latencyEwmaMs)
+    const be = b.latencyEwmaMs == null ? null : Number(b.latencyEwmaMs)
+    if (ae !== null || be !== null) {
+      const av = ae === null || !Number.isFinite(ae) ? Number.POSITIVE_INFINITY : ae
+      const bv = be === null || !Number.isFinite(be) ? Number.POSITIVE_INFINITY : be
+      if (av !== bv) return av - bv
+    }
     const ap = a.latencyP95Ms == null ? Number.POSITIVE_INFINITY : Number(a.latencyP95Ms)
     const bp = b.latencyP95Ms == null ? Number.POSITIVE_INFINITY : Number(b.latencyP95Ms)
     if (ap !== bp) return ap - bp
+    const aSuccess = Number(a.successCount || 0)
+    const bSuccess = Number(b.successCount || 0)
+    const aFailure = Number(a.failureCount || 0)
+    const bFailure = Number(b.failureCount || 0)
+    const aRate = aSuccess + aFailure > 0 ? aSuccess / (aSuccess + aFailure) : 0
+    const bRate = bSuccess + bFailure > 0 ? bSuccess / (bSuccess + bFailure) : 0
+    if (aRate !== bRate) return bRate - aRate
     const priority = Number(a.priority || 0) - Number(b.priority || 0)
     return priority || String(a.id).localeCompare(String(b.id))
   })
@@ -247,7 +277,9 @@ export class VideoKeyService {
     return this.db.query<VideoKeyRow>(`SELECT vk.*, c.base_url, c.encrypted_api_key, c.enabled AS channel_enabled, c.deleted_at AS channel_deleted_at,
       u.usage_day, u.reserved_seconds, u.used_seconds, u.released_seconds, u.limit_seconds,
       (SELECT count(*)::int FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id
-        AND mt.status IN ('queued','submitting','processing','unknown')) AS active_count
+        AND mt.status IN ('queued','submitting','processing','unknown')) AS active_count,
+      (SELECT count(*)::int FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id
+        AND mt.status='queued') AS queued_count
       FROM video_provider_keys vk
       JOIN channels c ON c.id=vk.channel_id
       LEFT JOIN video_key_usage_daily u ON u.key_id=vk.id
@@ -399,8 +431,12 @@ export class VideoKeyService {
       const row = await one<VideoKeyRow>(client, 'SELECT * FROM video_provider_keys WHERE id=$1 FOR UPDATE', [id])
       if (!row) throw Object.assign(new Error('视频 Key 不存在'), { statusCode: 404 })
       const day = usageDayForTimezone(row.timezone)
+      const usage = await one<any>(client, 'SELECT * FROM video_key_usage_daily WHERE key_id=$1 AND usage_day=$2 FOR UPDATE', [id, day])
+      if (usage && (Number(usage.reserved_seconds || 0) > 0 || Number(usage.used_seconds || 0) > 0)) {
+        throw new Error('今日已有生成任务或已用额度，不能重置；请等待任务结束并保留已用账本')
+      }
       await client.query(`INSERT INTO video_key_usage_daily(key_id,usage_day,limit_seconds) VALUES($1,$2,$3)
-        ON CONFLICT(key_id,usage_day) DO UPDATE SET reserved_seconds=0,used_seconds=0,released_seconds=0,limit_seconds=EXCLUDED.limit_seconds,updated_at=now()`, [id, day, row.daily_limit_seconds])
+        ON CONFLICT(key_id,usage_day) DO UPDATE SET reserved_seconds=0,released_seconds=0,limit_seconds=EXCLUDED.limit_seconds,updated_at=now()`, [id, day, row.daily_limit_seconds])
       await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'video_provider_key_usage_reset',$2,NULL,$3)`, [actorId || null, id, JSON.stringify({ usageDay: day, reason: String(reason).trim().slice(0, 500) })])
     })
   }
@@ -418,16 +454,25 @@ export class VideoKeyService {
       WHERE c.base_url=$1 AND c.enabled AND c.deleted_at IS NULL AND c.encrypted_api_key IS NOT NULL
         AND vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed'
         AND (vk.cooldown_until IS NULL OR vk.cooldown_until<=now())
-      ORDER BY COALESCE((SELECT count(*) FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id AND mt.status IN ('queued','submitting','processing','unknown')),0), vk.latency_p95_ms NULLS LAST, vk.priority, vk.id
+      ORDER BY COALESCE((SELECT count(*) FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id AND mt.status IN ('queued','submitting','processing','unknown')),0), vk.latency_ewma_ms NULLS LAST, vk.latency_p95_ms NULLS LAST, vk.priority, vk.id
       FOR UPDATE OF vk SKIP LOCKED`, [AGNES_VIDEO_BASE_URL])
-    const ranked = [...rows].sort((a, b) => {
-      const active = Number(a.active_count || 0) - Number(b.active_count || 0)
-      if (active) return active
-      const ap = a.latency_p95_ms == null ? Number.POSITIVE_INFINITY : Number(a.latency_p95_ms)
-      const bp = b.latency_p95_ms == null ? Number.POSITIVE_INFINITY : Number(b.latency_p95_ms)
-      if (ap !== bp) return ap - bp
-      return Number(a.priority) - Number(b.priority) || String(a.id).localeCompare(String(b.id))
-    })
+    type RankedVideoRow = VideoKeyRow & {
+      activeCount?: number | string | null
+      latencyP95Ms?: number | string | null
+      latencyEwmaMs?: number | string | null
+      successCount?: number | string
+      failureCount?: number | string
+    }
+    const ranked = rankVideoCandidates<RankedVideoRow>(rows.map((row) => ({
+      ...row,
+      id: String(row.id),
+      activeCount: row.active_count,
+      latencyP95Ms: row.latency_p95_ms,
+      latencyEwmaMs: row.latency_ewma_ms,
+      successCount: row.success_count,
+      failureCount: row.failure_count,
+      priority: row.priority,
+    })))
     for (const row of ranked) {
       const day = usageDayForTimezone(row.timezone)
       await client.query(`INSERT INTO video_key_usage_daily(key_id,usage_day,limit_seconds) VALUES($1,$2,$3) ON CONFLICT(key_id,usage_day) DO NOTHING`, [row.id, day, row.daily_limit_seconds])
@@ -437,8 +482,13 @@ export class VideoKeyService {
       if (active >= Number(row.max_concurrency) || Number(usage.used_seconds) + Number(usage.reserved_seconds) + amount > Number(usage.limit_seconds)) continue
       const updated = await one<any>(client, `UPDATE video_key_usage_daily SET reserved_seconds=reserved_seconds+$3,updated_at=now() WHERE key_id=$1 AND usage_day=$2 AND used_seconds+reserved_seconds+$3<=limit_seconds RETURNING reserved_seconds`, [row.id, day, amount])
       if (!updated) continue
-      await client.query(`UPDATE media_tasks SET video_provider_key_id=$2,quota_day=$3,quota_seconds_reserved=$4,selection_snapshot=$5 WHERE id=$1 AND status IN ('queued','submitting')`, [taskId, row.id, day, amount, JSON.stringify({ accountLabel: row.account_label, priority: row.priority, latencyP95Ms: row.latency_p95_ms, selectedAt: new Date().toISOString() })])
-      return { id: String(row.id), channelId: String(row.channel_id), accountLabel: row.account_label, baseUrl: String(row.base_url), encryptedApiKey: String(row.encrypted_api_key), quotaDay: day, reservedSeconds: amount, maxConcurrency: Number(row.max_concurrency), activeCount: active, priority: Number(row.priority), latencyP95Ms: row.latency_p95_ms == null ? null : Number(row.latency_p95_ms) }
+      const successCount = Number(row.success_count || 0)
+      const failureCount = Number(row.failure_count || 0)
+      const successRate = successCount + failureCount > 0 ? successCount / (successCount + failureCount) : 0
+      const latencyEwmaMs = row.latency_ewma_ms == null ? null : Number(row.latency_ewma_ms)
+      const latencyP95Ms = row.latency_p95_ms == null ? null : Number(row.latency_p95_ms)
+      await client.query(`UPDATE media_tasks SET video_provider_key_id=$2,quota_day=$3,quota_seconds_reserved=$4,selection_snapshot=$5 WHERE id=$1 AND status IN ('queued','submitting')`, [taskId, row.id, day, amount, JSON.stringify({ accountLabel: row.account_label, priority: row.priority, latencyEwmaMs, latencyP95Ms, successRate, selectedAt: new Date().toISOString() })])
+      return { id: String(row.id), channelId: String(row.channel_id), accountLabel: row.account_label, baseUrl: String(row.base_url), encryptedApiKey: String(row.encrypted_api_key), quotaDay: day, reservedSeconds: amount, maxConcurrency: Number(row.max_concurrency), activeCount: active, priority: Number(row.priority), latencyEwmaMs, latencyP95Ms, successRate }
     }
     return null
   }
@@ -476,7 +526,8 @@ export class VideoKeyService {
       await this.db.query(`UPDATE video_provider_keys SET
         latency_p50_ms=(SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY duration_ms)::int FROM video_attempts WHERE key_id=$1 AND duration_ms IS NOT NULL),
         latency_p95_ms=(SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms)::int FROM video_attempts WHERE key_id=$1 AND duration_ms IS NOT NULL),
-        updated_at=now() WHERE id=$1`, [input.keyId])
+        latency_ewma_ms=CASE WHEN latency_ewma_ms IS NULL THEN $2 ELSE latency_ewma_ms * 0.7 + $2 * 0.3 END,
+        updated_at=now() WHERE id=$1`, [input.keyId, Number(input.durationMs)])
     }
     if (input.accepted || input.outcome === 'accepted' || input.outcome === 'submitted') return
     await this.db.query(`UPDATE video_provider_keys SET failure_count=failure_count+1,

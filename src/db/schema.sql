@@ -1257,6 +1257,7 @@ CREATE TABLE IF NOT EXISTS video_provider_keys (
   last_success_at TIMESTAMPTZ,
   latency_p50_ms INTEGER,
   latency_p95_ms INTEGER,
+  latency_ewma_ms NUMERIC,
   success_count INTEGER NOT NULL DEFAULT 0,
   failure_count INTEGER NOT NULL DEFAULT 0,
   cooldown_until TIMESTAMPTZ,
@@ -1273,10 +1274,14 @@ CREATE TABLE IF NOT EXISTS video_provider_keys (
   CHECK(success_count >= 0 AND failure_count >= 0),
   CHECK(latency_p50_ms IS NULL OR latency_p50_ms >= 0),
   CHECK(latency_p95_ms IS NULL OR latency_p95_ms >= 0),
+  CHECK(latency_ewma_ms IS NULL OR latency_ewma_ms >= 0),
   CHECK(subscription_cost_micros IS NULL OR subscription_cost_micros >= 0),
   CHECK(subscription_duration_days IS NULL OR subscription_duration_days > 0),
   CHECK(actual_cost_per_second_micros IS NULL OR actual_cost_per_second_micros >= 0)
 );
+ALTER TABLE video_provider_keys ADD COLUMN IF NOT EXISTS latency_ewma_ms NUMERIC;
+ALTER TABLE video_provider_keys DROP CONSTRAINT IF EXISTS video_provider_keys_latency_ewma_ms_check;
+ALTER TABLE video_provider_keys ADD CONSTRAINT video_provider_keys_latency_ewma_ms_check CHECK(latency_ewma_ms IS NULL OR latency_ewma_ms >= 0);
 CREATE INDEX IF NOT EXISTS video_provider_keys_available_idx
   ON video_provider_keys(enabled, video_generation_enabled, priority, id);
 

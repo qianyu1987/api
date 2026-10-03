@@ -373,7 +373,18 @@ export class MediaService {
       error_message=$4,lease_until=NULL,uncertain_since=NULL,next_attempt_at=$5,next_poll_at=$5
       WHERE id=$1 AND status='submitting' AND finished_at IS NULL`,[task.id,alternative?.id || null,alternative?'channel_switch':code,message,next])
   }
-  async tick() {
+  private async claimTasks(limit: number): Promise<any[]> {
+    return this.db.tx(async client => {
+      const result = await client.query<any>("SELECT * FROM media_tasks WHERE ((status='queued' AND COALESCE(next_attempt_at,next_poll_at,created_at)<=now()) OR (status IN ('processing','unknown') AND next_poll_at<=now())) AND (lease_until IS NULL OR lease_until<now()) ORDER BY created_at,id LIMIT $1 FOR UPDATE SKIP LOCKED", [limit])
+      const rows = Array.isArray(result?.rows) ? result.rows : []
+      if (!rows.length) return []
+      const ids = rows.map((row: any) => row.id)
+      await client.query("UPDATE media_tasks SET lease_until=now()+interval '7 minutes',status=CASE WHEN status='queued' THEN 'submitting' ELSE status END,submit_attempts=CASE WHEN status='queued' THEN submit_attempts+1 ELSE submit_attempts END WHERE id=ANY($1::uuid[]) AND finished_at IS NULL", [ids])
+      return rows.map((row: any) => ({ ...row, _wasQueued: row.status === 'queued', submit_attempts: Number(row.submit_attempts || 0) + (row.status === 'queued' ? 1 : 0) }))
+    })
+  }
+
+  private async maintainQueue() {
     await this.db.query("UPDATE media_tasks SET uncertain_since=now(),next_poll_at=LEAST(next_poll_at,now()) WHERE status='unknown' AND uncertain_since IS NULL")
     const expiredQueued = await this.db.query<any>("SELECT id FROM media_tasks WHERE kind='video' AND status='queued' AND queue_started_at<=now()-interval '30 minutes' AND (lease_until IS NULL OR lease_until<now()) ORDER BY queue_started_at LIMIT 20")
     for (const row of expiredQueued) await this.finish(String(row.id),false,null,'暂时无法安排生成，额度已全部退回',undefined,undefined,'queue_timeout')
@@ -381,12 +392,9 @@ export class MediaService {
     for (const row of expired) await this.finish(String(row.id),false,null,row.kind==='video'?'暂时无法安排生成，额度已全部退回':'生成结果未确认，额度已自动退回，可重新生成',undefined,undefined,'confirmation_timeout')
     // A crashed submission may have reached upstream. Never automatically resend.
     await this.db.query("UPDATE media_tasks SET status='unknown',uncertain_since=COALESCE(uncertain_since,now()),error_message='正在自动确认上游接单结果',lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE status='submitting' AND lease_until<now()")
-    const task=await this.db.tx(async client=>{
-      const r=await one<any>(client,"SELECT * FROM media_tasks WHERE ((status='queued' AND COALESCE(next_attempt_at,next_poll_at,created_at)<=now()) OR (status IN ('processing','unknown') AND next_poll_at<=now())) AND (lease_until IS NULL OR lease_until<now()) ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED");if(!r)return null
-      const wasQueued=r.status==='queued'
-      await client.query("UPDATE media_tasks SET lease_until=now()+interval '7 minutes',status=CASE WHEN status='queued' THEN 'submitting' ELSE status END,submit_attempts=CASE WHEN status='queued' THEN submit_attempts+1 ELSE submit_attempts END WHERE id=$1 AND finished_at IS NULL",[r.id])
-      return {...r,_wasQueued:wasQueued,submit_attempts:Number(r.submit_attempts||0)+(wasQueued?1:0)}
-    });if(!task)return
+  }
+
+  private async processClaimedTask(task: any) {
     const submitting=Boolean(task._wasQueued)
     let upstreamStatus: number | null = null
     let upstreamStartedAt = 0
@@ -494,5 +502,17 @@ export class MediaService {
       }
       await this.db.query("UPDATE media_tasks SET status='unknown',uncertain_since=COALESCE(uncertain_since,now()),error_message=$2,lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE id=$1 AND status IN ('submitting','processing','unknown') AND finished_at IS NULL",[task.id,detail+windowMessage])
     }
+  }
+
+  /**
+   * Lease and process a bounded batch. The default remains one task for
+   * direct callers and tests; the production worker passes four so each API
+   * replica can keep several provider slots busy without unbounded fan-out.
+   */
+  async tick(batchSize = 1) {
+    const limit = Math.max(1, Math.min(4, Number.isInteger(batchSize) ? batchSize : 1))
+    await this.maintainQueue()
+    const tasks = (await this.claimTasks(limit)) || []
+    await Promise.all(tasks.map(task => this.processClaimedTask(task)))
   }
 }

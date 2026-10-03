@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { deriveVideoKeyCost, fixedVideoPriceMicros, maskProviderKey, rankVideoCandidates, usageDayForTimezone, VIDEO_UNIT_PRICE_MICROS } from '../src/services/video-keys.js'
+import { deriveVideoKeyCost, fixedVideoPriceMicros, maskProviderKey, rankVideoCandidates, usageDayForTimezone, VIDEO_UNIT_PRICE_MICROS, VideoKeyService } from '../src/services/video-keys.js'
 
 describe('Agnes video key pool helpers', () => {
   test('uses the Asia/Shanghai calendar day instead of UTC near midnight', () => {
@@ -39,5 +39,24 @@ describe('Agnes video key pool helpers', () => {
       { id: 'c', activeCount: 0, latencyP95Ms: 100, priority: 1 },
     ])
     expect(rows.map((row) => row.id)).toEqual(['b', 'c', 'a', 'z'])
+  })
+
+  test('uses EWMA latency first and success rate as a stable tie breaker', () => {
+    const rows = rankVideoCandidates([
+      { id: 'low-success', activeCount: 0, latencyEwmaMs: 100, latencyP95Ms: 100, successCount: 1, failureCount: 9, priority: 1 },
+      { id: 'high-success', activeCount: 0, latencyEwmaMs: 100, latencyP95Ms: 100, successCount: 9, failureCount: 1, priority: 99 },
+      { id: 'fast-ewma', activeCount: 0, latencyEwmaMs: 50, latencyP95Ms: 500, successCount: 0, failureCount: 1, priority: 99 },
+    ])
+    expect(rows.map((row) => row.id)).toEqual(['fast-ewma', 'high-success', 'low-success'])
+  })
+
+  test('refuses to reset a key with used or reserved seconds', async () => {
+    const clientQuery = async (sql: string) => {
+      if (sql.startsWith('SELECT * FROM video_provider_keys')) return { rows: [{ id: 'key', timezone: 'Asia/Shanghai', daily_limit_seconds: 500 }] }
+      if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ reserved_seconds: 4, used_seconds: 0 }] }
+      throw new Error(`unexpected query: ${sql}`)
+    }
+    const db: any = { tx: async (fn: any) => fn({ query: clientQuery }) }
+    await expect(new VideoKeyService(db, {} as any).resetUsage('key', '保留任务不能重置')).rejects.toThrow('不能重置')
   })
 })
