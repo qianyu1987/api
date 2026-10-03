@@ -496,7 +496,13 @@ export class VideoKeyService {
       await client.query(`INSERT INTO video_key_usage_daily(key_id,usage_day,limit_seconds) VALUES($1,$2,$3) ON CONFLICT(key_id,usage_day) DO NOTHING`, [row.id, day, row.daily_limit_seconds])
       const usage = await one<any>(client, 'SELECT * FROM video_key_usage_daily WHERE key_id=$1 AND usage_day=$2 FOR UPDATE', [row.id, day])
       if (!usage) continue
-      const active = Number(row.active_count || 0)
+      // The candidate SELECT snapshot may have been taken while another
+      // reservation was waiting on this key row lock. Re-read activity after
+      // the lock so max_concurrency is enforced against committed work.
+      const activeRow = await one<{ count: number | string }>(client,
+        `SELECT count(*)::int AS count FROM media_tasks
+         WHERE video_provider_key_id=$1 AND status IN ('queued','submitting','processing','unknown')`, [row.id])
+      const active = Number(activeRow?.count || 0)
       if (active >= Number(row.max_concurrency) || Number(usage.used_seconds) + Number(usage.reserved_seconds) + amount > Number(usage.limit_seconds)) continue
       const updated = await one<any>(client, `UPDATE video_key_usage_daily SET reserved_seconds=reserved_seconds+$3,updated_at=now() WHERE key_id=$1 AND usage_day=$2 AND used_seconds+reserved_seconds+$3<=limit_seconds RETURNING reserved_seconds`, [row.id, day, amount])
       if (!updated) continue

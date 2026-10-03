@@ -82,4 +82,27 @@ describe('Agnes video key pool helpers', () => {
     }
     await expect(new VideoKeyService(db, {} as any).update('key', { dailyLimitSeconds: 399 })).rejects.toThrow('每日上限')
   })
+
+  test('rechecks active tasks after locking the usage bucket', async () => {
+    const candidate = {
+      id: 'key', channel_id: 'channel', account_label: 'Agnes', base_url: 'https://apihub.agnes-ai.com/v1',
+      encrypted_api_key: 'encrypted', daily_limit_seconds: 500, timezone: 'Asia/Shanghai', max_concurrency: 1,
+      priority: 100, enabled: true, video_generation_enabled: true, probe_status: 'passed',
+      success_count: 0, failure_count: 0, latency_ewma_ms: null, latency_p95_ms: null,
+    }
+    const statements: string[] = []
+    const db: any = {
+      tx: async (fn: any) => fn({ query: async (sql: string) => {
+        statements.push(sql)
+        if (sql.startsWith('SELECT vk.*')) return { rows: [candidate] }
+        if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ used_seconds: 0, reserved_seconds: 0, limit_seconds: 500 }] }
+        if (sql.includes('SELECT count(*)::int AS count FROM media_tasks')) return { rows: [{ count: 1 }] }
+        return { rows: [] }
+      } }),
+    }
+    await expect(new VideoKeyService(db, {} as any).reserveForTask('task', 4)).resolves.toBeNull()
+    const usageIndex = statements.findIndex((sql) => sql.startsWith('SELECT * FROM video_key_usage_daily'))
+    const activeIndex = statements.findIndex((sql) => sql.includes('SELECT count(*)::int AS count FROM media_tasks'))
+    expect(activeIndex).toBeGreaterThan(usageIndex)
+  })
 })
