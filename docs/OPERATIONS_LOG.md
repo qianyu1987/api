@@ -400,3 +400,12 @@
 - 2026-10-03 v1.0.110 管理后台细节调整：将危险性较高的“重置今日额度”从 Key 行内快捷按钮移入“更多”折叠菜单，保留必填重置原因和管理员审计。提交 `4de7be7` 已推送 `origin/main`；28 个测试文件 / 312 项通过，TypeScript 检查、构建、前端语法和 diff 检查通过。源码归档 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.110/relay-station-v1.0.110.tar.gz`，SHA-256 `c21ad4647859f6876cc2e7af118eac7786fd105d7c77f9272d486b42934cb4f4`。
 - v1.0.110 发布前备份 `/opt/relay-station-backups/pre-v1.0.110-video-ui-20261003T063000Z/`：PostgreSQL custom dump 348717364 字节、权限 0600，容器内 `pg_restore --list` 成功，目录 0700，配置权限 0600。Migration 成功，两个 API 副本均为 v1.0.110 / healthy，Gateway、PostgreSQL、Redis healthy，维护 timer active；`www.hhtc.top` 首页及 `www`/`api` 健康接口 200，`app.js?v=1.0.110` 的线上 SHA-256 与源码一致，未登录视频 Key 管理接口 401。此静态界面发布没有创建支付订单或视频任务，也没有改动 Key、成本或日额度。
 - 构建期间 npm audit 报告依赖树 12 项告警（3 moderate、6 high、3 critical；裁剪开发依赖后为 7 项，其中 5 high、2 critical）。本次未升级依赖；需单独评估具体 advisory 与兼容性后处理。
+
+## 视频额度重置修复：v1.0.111（2026-10-03 CST）
+
+- 根因：此前“重置今日额度”在已使用秒数大于 0 时无条件拒绝，导致已完成任务后的合法审计重置返回 500。现改为在同一事务中锁定视频 Key、当日额度桶和相关媒体任务；存在排队/提交中/生成中/结果确认中任务或残留预留时继续拒绝，全部任务结束后允许管理员清零 `used_seconds`、`reserved_seconds` 和 `released_seconds`，并记录重置前后数值与原因。
+- 新增回归覆盖：已有已用额度且无活动任务时允许重置；存在活动任务时拒绝；保留预留额度保护。28 个测试文件、314 项测试通过，TypeScript 检查、构建和 `git diff --check` 通过。
+- 提交 `23f28df` 已推送 `origin/main`。发布归档为 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.111-reset/relay-station-v1.0.111.tar.gz`，SHA-256 `77048a782345f2d570104e3129d4dc3c0cccede5c4cd6e5d28e00347051e5cbd`。
+- 发布前生产备份位于 `/opt/relay-station-backups/pre-v1.0.111-quota-reset-20261003T121400Z`：PostgreSQL dump 267384821 字节，容器内 `pg_restore --list` 校验通过，同时保存生产 `.env`、Compose 配置和旧镜像信息。Migration 成功。
+- 生产两个 API 副本均为 `relay-station:v1.0.111` 且 healthy，Gateway、PostgreSQL、Redis 正常；`https://www.hhtc.top/healthz`、`https://api.hhtc.top/healthz`、`https://api.hhtc.top/api/v1/health` 返回 200，首页静态资源已更新为 `app.js?v=1.0.111`。
+- 管理员按授权完成一次线上“刷新额度”：重置前为 `4/500` 秒（无预留），重置后为 `0/500` 秒、剩余 `500` 秒、`reserved=0`、`released=0`。审计日志已核对 `resource_type=video_provider_key_usage_reset`，包含重置前后秒数和管理员填写的原因。没有重新提交视频任务，也未修改价格、成本或 Agnes Key。
