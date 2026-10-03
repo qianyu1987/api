@@ -419,3 +419,8 @@
 - 提交 `5e64267` 已推送 `origin/main`；发布归档 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.112-quota-source/relay-station-v1.0.112.tar.gz`，SHA-256 `280ca36b93ad8d2171555c62d56a47a88b31349d28aa5747f11564e1b20df654`。生产备份 `/opt/relay-station-backups/pre-v1.0.112-quota-source-20261003T140058Z/` 包含 PostgreSQL custom dump（267387074 字节、pg_restore 列表校验通过）、生产 .env、Compose、旧镜像信息与源码，旧 v1.0.111 镜像保留。
 - Migration 成功，两个 API 副本已部署 v1.0.112 且 healthy，Gateway/PostgreSQL/Redis healthy；www/api 健康接口与 API v1 health 200，首页加载 `app.js?v=1.0.112`。管理员在真实浏览器点击核对成功，本站已用 `0 -> 4`、预留 0、本地剩余 496，审计已确认；961px 桌面和390px手机页面无整体横向溢出。截图位于发布归档同目录的 `desktop.jpg`、`mobile.jpg`、`quota-result.jpg`。
 - 本次未创建新媒体、支付或模型请求，没有更改 Key、价格、成本或用户账务。上游实时额度仍未接通；等待核对上游已用/剩余秒数与重置窗口。模糊超时释放预留、配置编辑与接单的现有锁顺序不属于已完成的上游配额验证。
+
+## 新 cpk 类型 Key 只读额度核查（2026-10-03 CST）
+
+- 用户提供另一枚 cpk 类型 Agnes Key，要求查询视频剩余秒数。只读模型目录请求返回 HTTP 200 且包含视频模型；准确的官方订阅查询 `https://platform-backend.agnes-ai.com/api/user/subscription` 返回 HTTP 401，未返回 `usage.video_generation.daily`。公开官方 `https://wiki.agnes-ai.com/en/docs/tokenplan` 及接口文档未发现支持 API Key 的剩余秒数查询；控制台用量接口依赖网页登录令牌。因此本次无法确认此 Key 实际剩余多少秒，不能把 500 秒套餐上限作为余额。
+- 依用户持续保存偏好，新凭据已写入并核验 macOS 钥匙串，记录不包含完整 Key。未创建或启用生产配置、未更换当前视频渠道、未发起媒体/付费模型请求或支付；生产部署版本沿用 v1.0.112。当前没有上游余量数字可写入后台。

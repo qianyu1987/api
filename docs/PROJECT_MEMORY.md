@@ -249,3 +249,8 @@ RIPP/YYAPI 的 `/api/usage/token/` 返回当前 API Key 的配额，不是上游
 - 视频 submitting/unknown 即使无上游任务号也不允许取消；预留必须成功绑定有效任务，否则事务回滚，防止已提交任务取消后漏记上游秒数。已有模糊超时后释放预留、普通配置编辑与接单的锁顺序仍需单独评估；不能称为所有上游账务行为均已验证。
 - 提交 `5e64267` 已推送并部署 `relay-station:v1.0.112`。28 个文件 / 333 项测试、类型检查、构建、前端语法和 diff 检查通过；两个 API 副本及 Gateway/PostgreSQL/Redis healthy，三个公网健康接口 200，首页脚本为 v1.0.112。桌面 961px 和手机 390px 无页面整体横向溢出，后台按钮实测恢复用量。
 - 生产备份 `/opt/relay-station-backups/pre-v1.0.112-quota-source-20261003T140058Z/`，PostgreSQL custom dump 267387074 字节且 `pg_restore --list` 可读；旧 v1.0.111 镜像、配置、源码归档保留。未提交新的视频任务、支付或模型调用；Key、价格与成本不变。仍未接通 API Key 可用的上游额度查询，需核对管理员提供的上游已用/剩余秒数和实际重置窗口。
+
+## 2026-10-03 新 cpk 类型 Agnes Key 的额度查询
+
+- 用户另提供 cpk 类型 Key 查询视频剩余额度。该 Key 的 `apihub.agnes-ai.com/v1/models` 返回 200，目录包含视频模型；使用该 Key 请求官方控制台的 `/api/user/subscription` 仍返回 401，没有视频日已用/剩余字段。官方 `wiki.agnes-ai.com` 文档未提供 cpk 专用的 API Key 额度只读接口，不能据模型访问成功推断还剩 500 秒。
+- 按用户“提供 Agnes Key 后保存”的持续偏好，已将新 Key 保存到本机 macOS 钥匙串（服务 `com.codex.agnes.video.cpk-2LUN`，账号 `Agnes Coding Plan`）；无完整密钥进入源码或文档。仅保存凭据，没有新增/启用生产 Key、替换既有渠道或提交生成任务。后续仍需 Agnes 官方控制台的用量数字或可验证的额度查询能力。
