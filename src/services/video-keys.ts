@@ -449,13 +449,27 @@ export class VideoKeyService {
       const row = await one<VideoKeyRow>(client, 'SELECT * FROM video_provider_keys WHERE id=$1 FOR UPDATE', [id])
       if (!row) throw Object.assign(new Error('视频 Key 不存在'), { statusCode: 404 })
       const day = usageDayForTimezone(row.timezone)
+      // Lock every task that could still settle or release quota before
+      // resetting the bucket. A count-only read can race with a worker that
+      // is finishing a task and would let that worker decrement the freshly
+      // reset bucket after this transaction commits. This lock comes before
+      // the usage row because task settlement locks task -> usage; keeping
+      // the same order avoids a reset/settlement deadlock.
+      const activeResult = await client.query<any>(`SELECT id,status,quota_seconds_reserved
+        FROM media_tasks
+        WHERE video_provider_key_id=$1
+          AND (status IN ('queued','submitting','processing','unknown') OR quota_seconds_reserved > 0)
+        FOR UPDATE`, [id])
+      const activeTasks = Array.isArray(activeResult?.rows) ? activeResult.rows : []
       const usage = await one<any>(client, 'SELECT * FROM video_key_usage_daily WHERE key_id=$1 AND usage_day=$2 FOR UPDATE', [id, day])
-      if (usage && (Number(usage.reserved_seconds || 0) > 0 || Number(usage.used_seconds || 0) > 0)) {
-        throw new Error('今日已有生成任务或已用额度，不能重置；请等待任务结束并保留已用账本')
+      if (activeTasks.length > 0 || Number(usage?.reserved_seconds || 0) > 0) {
+        throw new Error('当前仍有生成任务，不能重置；请等待任务结束')
       }
       await client.query(`INSERT INTO video_key_usage_daily(key_id,usage_day,limit_seconds) VALUES($1,$2,$3)
-        ON CONFLICT(key_id,usage_day) DO UPDATE SET reserved_seconds=0,released_seconds=0,limit_seconds=EXCLUDED.limit_seconds,updated_at=now()`, [id, day, row.daily_limit_seconds])
-      await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'video_provider_key_usage_reset',$2,NULL,$3)`, [actorId || null, id, JSON.stringify({ usageDay: day, reason: String(reason).trim().slice(0, 500) })])
+        ON CONFLICT(key_id,usage_day) DO UPDATE SET reserved_seconds=0,used_seconds=0,released_seconds=0,limit_seconds=EXCLUDED.limit_seconds,updated_at=now()`, [id, day, row.daily_limit_seconds])
+      await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'video_provider_key_usage_reset',$2,$3,$4)`, [actorId || null, id,
+        JSON.stringify({ usageDay: day, reservedSeconds: Number(usage?.reserved_seconds || 0), usedSeconds: Number(usage?.used_seconds || 0), releasedSeconds: Number(usage?.released_seconds || 0) }),
+        JSON.stringify({ usageDay: day, reservedSeconds: 0, usedSeconds: 0, releasedSeconds: 0, reason: String(reason).trim().slice(0, 500) })])
     })
   }
 

@@ -50,14 +50,40 @@ describe('Agnes video key pool helpers', () => {
     expect(rows.map((row) => row.id)).toEqual(['fast-ewma', 'high-success', 'low-success'])
   })
 
-  test('refuses to reset a key with used or reserved seconds', async () => {
+  test('refuses to reset a key with reserved seconds', async () => {
     const clientQuery = async (sql: string) => {
       if (sql.startsWith('SELECT * FROM video_provider_keys')) return { rows: [{ id: 'key', timezone: 'Asia/Shanghai', daily_limit_seconds: 500 }] }
       if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ reserved_seconds: 4, used_seconds: 0 }] }
+      if (sql.includes('FROM media_tasks')) return { rows: [] }
       throw new Error(`unexpected query: ${sql}`)
     }
     const db: any = { tx: async (fn: any) => fn({ query: clientQuery }) }
     await expect(new VideoKeyService(db, {} as any).resetUsage('key', '保留任务不能重置')).rejects.toThrow('不能重置')
+  })
+
+  test('allows an administrator to reset completed usage after tasks finish', async () => {
+    const statements: string[] = []
+    const clientQuery = async (sql: string) => {
+      statements.push(sql)
+      if (sql.startsWith('SELECT * FROM video_provider_keys')) return { rows: [{ id: 'key', timezone: 'Asia/Shanghai', daily_limit_seconds: 500 }] }
+      if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ reserved_seconds: 0, used_seconds: 4, released_seconds: 12 }] }
+      if (sql.includes('FROM media_tasks')) return { rows: [] }
+      return { rows: [] }
+    }
+    const db: any = { tx: async (fn: any) => fn({ query: clientQuery }) }
+    await expect(new VideoKeyService(db, {} as any).resetUsage('key', '按管理员要求刷新额度')).resolves.toBeUndefined()
+    expect(statements.some((sql) => sql.includes('used_seconds=0'))).toBe(true)
+  })
+
+  test('refuses to reset while a task can still settle or release quota', async () => {
+    const clientQuery = async (sql: string) => {
+      if (sql.startsWith('SELECT * FROM video_provider_keys')) return { rows: [{ id: 'key', timezone: 'Asia/Shanghai', daily_limit_seconds: 500 }] }
+      if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ reserved_seconds: 0, used_seconds: 4, released_seconds: 0 }] }
+      if (sql.includes('FROM media_tasks')) return { rows: [{ id: 'task', status: 'processing', quota_seconds_reserved: 0 }] }
+      throw new Error(`unexpected query: ${sql}`)
+    }
+    const db: any = { tx: async (fn: any) => fn({ query: clientQuery }) }
+    await expect(new VideoKeyService(db, {} as any).resetUsage('key', '生成任务仍在处理中')).rejects.toThrow('不能重置')
   })
 
   test('requires the dedicated rotate operation for credential changes', async () => {
