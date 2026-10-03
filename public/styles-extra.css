@@ -599,6 +599,9 @@ td.admin-action-cell { display: table-cell; vertical-align: middle; }
 .video-key-quota progress { width: 100%; height: 7px; accent-color: var(--accent); }
 .video-key-quota small { color: var(--muted); font-variant-numeric: tabular-nums; }
 .video-key-actions { min-width: 250px; max-width: 360px; }
+.video-key-more-actions { min-width: 66px; }
+.video-key-more-actions summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 6px 4px; }
+.video-key-more-actions[open] { padding: 4px; border: 1px solid var(--line); background: var(--surface); }
 .video-price-panel { display: grid; grid-template-columns: minmax(200px, .8fr) minmax(320px, 1.2fr); gap: 18px; padding: 18px 20px; border: 1px solid var(--line); background: var(--surface); }
 .video-price-panel > div { min-width: 0; }
 .video-price-panel strong { display: block; margin: 2px 0 4px; font-size: 21px; }
