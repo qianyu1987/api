@@ -32,6 +32,8 @@ type VideoKeyRow = {
   subscription_cost_micros: number | string | null
   subscription_duration_days: number | string | null
   actual_cost_per_second_micros: number | string | null
+  channel_enabled?: boolean
+  channel_deleted_at?: string | Date | null
   encrypted_api_key?: string | null
   base_url?: string
   usage_day?: string
@@ -188,7 +190,7 @@ export function deriveVideoKeyCost(rows: Array<Pick<VideoKeyRow, 'actual_cost_pe
 }
 
 function statusFor(row: VideoKeyRow, remaining: number): VideoKeyAdmin['status'] {
-  if (!row.enabled || !row.video_generation_enabled) return 'paused'
+  if (!row.enabled || !row.video_generation_enabled || row.channel_enabled === false || row.channel_deleted_at) return 'paused'
   if (row.probe_status === 'failed') return 'probe_failed'
   if (row.probe_status !== 'passed') return 'pending_probe'
   if (row.cooldown_until && new Date(row.cooldown_until).getTime() > Date.now()) return 'cooldown'
@@ -242,7 +244,7 @@ export class VideoKeyService {
   constructor(private readonly db: Database, private readonly config: AppConfig) {}
 
   private async adminRows(): Promise<VideoKeyRow[]> {
-    return this.db.query<VideoKeyRow>(`SELECT vk.*, c.base_url, c.encrypted_api_key,
+    return this.db.query<VideoKeyRow>(`SELECT vk.*, c.base_url, c.encrypted_api_key, c.enabled AS channel_enabled, c.deleted_at AS channel_deleted_at,
       u.usage_day, u.reserved_seconds, u.used_seconds, u.released_seconds, u.limit_seconds,
       (SELECT count(*)::int FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id
         AND mt.status IN ('queued','submitting','processing','unknown')) AS active_count
@@ -264,9 +266,11 @@ export class VideoKeyService {
     const fastest = [...available].sort((a, b) => (a.latencyP95Ms ?? Number.POSITIVE_INFINITY) - (b.latencyP95Ms ?? Number.POSITIVE_INFINITY) || a.priority - b.priority || a.id.localeCompare(b.id))[0] || null
     const price = await this.db.one<any>(`SELECT enabled,price_mode,fixed_unit_price_micros,normal_cost_micros,actual_cost_micros,cost_source
       FROM media_prices WHERE model=$1 AND size='720P'`, [AGNES_VIDEO_MODEL])
-    const keyCostRows = await this.db.query<any>(`SELECT actual_cost_per_second_micros,subscription_cost_micros,subscription_duration_days
-      FROM video_provider_keys WHERE actual_cost_per_second_micros IS NOT NULL
-        OR (subscription_cost_micros IS NOT NULL AND subscription_duration_days IS NOT NULL)`)
+    const keyCostRows = await this.db.query<any>(`SELECT vk.actual_cost_per_second_micros,vk.subscription_cost_micros,vk.subscription_duration_days
+      FROM video_provider_keys vk JOIN channels c ON c.id=vk.channel_id AND c.enabled AND c.deleted_at IS NULL
+      WHERE vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed'
+        AND (vk.actual_cost_per_second_micros IS NOT NULL
+          OR (vk.subscription_cost_micros IS NOT NULL AND vk.subscription_duration_days IS NOT NULL))`)
     const keyCost = deriveVideoKeyCost(keyCostRows)
     const fallbackActual = Math.max(Number(price?.actual_cost_micros || 0), Number(price?.normal_cost_micros || 0))
     const actual = keyCost.micros ?? BigInt(fallbackActual)

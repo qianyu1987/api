@@ -131,23 +131,27 @@ export class MediaService {
   constructor(private db: Database, private config: AppConfig, private videoKeys?: VideoKeyService) {}
   async catalog() {
     const rows = await this.db.query<any>(`SELECT p.model,p.size,p.enabled,p.normal_cost_micros,p.actual_cost_micros,p.fixed_unit_price_micros,p.channel_id,c.enabled AS channel_enabled,c.deleted_at,
-      EXISTS (SELECT 1 FROM video_provider_keys vk WHERE p.model='agnes-video-2.5-flash' AND vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed') AS video_pool_enabled
+      EXISTS (SELECT 1 FROM video_provider_keys vk JOIN channels vc ON vc.id=vk.channel_id AND vc.enabled AND vc.deleted_at IS NULL WHERE p.model='agnes-video-2.5-flash' AND vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed') AS video_pool_enabled
       FROM media_prices p LEFT JOIN channels c ON c.id=p.channel_id ORDER BY p.model,p.size`)
     const settings = Object.fromEntries((await this.db.query<any>('SELECT key,value FROM app_settings')).map((row) => [row.key, row.value]))
     const rules = profitRules(settings)
     const multiplier = Math.max(rules.walletTopupMultiplierBps, this.config.walletTopupMultiplierBps)
-    const keyCostRows = await this.db.query<any>(`SELECT actual_cost_per_second_micros,subscription_cost_micros,subscription_duration_days
-      FROM video_provider_keys WHERE actual_cost_per_second_micros IS NOT NULL
-        OR (subscription_cost_micros IS NOT NULL AND subscription_duration_days IS NOT NULL)`)
+    const keyCostRows = await this.db.query<any>(`SELECT vk.actual_cost_per_second_micros,vk.subscription_cost_micros,vk.subscription_duration_days
+      FROM video_provider_keys vk JOIN channels c ON c.id=vk.channel_id AND c.enabled AND c.deleted_at IS NULL
+      WHERE vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed'
+        AND (vk.actual_cost_per_second_micros IS NOT NULL
+          OR (vk.subscription_cost_micros IS NOT NULL AND vk.subscription_duration_days IS NOT NULL))`)
     const keyCost = deriveVideoKeyCost(keyCostRows)
     return { items: rows.map(p => { const kind = p.model === 'agnes-video-2.5-flash' ? 'video' : 'image'; const freeStandard = p.model === 'agnes-image-2.5-flash'; const fallbackCost = BigInt(Math.max(Number(p.actual_cost_micros || 0), Number(p.normal_cost_micros || 0))); const effectiveVideoCost = keyCost.micros ?? fallbackCost; const videoFloor = kind === 'video' && effectiveVideoCost > 0n ? mediaPrice(effectiveVideoCost, multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps) : 0n; const videoMarginOk = kind !== 'video' || (effectiveVideoCost > 0n && BigInt(p.fixed_unit_price_micros || 0) > 0n && BigInt(p.fixed_unit_price_micros || 0) >= videoFloor); const costConfigured = kind === 'video' ? effectiveVideoCost > 0n : (freeStandard || p.normal_cost_micros > 0); const item: any = { kind, size: p.size, available: Boolean(p.enabled && costConfigured && (kind === 'video' ? p.video_pool_enabled && videoMarginOk : p.channel_enabled && !p.deleted_at)) }; if (kind === 'image') { item.engine = p.model === 'gpt-image-2' ? 'pro' : p.model === 'gpt-image-2.5' ? 'enhanced' : 'standard'; item.label = p.model === 'gpt-image-2' ? '专业图片 · gpt-image-2.0' : p.model === 'gpt-image-2.5' ? '增强图片 · gpt-image-2.5（顶级画质）' : '标准图片 · 免费' } return item }), walletOnly: true }
   }
   async quote(userId: string, body: any, db: Pick<Database, 'query' | 'one'> = this.db) {
     const input = validateMedia(body)
     const price = await db.one<any>('SELECT p.*,c.enabled AS channel_enabled,c.deleted_at FROM media_prices p LEFT JOIN channels c ON c.id=p.channel_id WHERE p.model=$1 AND p.size=$2', [input.model,input.size])
-    const keyCostRows = input.kind === 'video' ? await db.query<any>(`SELECT actual_cost_per_second_micros,subscription_cost_micros,subscription_duration_days
-      FROM video_provider_keys WHERE actual_cost_per_second_micros IS NOT NULL
-        OR (subscription_cost_micros IS NOT NULL AND subscription_duration_days IS NOT NULL)`) : []
+    const keyCostRows = input.kind === 'video' ? await db.query<any>(`SELECT vk.actual_cost_per_second_micros,vk.subscription_cost_micros,vk.subscription_duration_days
+      FROM video_provider_keys vk JOIN channels c ON c.id=vk.channel_id AND c.enabled AND c.deleted_at IS NULL
+      WHERE vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed'
+        AND (vk.actual_cost_per_second_micros IS NOT NULL
+          OR (vk.subscription_cost_micros IS NOT NULL AND vk.subscription_duration_days IS NOT NULL))`) : []
     const keyCost = deriveVideoKeyCost(keyCostRows)
     // Video jobs are allowed into the queue while every key is busy or
     // temporarily unavailable; the worker will keep them queued until a

@@ -34,7 +34,10 @@ describe('media pricing and input',()=>{
   const q=await s.quote('user',{kind:'video',prompt:'test',seconds:10,size:'720P'})
   expect(q.chargeMicros).toBe('350000')
   expect(q.snapshot).toMatchObject({actualCostMicros:'12000',costSource:'actual_cost_per_second_micros'})
- })
+  const costQuery=db.query.mock.calls.find(([sql]:[string])=>sql.includes('FROM video_provider_keys'))?.[0] as string
+  expect(costQuery).toContain('JOIN channels c ON c.id=vk.channel_id AND c.enabled AND c.deleted_at IS NULL')
+  expect(costQuery).toContain("WHERE vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed'")
+})
  test.each([{kind:'video',size:'1080P'},{kind:'video',seconds:13},{kind:'video',mode:'reference'},{kind:'video',mode:'text',images:['https://example.com/a']},{kind:'video',mode:'keyframe'},{kind:'image',size:'100K'},{kind:'image',n:2},{kind:'image',images:['http://localhost/a']}])('rejects unsupported request %j',p=>{expect(()=>validateMedia({prompt:'test',...p})).toThrow()})
  test('only accepts HTTPS result links',()=>{expect(mediaResultUrl({data:[{url:'https://example.com/x.png'}]})).toBe('https://example.com/x.png');expect(mediaResultUrl({url:'javascript:alert(1)'})).toBeNull();expect(mediaResultUrl({metadata:{url:'https://example.com/video.mp4'}})).toBe('https://example.com/video.mp4')})
 })
@@ -262,6 +265,13 @@ describe('public media identity',()=>{
   const catalog=await svc.catalog()
   expect(catalog).toEqual({items:[{kind:'image',size:'4K',engine:'standard',label:'标准图片 · 免费',available:true},{kind:'image',size:'1K',engine:'pro',label:'专业图片 · gpt-image-2.0',available:true},{kind:'image',size:'1K',engine:'enhanced',label:'增强图片 · gpt-image-2.5（顶级画质）',available:true}],walletOnly:true})
  expect(JSON.stringify(catalog)).not.toMatch(/agnes/)
+ })
+ test('catalog requires an enabled, non-deleted channel for the video pool',async()=>{
+  const queries:string[]=[]
+  const svc=new MediaService({query:async(sql:string)=>{queries.push(sql);return []}} as any,{} as any)
+  await svc.catalog()
+  const catalogQuery=queries.find(sql=>sql.includes('FROM media_prices'))
+  expect(catalogQuery).toContain('JOIN channels vc ON vc.id=vk.channel_id AND vc.enabled AND vc.deleted_at IS NULL')
  })
  test('task hides model and upstream result address',()=>{
  const svc=new MediaService({} as any,{} as any)
