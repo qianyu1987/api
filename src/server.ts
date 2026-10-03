@@ -1156,6 +1156,10 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const actor = await requireAdmin(request, reply); if (!actor) return
     try { await videoKeys.resetUsage(String((request.params as any).id), String((request.body as any)?.reason || ''), actor.id); return { ok: true } } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
   })
+  app.post('/api/admin/video/keys/:id/reconcile-usage', async (request, reply) => {
+    const actor = await requireAdmin(request, reply); if (!actor) return
+    try { return await videoKeys.reconcileUsage(String((request.params as any).id), actor.id) } catch (error) { reply.code(errorStatus(error)).send({ error: { message: (error as Error).message } }) }
+  })
   app.get('/api/admin/video/queue', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
     const rows = await db.query<any>(`SELECT mt.id,mt.user_id,u.username,mt.status,mt.request_payload->>'seconds' AS seconds,

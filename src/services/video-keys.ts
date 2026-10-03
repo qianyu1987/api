@@ -46,7 +46,36 @@ type VideoKeyRow = {
   queued_count?: number | string | null
 }
 
-export type VideoKeyAdmin = {
+export type VideoQuotaMetadata = {
+  quotaSource: 'local_ledger'
+  upstreamQuota: {
+    status: 'unknown'
+    message: string
+  }
+}
+
+function quotaMetadata(): VideoQuotaMetadata {
+  return {
+    quotaSource: 'local_ledger',
+    upstreamQuota: {
+      status: 'unknown',
+      message: '本站用量仅统计本站已接单的视频；尚未同步 Agnes 上游额度，其他平台调用和上游扣秒调整不在此账本中。',
+    },
+  }
+}
+
+export type VideoUsageReconciliation = VideoQuotaMetadata & {
+  usageDay: string
+  usedSeconds: number
+  reservedSeconds: number
+  releasedSeconds: number
+  remainingSeconds: number
+  limitSeconds: number
+  knownAcceptedSeconds: number
+  corrected: boolean
+}
+
+export type VideoKeyAdmin = VideoQuotaMetadata & {
   id: string
   channelId: string
   accountLabel: string
@@ -216,6 +245,7 @@ function publicRow(row: VideoKeyRow, config: AppConfig): VideoKeyAdmin {
     try { keySuffix = maskProviderKey(decryptSecret(row.encrypted_api_key, config.channelEncryptionKey)) } catch { keySuffix = null }
   }
   return {
+    ...quotaMetadata(),
     id: String(row.id), channelId: String(row.channel_id), accountLabel: row.account_label,
     keySuffix, dailyLimitSeconds: limit, usageDay: String(row.usage_day || usageDayForTimezone(row.timezone)), timezone: row.timezone,
     reservedSeconds: reserved, usedSeconds: used, releasedSeconds: released,
@@ -291,7 +321,7 @@ export class VideoKeyService {
     return (await this.adminRows()).map((row) => publicRow(row, this.config))
   }
 
-  async overview(): Promise<{ keys: VideoKeyAdmin[]; availableKeys: number; remainingSeconds: number; queueCount: number; fastestKey: VideoKeyAdmin | null; pricing: Record<string, unknown> }> {
+  async overview(): Promise<VideoQuotaMetadata & { keys: VideoKeyAdmin[]; availableKeys: number; remainingSeconds: number; queueCount: number; fastestKey: VideoKeyAdmin | null; pricing: Record<string, unknown> }> {
     const keys = await this.list()
     const available = keys.filter((key) => key.status === 'ready' || key.status === 'near_limit')
     const queueRows = await this.db.query<{ count: string }>(`SELECT count(*)::text AS count FROM media_tasks WHERE kind='video' AND status IN ('queued','submitting')`)
@@ -313,6 +343,7 @@ export class VideoKeyService {
     const minimumUnit = actual > 0n ? Number(mediaPrice(actual, multiplier, rules.paymentFeeRateBps, rules.affiliateRateBps, rules.minimumMarginBps)) : 0
     const marginOk = actual > 0n && unit >= minimumUnit
     return {
+      ...quotaMetadata(),
       keys, availableKeys: available.length,
       remainingSeconds: available.reduce((sum, key) => sum + key.remainingSeconds, 0),
       queueCount: Number(queueRows[0]?.count || 0), fastestKey: fastest,
@@ -443,27 +474,70 @@ export class VideoKeyService {
     return { ok, status: ok ? 'passed' : 'failed', message }
   }
 
+  /** Restore missing local accepted usage without changing provider quota or billing. */
+  async reconcileUsage(id: string, actorId?: string): Promise<VideoUsageReconciliation> {
+    return this.db.tx(async (client) => {
+      // Acceptance locks task -> usage -> key. Do not lock the key or task
+      // here: the usage lock serializes this repair with reservations and
+      // settlements, and a nondecreasing repair cannot erase either.
+      const row = await one<VideoKeyRow>(client, 'SELECT * FROM video_provider_keys WHERE id=$1', [id])
+      if (!row) throw Object.assign(new Error('视频 Key 不存在'), { statusCode: 404 })
+      const day = usageDayForTimezone(row.timezone)
+      await client.query(`INSERT INTO video_key_usage_daily(key_id,usage_day,limit_seconds)
+        VALUES($1,$2,$3) ON CONFLICT(key_id,usage_day) DO NOTHING`, [id, day, row.daily_limit_seconds])
+      const usage = await one<any>(client, 'SELECT * FROM video_key_usage_daily WHERE key_id=$1 AND usage_day=$2 FOR UPDATE', [id, day])
+      if (!usage) throw new Error('本站视频额度账本不存在')
+      const accepted = await one<{ used_seconds: string }>(client, `SELECT COALESCE(sum(quota_seconds_used),0)::text AS used_seconds
+        FROM media_tasks WHERE video_provider_key_id=$1 AND quota_day=$2`, [id, day])
+      const known = BigInt(accepted?.used_seconds || '0')
+      const currentUsed = BigInt(usage.used_seconds || 0)
+      const used = known > currentUsed ? known : currentUsed
+      const reserved = BigInt(usage.reserved_seconds || 0)
+      const limit = BigInt(usage.limit_seconds)
+      if (used + reserved > limit) {
+        throw Object.assign(new Error('本站已接单和预留秒数超过当日上限，请检查额度账本；核对不会截断用量或提高上限'), { statusCode: 409 })
+      }
+      await client.query(`UPDATE video_key_usage_daily SET used_seconds=GREATEST(used_seconds,$3),updated_at=now()
+        WHERE key_id=$1 AND usage_day=$2`, [id, day, used.toString()])
+      const before = {
+        usageDay: day, usedSeconds: Number(currentUsed), reservedSeconds: Number(reserved),
+        releasedSeconds: Number(usage.released_seconds || 0), limitSeconds: Number(limit),
+      }
+      const result: VideoUsageReconciliation = {
+        ...quotaMetadata(), ...before,
+        usedSeconds: Number(used), remainingSeconds: Number(limit - used - reserved),
+        knownAcceptedSeconds: Number(known), corrected: used > currentUsed,
+      }
+      await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value)
+        VALUES($1,'video_provider_key_usage_reconcile',$2,$3,$4)`, [actorId || null, id, JSON.stringify(before), JSON.stringify(result)])
+      return result
+    })
+  }
+
   async resetUsage(id: string, reason: string, actorId?: string): Promise<void> {
     if (String(reason || '').trim().length < 4) throw new Error('请填写至少 4 个字符的重置原因')
     await this.db.tx(async (client) => {
-      const row = await one<VideoKeyRow>(client, 'SELECT * FROM video_provider_keys WHERE id=$1 FOR UPDATE', [id])
+      const row = await one<VideoKeyRow>(client, 'SELECT * FROM video_provider_keys WHERE id=$1', [id])
       if (!row) throw Object.assign(new Error('视频 Key 不存在'), { statusCode: 404 })
       const day = usageDayForTimezone(row.timezone)
-      // Lock every task that could still settle or release quota before
-      // resetting the bucket. A count-only read can race with a worker that
-      // is finishing a task and would let that worker decrement the freshly
-      // reset bucket after this transaction commits. This lock comes before
-      // the usage row because task settlement locks task -> usage; keeping
-      // the same order avoids a reset/settlement deadlock.
+      await client.query(`INSERT INTO video_key_usage_daily(key_id,usage_day,limit_seconds)
+        VALUES($1,$2,$3) ON CONFLICT(key_id,usage_day) DO NOTHING`, [id, day, row.daily_limit_seconds])
+      const usage = await one<any>(client, 'SELECT * FROM video_key_usage_daily WHERE key_id=$1 AND usage_day=$2 FOR UPDATE', [id, day])
+      // Keep the usage lock while checking tasks. No task lock is needed:
+      // any acceptance/release must wait for this bucket, and an existing
+      // reservation always makes the reset fail.
       const activeResult = await client.query<any>(`SELECT id,status,quota_seconds_reserved
         FROM media_tasks
         WHERE video_provider_key_id=$1
-          AND (status IN ('queued','submitting','processing','unknown') OR quota_seconds_reserved > 0)
-        FOR UPDATE`, [id])
+          AND (status IN ('queued','submitting','processing','unknown') OR quota_seconds_reserved > 0)`, [id])
       const activeTasks = Array.isArray(activeResult?.rows) ? activeResult.rows : []
-      const usage = await one<any>(client, 'SELECT * FROM video_key_usage_daily WHERE key_id=$1 AND usage_day=$2 FOR UPDATE', [id, day])
+      const accepted = await one<{ used_seconds: string }>(client, `SELECT COALESCE(sum(quota_seconds_used),0)::text AS used_seconds
+        FROM media_tasks WHERE video_provider_key_id=$1 AND quota_day=$2`, [id, day])
+      if (Number(usage?.used_seconds || 0) > 0 || BigInt(accepted?.used_seconds || '0') > 0n) {
+        throw Object.assign(new Error('不能重置已接单用量；请核对本站用量，上游额度不会被重置'), { statusCode: 409 })
+      }
       if (activeTasks.length > 0 || Number(usage?.reserved_seconds || 0) > 0) {
-        throw new Error('当前仍有生成任务，不能重置；请等待任务结束')
+        throw Object.assign(new Error('当前仍有生成任务，不能重置；请等待任务结束'), { statusCode: 409 })
       }
       await client.query(`INSERT INTO video_key_usage_daily(key_id,usage_day,limit_seconds) VALUES($1,$2,$3)
         ON CONFLICT(key_id,usage_day) DO UPDATE SET reserved_seconds=0,used_seconds=0,released_seconds=0,limit_seconds=EXCLUDED.limit_seconds,updated_at=now()`, [id, day, row.daily_limit_seconds])
@@ -525,7 +599,13 @@ export class VideoKeyService {
       const successRate = successCount + failureCount > 0 ? successCount / (successCount + failureCount) : 0
       const latencyEwmaMs = row.latency_ewma_ms == null ? null : Number(row.latency_ewma_ms)
       const latencyP95Ms = row.latency_p95_ms == null ? null : Number(row.latency_p95_ms)
-      await client.query(`UPDATE media_tasks SET video_provider_key_id=$2,quota_day=$3,quota_seconds_reserved=$4,selection_snapshot=$5 WHERE id=$1 AND status IN ('queued','submitting')`, [taskId, row.id, day, amount, JSON.stringify({ accountLabel: row.account_label, priority: row.priority, latencyEwmaMs, latencyP95Ms, successRate, selectedAt: new Date().toISOString() })])
+      const assigned = await client.query<{ id: string }>(`UPDATE media_tasks SET video_provider_key_id=$2,quota_day=$3,quota_seconds_reserved=$4,selection_snapshot=$5
+        WHERE id=$1 AND status IN ('queued','submitting') AND finished_at IS NULL AND upstream_id IS NULL AND quota_seconds_reserved=0
+        RETURNING id`, [taskId, row.id, day, amount, JSON.stringify({ accountLabel: row.account_label, priority: row.priority, latencyEwmaMs, latencyP95Ms, successRate, selectedAt: new Date().toISOString() })])
+      // Losing the task assignment must roll back the bucket reservation.
+      // Never return a credential to a worker whose task was canceled,
+      // accepted, or reserved by another worker during candidate selection.
+      if (assigned?.rowCount !== 1 || !assigned?.rows?.[0]?.id) throw Object.assign(new Error('视频任务已变更，未分配额度；请重新确认任务状态'), { statusCode: 409 })
       return { id: String(row.id), channelId: String(row.channel_id), accountLabel: row.account_label, baseUrl: String(row.base_url), encryptedApiKey: String(row.encrypted_api_key), quotaDay: day, reservedSeconds: amount, maxConcurrency: Number(row.max_concurrency), activeCount: active, priority: Number(row.priority), latencyEwmaMs, latencyP95Ms, successRate }
     }
     return null

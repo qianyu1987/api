@@ -170,4 +170,21 @@ describe('media access control',()=>{
   expect((await services.app.inject({url:'/api/admin/media',headers})).statusCode).toBe(403)
   expect((await services.app.inject({method:'POST',url:'/api/admin/media/prices',headers,payload:{}})).statusCode).toBe(403)
  })
+ test('video quota reconciliation requires an administrator',async()=>{
+  const url=`/api/admin/video/keys/${id}/reconcile-usage`
+  const reconcile=vi.spyOn(services.videoKeys,'reconcileUsage')
+  expect((await services.app.inject({method:'POST',url,payload:{}})).statusCode).toBe(401)
+  role='user'
+  expect((await services.app.inject({method:'POST',url,headers,payload:{}})).statusCode).toBe(403)
+  expect(reconcile).not.toHaveBeenCalled()
+ })
+ test('video quota reconciliation keeps the local source and upstream unknown status',async()=>{
+  const result={quotaSource:'local_ledger',upstreamQuota:{status:'unknown',message:'上游额度未同步'},usageDay:'2026-10-03',usedSeconds:4,reservedSeconds:0,releasedSeconds:12,remainingSeconds:496,limitSeconds:500,knownAcceptedSeconds:4,corrected:true}
+  const reconcile=vi.spyOn(services.videoKeys,'reconcileUsage').mockResolvedValue(result as any)
+  const response=await services.app.inject({method:'POST',url:`/api/admin/video/keys/${id}/reconcile-usage`,headers,payload:{}})
+  expect(response.statusCode).toBe(200)
+  expect(reconcile).toHaveBeenCalledWith(id,'actor')
+  expect(response.json()).toEqual(result)
+  expect(response.body).not.toMatch(/encrypted_api_key|apiKey|channelId/)
+ })
 })

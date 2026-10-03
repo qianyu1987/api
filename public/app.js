@@ -610,28 +610,28 @@
       const editor = form('video-key', [
         field('accountLabel', '账号标签', '', 'text', 'required maxlength="120" placeholder="例如 Agnes 账号 01"'),
         field('apiKey', 'Agnes Key', '', 'password', 'required autocomplete="new-password" placeholder="仅写入加密存储，不会显示"'),
-        field('dailyLimitSeconds', '每日额度（秒）', '500', 'number', 'min="1" max="86400" required'),
+        field('dailyLimitSeconds', '本站每日分配上限（秒）', '500', 'number', 'min="1" max="86400" required'),
         field('maxConcurrency', '最大并发', '1', 'number', 'min="1" max="32" required'),
         field('priority', '优先级', '100', 'number', 'min="0" max="100000" required'),
-        field('timezone', '额度时区', 'Asia/Shanghai', 'text', 'required readonly'),
+        field('timezone', '本站统计时区', 'Asia/Shanghai', 'text', 'required readonly'),
         field('subscriptionCostYuan', '订阅成本（元，可选）', '', 'text', 'inputmode="decimal" placeholder="例如 99"'),
         field('subscriptionDurationDays', '有效天数', '', 'number', 'min="1" max="3660" placeholder="例如 30"'),
         field('actualCostPerSecondYuan', '核实实际成本（元/秒，可选）', '', 'text', 'inputmode="decimal" placeholder="优先使用核实成本"'),
         '<label class="checkbox-label"><input name="enabled" type="checkbox" disabled>启用 Key（探测通过后可启用）</label>',
         '<label class="checkbox-label"><input name="videoGenerationEnabled" type="checkbox" disabled>允许视频生成（探测通过后可启用）</label>',
         check('promptExpansionEnabled', '允许提示词扩展', false),
-        '<p class="admin-note wide">每个 Key 对应一个 Coding Plan 账号。新增或轮换后必须通过无计费连接测试，再在编辑中启用视频；服务端会按北京时间原子预留每日秒数。</p>'
+        '<p class="admin-note wide">不同订阅账号可增加总额度；同一 Agnes 账号的多个 Key 共用上游额度。连接测试只验证 Key；本站按北京时间统计接单秒数。</p>'
       ], '添加 Agnes Key')
       const rows = keys.map(item => {
         const limit = keyLimit(item); const used = keyUsed(item); const reserved = keyReserved(item); const pct = Math.max(0, Math.min(100, ((used + reserved) / Math.max(1, limit)) * 100)); const inFlight = number(item.activeCount ?? item.active_count ?? item.activeTasks ?? item.active_tasks ?? item.currentTasks ?? item.current_tasks); const queuedCount = item.queuedCount ?? item.queued_count; const p50 = item.latencyP50Ms ?? item.latency_p50_ms ?? item.p50Ms ?? item.p50_ms; const p95 = item.latencyP95Ms ?? item.latency_p95_ms ?? item.p95Ms ?? item.p95_ms; const serialized = esc(JSON.stringify(item, (name, value) => ['key', 'apiKey', 'encryptedKey', 'encrypted_key', 'secret', 'token'].includes(name) ? undefined : value))
-        return '<tr><td><strong>' + esc(item.accountLabel || item.account_label || '未命名账号') + '</strong><small class="subline">' + esc(masked(item)) + '</small></td><td><div class="video-key-quota"><progress max="100" value="' + pct.toFixed(2) + '" aria-label="今日已用 ' + pct.toFixed(0) + '%">' + pct.toFixed(0) + '%</progress><small>' + seconds(used) + ' / ' + seconds(limit) + ' 秒' + (reserved ? ' · 预留 ' + seconds(reserved) : '') + '</small></div></td><td>' + statusLabel(item) + '<small class="subline">并发 ' + inFlight + ' / ' + number(item.maxConcurrency ?? item.max_concurrency, 1) + '</small></td><td>' + (queuedCount == null ? '—' : integer(queuedCount)) + '</td><td>' + (p50 == null ? '—' : seconds(p50) + ' ms') + '<small class="subline">P95 ' + (p95 == null ? '—' : seconds(p95) + ' ms') + '</small></td><td>' + date(item.lastSuccessAt || item.last_success_at) + '<small class="subline">失败 ' + number(item.failureCount ?? item.failure_count) + ' 次</small></td><td><div class="row-actions video-key-actions"><button class="small-button video-key-edit" type="button" data-item="' + serialized + '">编辑</button><button class="small-button" type="button" data-video-key-action="probe" data-id="' + esc(item.id) + '">测试</button><button class="small-button" type="button" data-video-key-action="rotate" data-id="' + esc(item.id) + '">轮换</button><button class="small-button danger-button" type="button" data-video-key-action="disable" data-id="' + esc(item.id) + '" data-label="' + esc(item.accountLabel || item.account_label || '') + '" ' + (item.enabled === false ? 'disabled' : '') + '>暂停</button><details class="video-key-more-actions"><summary>更多</summary><button class="small-button" type="button" data-video-key-action="reset" data-id="' + esc(item.id) + '">重置今日额度</button></details></div></td></tr>'
+        return '<tr><td><strong>' + esc(item.accountLabel || item.account_label || '未命名账号') + '</strong><small class="subline">' + esc(masked(item)) + '</small></td><td><div class="video-key-quota"><progress max="100" value="' + pct.toFixed(2) + '" aria-label="本站已接单与预留 ' + pct.toFixed(0) + '%">' + pct.toFixed(0) + '%</progress><small>本站已接单 ' + seconds(used) + ' / ' + seconds(limit) + ' 秒' + (reserved ? ' · 预留 ' + seconds(reserved) : '') + '</small><small>上游额度：未同步</small></div></td><td>' + statusLabel(item) + '<small class="subline">并发 ' + inFlight + ' / ' + number(item.maxConcurrency ?? item.max_concurrency, 1) + '</small></td><td>' + (queuedCount == null ? '—' : integer(queuedCount)) + '</td><td>' + (p50 == null ? '—' : seconds(p50) + ' ms') + '<small class="subline">P95 ' + (p95 == null ? '—' : seconds(p95) + ' ms') + '</small></td><td>' + date(item.lastSuccessAt || item.last_success_at) + '<small class="subline">失败 ' + number(item.failureCount ?? item.failure_count) + ' 次</small></td><td><div class="row-actions video-key-actions"><button class="small-button video-key-edit" type="button" data-item="' + serialized + '">编辑</button><button class="small-button" type="button" data-video-key-action="probe" data-id="' + esc(item.id) + '">测试</button><button class="small-button" type="button" data-video-key-action="rotate" data-id="' + esc(item.id) + '">轮换</button><button class="small-button danger-button" type="button" data-video-key-action="disable" data-id="' + esc(item.id) + '" data-label="' + esc(item.accountLabel || item.account_label || '') + '" ' + (item.enabled === false ? 'disabled' : '') + '>暂停</button><button class="small-button" type="button" data-video-key-action="reconcile" data-id="' + esc(item.id) + '">核对本站用量</button></div></td></tr>'
       })
       const queueStatusLabels = { queued: '排队中', submitting: '提交中', processing: '生成中', unknown: '确认中', completed: '已完成', failed: '失败' }
       const queueRows = queue.map(item => { const status = String(item.status || '').toLowerCase(); const statusLabel = item.statusLabel || item.status_label || queueStatusLabels[status] || '排队中'; const tone = status === 'failed' ? 'bad' : status === 'completed' ? 'good' : 'pending'; return '<tr><td><strong>' + esc(item.username || item.userName || '—') + '</strong><small class="subline">视频</small></td><td>' + seconds(item.seconds ?? item.durationSeconds ?? item.duration_seconds) + ' 秒</td><td><span class="state ' + tone + '">' + esc(statusLabel) + '</span></td><td>' + esc(item.accountLabel || item.account_label || '待分配') + '</td><td>' + date(item.createdAt || item.created_at || item.queuedAt || item.queued_at) + '</td><td>' + number(item.attempts ?? item.submitAttempts ?? item.submit_attempts) + '</td><td>' + esc(item.lastFailureReason || item.last_failure_reason || item.lastError || item.last_error || '—') + '</td></tr>' })
       const cost = pricing.actualCostPerSecondMicros ?? pricing.actual_cost_per_second_micros ?? pricing.costPerSecondMicros ?? pricing.cost_per_second_micros
       const margin = pricing.marginPercent ?? pricing.margin_percent
       const pricingNote = guardOk ? '<span class="state good">可售</span>' : '<span class="state bad">暂不可用</span>'
-      return '<div class="summary-strip video-channel-summary"><span>可用 Key <strong>' + integer(available) + '</strong></span><span>今日剩余 <strong>' + seconds(remaining) + ' 秒</strong></span><span>排队任务 <strong>' + integer(queued) + '</strong></span><span>当前最快 <strong>' + esc(fastest) + '</strong></span></div>' + editor + '<section class="video-price-panel"><div><p class="admin-section-title">视频售价</p><strong>¥' + microsToYuan(pricePerSecond) + ' / 秒</strong><p class="admin-note">' + esc(specPrices || '4 秒 ¥0.14 · 10 秒 ¥0.35 · 12 秒 ¥0.42') + '</p></div><div><p class="admin-section-title">成本与毛利保护</p><p>' + pricingNote + (cost == null ? ' · 实际成本待录入' : ' · 成本 ¥' + microsToYuan(cost) + ' / 秒') + (margin == null ? '' : ' · 毛利 ' + Number(margin).toFixed(2) + '%') + '</p><small class="muted">售价固定为 ¥0.035 / 秒；成本不足时服务端禁止启用规格。</small></div></section>' + table(['账号 / Key', '今日用量', '状态 / 并发', '排队数', '提交延迟', '最近成功', '操作'], rows, '尚未添加 Agnes Key') + '<div class="section-heading compact-heading"><div><h4>视频队列</h4><p class="muted">仅显示安全摘要，不展示上游任务编号或原始 Key。</p></div></div>' + table(['用户', '时长', '状态', '分配 Key', '排队时间', '尝试', '最后失败原因'], queueRows, '当前没有排队任务')
+      return '<div class="summary-strip video-channel-summary"><span>可用 Key <strong>' + integer(available) + '</strong></span><span>本站可分配 <strong>' + seconds(remaining) + ' 秒</strong></span><span>排队任务 <strong>' + integer(queued) + '</strong></span><span>当前最快 <strong>' + esc(fastest) + '</strong></span></div><p class="admin-note video-quota-source">本站用量只统计本站已接单任务；Agnes 总用量及额度重置时间以上游后台为准。核对本站用量不会重置上游额度。</p>' + editor + '<section class="video-price-panel"><div><p class="admin-section-title">视频售价</p><strong>¥' + microsToYuan(pricePerSecond) + ' / 秒</strong><p class="admin-note">' + esc(specPrices || '4 秒 ¥0.14 · 10 秒 ¥0.35 · 12 秒 ¥0.42') + '</p></div><div><p class="admin-section-title">成本与毛利保护</p><p>' + pricingNote + (cost == null ? ' · 实际成本待录入' : ' · 成本 ¥' + microsToYuan(cost) + ' / 秒') + (margin == null ? '' : ' · 毛利 ' + Number(margin).toFixed(2) + '%') + '</p><small class="muted">售价固定为 ¥0.035 / 秒；成本不足时服务端禁止启用规格。</small></div></section>' + table(['账号 / Key', '本站今日用量', '状态 / 并发', '排队数', '提交延迟', '最近成功', '操作'], rows, '尚未添加 Agnes Key') + '<div class="section-heading compact-heading"><div><h4>视频队列</h4><p class="muted">仅显示安全摘要，不展示上游任务编号或原始 Key。</p></div></div>' + table(['用户', '时长', '状态', '分配 Key', '排队时间', '尝试', '最后失败原因'], queueRows, '当前没有排队任务')
     }
     if (tab === 'media-admin') {
       const prices = data.prices || []; const channels = data.channels || []
@@ -1279,12 +1279,6 @@
       const id = videoAction.dataset.id; const action = videoAction.dataset.videoKeyAction
       if (!id) return
       if (action === 'disable' && !confirm('确定暂停「' + (videoAction.dataset.label || '此视频 Key') + '」？正在生成的任务不会被中断。')) return
-      let resetReason = ''
-      if (action === 'reset') {
-        if (!confirm('确定重置此 Key 的今日额度？该操作会写入审计记录。')) return
-        resetReason = prompt('请输入重置原因（至少 4 个字符）', '') || ''
-        if (resetReason.trim().length < 4) { toast('重置原因至少需要 4 个字符', true); return }
-      }
       if (action === 'rotate') {
         const replacement = prompt('粘贴新的 Agnes Key。提交后仅保留加密值，原 Key 会停止接收新任务。', '')
         if (!replacement?.trim()) return
@@ -1292,11 +1286,11 @@
         try { await api('/api/admin/video/keys/' + encodeURIComponent(id) + '/rotate', { method: 'POST', body: JSON.stringify({ apiKey: replacement.trim() }) }); toast('视频 Key 已轮换，请重新测试后启用'); await loadAdmin('video-channels') } catch (error) { toast(error.message, true); pending(videoAction, false) }
         return
       }
-      pending(videoAction, true, action === 'probe' ? '测试中…' : action === 'reset' ? '重置中…' : '暂停中…')
+      pending(videoAction, true, action === 'probe' ? '测试中…' : action === 'reconcile' ? '核对中…' : '暂停中…')
       try {
-        const endpoint = '/api/admin/video/keys/' + encodeURIComponent(id) + (action === 'probe' ? '/probe' : action === 'reset' ? '/reset-usage' : '')
-        const options = { method: action === 'disable' ? 'PATCH' : 'POST', body: JSON.stringify(action === 'disable' ? { enabled: false, videoGenerationEnabled: false } : action === 'reset' ? { reason: resetReason.trim() } : {}) }
-        await api(endpoint, options); toast(action === 'probe' ? '连接测试完成' : action === 'reset' ? '今日额度已重置' : '视频 Key 已暂停'); await loadAdmin('video-channels')
+        const endpoint = '/api/admin/video/keys/' + encodeURIComponent(id) + (action === 'probe' ? '/probe' : action === 'reconcile' ? '/reconcile-usage' : '')
+        const options = { method: action === 'disable' ? 'PATCH' : 'POST', body: JSON.stringify(action === 'disable' ? { enabled: false, videoGenerationEnabled: false } : {}) }
+        await api(endpoint, options); toast(action === 'probe' ? '连接测试完成' : action === 'reconcile' ? '本站用量已核对，上游额度仍以上游后台为准' : '视频 Key 已暂停'); await loadAdmin('video-channels')
       } catch (error) { toast(error.message, true); pending(videoAction, false) }
       return
     }

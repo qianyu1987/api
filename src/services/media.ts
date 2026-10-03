@@ -204,7 +204,7 @@ export class MediaService {
       error:publicError,input,canRetry:terminal,queueStatus,
       queuedAt:r.queue_started_at || r.created_at || null,
       nextRetryAt:videoActive && !accepted ? (r.next_attempt_at || r.next_poll_at || null) : null,
-      canCancel:videoActive && !accepted,
+      canCancel:videoActive && r.status === 'queued' && !accepted,
       submitAttempts:Number(r.submit_attempts || 0),
       acceptedAt:r.accepted_at || null,
       assetsMayHaveExpired:assets.length>0&&Date.now()-new Date(r.created_at||0).getTime()>7*24*60*60*1000,
@@ -313,7 +313,10 @@ export class MediaService {
       const task=await one<any>(client,'SELECT * FROM media_tasks WHERE id=$1 AND user_id=$2 FOR UPDATE',[id,userId])
       if(!task) mediaError('任务不存在',404)
       if(['completed','failed'].includes(task.status)) return this.publicTask(task)
-      if(task.upstream_id || task.status==='processing') mediaError('任务已经接单，无法取消；系统会继续查询生成结果',409)
+      if(task.upstream_id || task.status==='processing' || (task.kind==='video' && task.accepted_at)) mediaError('任务已经接单，无法取消；系统会继续查询生成结果',409)
+      // A submission may have reached the provider before its task ID is known.
+      // Only an unclaimed queued video is safe to cancel and release locally.
+      if(task.kind==='video' && task.status!=='queued') mediaError('任务正在提交或确认接单，暂时无法取消；系统会继续查询生成结果',409)
       await this.finishInTransaction(client,id,false,null,'用户取消排队，额度已自动退回',undefined,undefined,'canceled')
       const updated=await one<any>(client,'SELECT * FROM media_tasks WHERE id=$1',[id])
       return this.publicTask(updated)
