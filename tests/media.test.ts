@@ -38,6 +38,25 @@ describe('media pricing and input',()=>{
   expect(costQuery).toContain('JOIN channels c ON c.id=vk.channel_id AND c.enabled AND c.deleted_at IS NULL')
  expect(costQuery).toContain("WHERE vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed'")
 })
+ test('prices a 30-yuan Agnes plan across 15000 monthly seconds and keeps 10 seconds sellable',async()=>{
+  const db:any={
+   one:vi.fn(async(sql:string)=>sql.includes('media_prices')?{enabled:true,channel_enabled:false,cost_source:'',normal_cost_micros:'2000',actual_cost_micros:'2000',price_mode:'fixed',fixed_unit_price_micros:'35000',channel_id:'channel'}:sql.includes('max(topup_multiplier_bps)')?{bps:50000}:null),
+   query:vi.fn(async(sql:string)=>sql.includes('video_provider_keys')?[{actual_cost_per_second_micros:null,subscription_cost_micros:'30000000',subscription_duration_days:30}]:[]),
+  }
+  const s=new MediaService(db,{walletTopupMultiplierBps:30000} as any)
+  const q=await s.quote('user',{kind:'video',prompt:'test',seconds:10,size:'720P'})
+  expect(q.chargeMicros).toBe('350000')
+  expect(q.snapshot).toMatchObject({actualCostMicros:'20000',multiplierBps:50000,costSource:'subscription_cost_per_second_micros'})
+  expect(mediaPrice(2000n,50000,0,1000,3000)).toBe(16667n)
+ })
+ test('blocks fixed video price when a verified per-second cost exceeds its margin floor',async()=>{
+  const db:any={
+   one:vi.fn(async(sql:string)=>sql.includes('media_prices')?{enabled:true,channel_enabled:false,cost_source:'',normal_cost_micros:'2000',actual_cost_micros:'2000',price_mode:'fixed',fixed_unit_price_micros:'35000',channel_id:'channel'}:sql.includes('max(topup_multiplier_bps)')?{bps:50000}:null),
+   query:vi.fn(async(sql:string)=>sql.includes('video_provider_keys')?[{actual_cost_per_second_micros:'20000',subscription_cost_micros:'30000000',subscription_duration_days:30}]:[]),
+  }
+  const s=new MediaService(db,{walletTopupMultiplierBps:30000} as any)
+  await expect(s.quote('user',{kind:'video',prompt:'test',seconds:10,size:'720P'})).rejects.toThrow('最低毛利保护线')
+ })
  test.each([{kind:'video',size:'1080P'},{kind:'video',seconds:13},{kind:'video',mode:'reference'},{kind:'video',mode:'text',images:['https://example.com/a']},{kind:'video',mode:'keyframe'},{kind:'image',size:'100K'},{kind:'image',n:2},{kind:'image',images:['http://localhost/a']}])('rejects unsupported request %j',p=>{expect(()=>validateMedia({prompt:'test',...p})).toThrow()})
  test('only accepts HTTPS result links',()=>{expect(mediaResultUrl({data:[{url:'https://example.com/x.png'}]})).toBe('https://example.com/x.png');expect(mediaResultUrl({url:'javascript:alert(1)'})).toBeNull();expect(mediaResultUrl({metadata:{url:'https://example.com/video.mp4'}})).toBe('https://example.com/video.mp4')})
 })
