@@ -388,6 +388,8 @@ export class MediaService {
       return {...r,_wasQueued:wasQueued,submit_attempts:Number(r.submit_attempts||0)+(wasQueued?1:0)}
     });if(!task)return
     const submitting=Boolean(task._wasQueued)
+    let upstreamStatus: number | null = null
+    let upstreamStartedAt = 0
     try {
       if(task.status==='unknown'&&!task.upstream_id){
         if(task.kind==='image'&&typeof task.result_url==='string'&&task.result_url.startsWith('https://')){
@@ -435,13 +437,14 @@ export class MediaService {
       const expectedProvider = task.model === 'gpt-image-2' ? 'https://cdn.yyapi.cloud' : task.model === 'gpt-image-2.5' ? 'https://ripp.best' : task.model === 'agnes-video-2.5-flash' ? 'https://apihub.agnes-ai.com' : null
       if (expectedProvider && origin.origin !== expectedProvider) { await this.finish(task.id,false,null,'媒体渠道与模型不匹配，冻结额度已释放',undefined,undefined,'channel_mismatch'); return }
       const url=submitting?origin.origin+'/v1/'+(task.kind==='image'?'images/generations':'videos'):origin.origin+'/agnesapi?video_id='+encodeURIComponent(task.upstream_id)+'&model_name='+encodeURIComponent(task.model)
-      const upstreamStartedAt = Date.now()
+      upstreamStartedAt = Date.now()
       const response=await fetch(url,{method:submitting?'POST':'GET',headers:{authorization:'Bearer '+decryptSecret(channel.encrypted_api_key,this.config.channelEncryptionKey),'content-type':'application/json'},...(submitting?{body:JSON.stringify(task.request_payload)}:{}),signal:AbortSignal.timeout(submitting?360000:30000),redirect:'error'})
+      upstreamStatus = response.status
       const responseText=await response.text()
       let data:any=null;try{data=JSON.parse(responseText)}catch{ /* handled below without persisting body */ }
       const queueRejected=task.kind==='video'&&submitting&&!hasUpstreamTaskId(data)&&(response.status===429||agnesVideoQueueFull(response.status,data))
       if(queueRejected){if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined); if (this.videoKeys) await this.videoKeys.recordAttempt({ taskId: String(task.id), keyId: task.video_provider_key_id, attemptNo: Number(task.submit_attempts || 1), statusCode: response.status, durationMs: Date.now()-upstreamStartedAt, outcome: response.status === 429 ? 'rate_limited' : 'queue_full' }).catch(() => undefined); await this.requeueVideo(task,channel,response.status===429?'rate_limited':'queue_full');return}
-      if(!response.ok){if(submitting&&task.kind==='video'&&response.status===503)throw new Error('uncertain response');if(submitting&&[400,401,403,404,422].includes(response.status)){if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined);await this.finish(task.id,false,null,response.status===400||response.status===422?'提示词未通过上游审核，额度已全部退回':'暂时无法安排生成，额度已全部退回',undefined,undefined,'upstream_rejected');return}throw new Error('uncertain response')}
+      if(!response.ok){if(submitting&&task.kind==='video'&&response.status===503)throw new Error('uncertain response');if(submitting&&[400,401,403,404,422].includes(response.status)){if (this.videoKeys && task.video_provider_key_id) await this.videoKeys.recordAttempt({taskId:String(task.id),keyId:task.video_provider_key_id,attemptNo:Number(task.submit_attempts||1),statusCode:response.status,durationMs:Date.now()-upstreamStartedAt,outcome:'rejected',errorCode:'upstream_rejected',errorMessage:`HTTP ${response.status}`}).catch(() => undefined);if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined);await this.finish(task.id,false,null,response.status===400||response.status===422?'提示词未通过上游审核，额度已全部退回':'暂时无法安排生成，额度已全部退回',undefined,undefined,'upstream_rejected');return}throw new Error('uncertain response')}
       if(data===null)throw new Error('invalid upstream response')
       if(task.kind==='image'){
         const result=mediaResultUrl(data)
@@ -480,6 +483,15 @@ export class MediaService {
       const reason=error instanceof Error ? error.message : ''
       const detail=error instanceof Error && ['TimeoutError','AbortError'].includes(error.name)?'等待上游结果超时':reason==='missing video id'?'上游接单结果暂未确认':reason==='invalid upstream response'?'上游响应格式暂未确认':reason==='uncertain response'?'上游服务暂时繁忙':'上游连接暂时异常'
       const windowMessage=task.kind==='video'?'，系统会继续确认；超过等待时间才会自动退回额度':'，正在自动确认结果；超过 1 分钟将自动退回额度'
+      if (task.kind === 'video' && submitting && this.videoKeys && task.video_provider_key_id) {
+        const timeout = error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)
+        await this.videoKeys.recordAttempt({
+          taskId: String(task.id), keyId: task.video_provider_key_id,
+          attemptNo: Number(task.submit_attempts || 1), statusCode: upstreamStatus,
+          durationMs: upstreamStartedAt ? Date.now() - upstreamStartedAt : null,
+          outcome: timeout ? 'timeout' : 'network_error', errorCode: reason || 'unknown', errorMessage: detail,
+        }).catch(() => undefined)
+      }
       await this.db.query("UPDATE media_tasks SET status='unknown',uncertain_since=COALESCE(uncertain_since,now()),error_message=$2,lease_until=NULL,next_poll_at=now()+interval '10 seconds' WHERE id=$1 AND status IN ('submitting','processing','unknown') AND finished_at IS NULL",[task.id,detail+windowMessage])
     }
   }

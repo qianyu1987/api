@@ -31,12 +31,12 @@ describe('media pricing and input',()=>{
    query:vi.fn(async(sql:string)=>sql.includes('video_provider_keys')?[{actual_cost_per_second_micros:'1200',subscription_cost_micros:null,subscription_duration_days:null}]:[]),
   }
   const s=new MediaService(db,{walletTopupMultiplierBps:30000} as any)
-  const q=await s.quote('user',{kind:'video',prompt:'test',seconds:10,size:'720P'})
+ const q=await s.quote('user',{kind:'video',prompt:'test',seconds:10,size:'720P'})
   expect(q.chargeMicros).toBe('350000')
   expect(q.snapshot).toMatchObject({actualCostMicros:'12000',costSource:'actual_cost_per_second_micros'})
   const costQuery=db.query.mock.calls.find(([sql]:[string])=>sql.includes('FROM video_provider_keys'))?.[0] as string
   expect(costQuery).toContain('JOIN channels c ON c.id=vk.channel_id AND c.enabled AND c.deleted_at IS NULL')
-  expect(costQuery).toContain("WHERE vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed'")
+ expect(costQuery).toContain("WHERE vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed'")
 })
  test.each([{kind:'video',size:'1080P'},{kind:'video',seconds:13},{kind:'video',mode:'reference'},{kind:'video',mode:'text',images:['https://example.com/a']},{kind:'video',mode:'keyframe'},{kind:'image',size:'100K'},{kind:'image',n:2},{kind:'image',images:['http://localhost/a']}])('rejects unsupported request %j',p=>{expect(()=>validateMedia({prompt:'test',...p})).toThrow()})
  test('only accepts HTTPS result links',()=>{expect(mediaResultUrl({data:[{url:'https://example.com/x.png'}]})).toBe('https://example.com/x.png');expect(mediaResultUrl({url:'javascript:alert(1)'})).toBeNull();expect(mediaResultUrl({metadata:{url:'https://example.com/video.mp4'}})).toBe('https://example.com/video.mp4')})
@@ -75,8 +75,21 @@ describe('media submission lifecycle',()=>{
   const svc=new MediaService(db,{channelEncryptionKey:key} as any),finish=vi.spyOn(svc,'finish').mockResolvedValue()
   const fetchMock=vi.fn(async()=>new Response('Service unavailable',{status:503}));vi.stubGlobal('fetch',fetchMock)
   try{await svc.tick()}finally{vi.unstubAllGlobals()}
-  expect(fetchMock).toHaveBeenCalledTimes(1);expect(finish).not.toHaveBeenCalled()
-  expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='unknown'")&&params?.[0]==='task')).toBe(true)
+ expect(fetchMock).toHaveBeenCalledTimes(1);expect(finish).not.toHaveBeenCalled()
+ expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='unknown'")&&params?.[0]==='task')).toBe(true)
+ })
+ test('records the status, duration and failure for an uncertain video submission',async()=>{
+  const key=Buffer.alloc(32,14),task={id:'task',kind:'video',model:'agnes-video-2.5-flash',status:'queued',channel_id:'channel',request_payload:{seconds:4},submit_attempts:1,lease_until:null}
+  const query=vi.fn(async()=>[])
+  const clientQuery=vi.fn(async(sql:string)=>({rows:sql.startsWith('SELECT')?[task]:[]}))
+  const recordAttempt=vi.fn(async()=>undefined)
+  const videoKeys:any={reserveForTask:vi.fn(async()=>({id:'video-key',channelId:'channel',baseUrl:'https://apihub.agnes-ai.com/v1',encryptedApiKey:encryptSecret('provider-key',key)})),recordAttempt,releaseTaskReservation:vi.fn()}
+  const db:any={query,one:vi.fn(),tx:async(fn:any)=>fn({query:clientQuery})}
+  const svc=new MediaService(db,{channelEncryptionKey:key} as any,videoKeys)
+  const fetchMock=vi.fn(async()=>new Response('Service unavailable',{status:503}));vi.stubGlobal('fetch',fetchMock)
+  try{await svc.tick()}finally{vi.unstubAllGlobals()}
+  expect(fetchMock).toHaveBeenCalledTimes(1)
+  expect(recordAttempt).toHaveBeenCalledWith(expect.objectContaining({attemptNo:2,statusCode:503,outcome:'network_error',errorMessage:expect.any(String)}))
  })
  test('legacy unknown task starts its automatic confirmation window',async()=>{
   const query=vi.fn(async()=>[])

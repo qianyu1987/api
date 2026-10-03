@@ -1190,7 +1190,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         count(*)::int AS tasks,
         count(*) FILTER (WHERE status='completed')::int AS completed_tasks,
         COALESCE(sum(charge_micros) FILTER (WHERE status='completed'),0)::bigint AS revenue,
-        COALESCE(sum(actual_cost_micros) FILTER (WHERE status='completed'),0)::bigint AS cost,
+        COALESCE(sum(actual_cost_micros) FILTER (WHERE status IN ('completed','failed') AND (upstream_id IS NOT NULL OR quota_seconds_used > 0)),0)::bigint AS cost,
         COALESCE(sum(charge_micros) FILTER (WHERE status='failed'),0)::bigint AS refunds,
         COALESCE(sum(quota_seconds_used),0)::bigint AS seconds_used,
         COALESCE(sum(quota_seconds_reserved),0)::bigint AS seconds_reserved
@@ -1220,7 +1220,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       FROM usage_logs WHERE started_at >= $1 AND started_at < $2 GROUP BY requested_model,final_channel_name_snapshot ORDER BY profit ASC LIMIT 500`, [from, to])
     const video = await db.one<any>(`SELECT count(*) FILTER (WHERE status='completed')::int AS completed_tasks,
       COALESCE(sum(charge_micros) FILTER (WHERE status='completed'),0)::bigint AS revenue,
-      COALESCE(sum(actual_cost_micros) FILTER (WHERE status='completed'),0)::bigint AS cost,
+      COALESCE(sum(actual_cost_micros) FILTER (WHERE status IN ('completed','failed') AND (upstream_id IS NOT NULL OR quota_seconds_used > 0)),0)::bigint AS cost,
       COALESCE(sum(charge_micros) FILTER (WHERE status='failed'),0)::bigint AS refunds,
       COALESCE(sum(quota_seconds_used),0)::bigint AS seconds_used
       FROM media_tasks WHERE kind='video' AND created_at >= $1 AND created_at < $2`, [from, to])
