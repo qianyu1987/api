@@ -366,20 +366,33 @@ export class VideoKeyService {
   }
 
   async update(id: string, input: Partial<VideoKeyInput>, actorId?: string): Promise<VideoKeyAdmin> {
-    const before = await this.db.one<VideoKeyRow>('SELECT * FROM video_provider_keys WHERE id=$1', [id])
-    if (!before) throw Object.assign(new Error('视频 Key 不存在'), { statusCode: 404 })
-    const dailyLimit = input.dailyLimitSeconds === undefined ? Number(before.daily_limit_seconds) : integer(input.dailyLimitSeconds, 500, 1, 86400)
-    const maxConcurrency = input.maxConcurrency === undefined ? Number(before.max_concurrency) : integer(input.maxConcurrency, 1, 1, 64)
-    const priority = input.priority === undefined ? Number(before.priority) : integer(input.priority, 100, 0, 1_000_000)
-    const timezone = input.timezone === undefined ? before.timezone : String(input.timezone || '').trim()
-    if (!validTimezone(timezone)) throw new Error('时区无效')
-    usageDayForTimezone(timezone)
-    const enabled = input.enabled === undefined ? Boolean(before.enabled) : Boolean(input.enabled)
-    const videoEnabled = input.videoGenerationEnabled === undefined ? Boolean(before.video_generation_enabled) : Boolean(input.videoGenerationEnabled)
-    if ((enabled || videoEnabled) && before.probe_status !== 'passed') throw new Error('Key 必须先通过无计费连接测试')
+    if (Object.prototype.hasOwnProperty.call(input, 'apiKey')) {
+      throw new Error('请使用“轮换”操作修改 Agnes Key')
+    }
     const row = await this.db.tx(async (client) => {
       const current = await one<any>(client, 'SELECT * FROM video_provider_keys WHERE id=$1 FOR UPDATE', [id])
       if (!current) throw Object.assign(new Error('视频 Key 不存在'), { statusCode: 404 })
+      const accountLabel = String(input.accountLabel ?? current.account_label).trim()
+      if (accountLabel.length < 1 || accountLabel.length > 128) throw new Error('请填写 1-128 个字符的账号标签')
+      const dailyLimit = input.dailyLimitSeconds === undefined ? Number(current.daily_limit_seconds) : integer(input.dailyLimitSeconds, 500, 1, 86400)
+      const maxConcurrency = input.maxConcurrency === undefined ? Number(current.max_concurrency) : integer(input.maxConcurrency, 1, 1, 64)
+      const priority = input.priority === undefined ? Number(current.priority) : integer(input.priority, 100, 0, 1_000_000)
+      const timezone = input.timezone === undefined ? current.timezone : String(input.timezone || '').trim()
+      if (!validTimezone(timezone)) throw new Error('时区无效')
+      usageDayForTimezone(timezone)
+      const enabled = input.enabled === undefined ? Boolean(current.enabled) : Boolean(input.enabled)
+      const videoEnabled = input.videoGenerationEnabled === undefined ? Boolean(current.video_generation_enabled) : Boolean(input.videoGenerationEnabled)
+      if ((enabled || videoEnabled) && current.probe_status !== 'passed') throw new Error('Key 必须先通过无计费连接测试')
+      // Keep an existing local-day ledger aligned with a changed limit. Never
+      // lower it below seconds already used or reserved in that bucket.
+      const day = usageDayForTimezone(timezone)
+      const usage = await one<any>(client, 'SELECT * FROM video_key_usage_daily WHERE key_id=$1 AND usage_day=$2 FOR UPDATE', [id, day])
+      if (usage && Number(usage.used_seconds || 0) + Number(usage.reserved_seconds || 0) > dailyLimit) {
+        throw new Error('每日上限不能低于今日已用或已预留秒数')
+      }
+      if (usage) {
+        await client.query('UPDATE video_key_usage_daily SET limit_seconds=$3,updated_at=now() WHERE key_id=$1 AND usage_day=$2', [id, day, dailyLimit])
+      }
       const after = await one<any>(client, `UPDATE video_provider_keys SET account_label=$2,daily_limit_seconds=$3,timezone=$4,max_concurrency=$5,priority=$6,enabled=$7,video_generation_enabled=$8,prompt_expansion_enabled=$9,subscription_cost_micros=$10,subscription_duration_days=$11,actual_cost_per_second_micros=$12,updated_at=now() WHERE id=$1 RETURNING *`, [id, String(input.accountLabel ?? current.account_label).trim(), dailyLimit, timezone, maxConcurrency, priority, enabled, videoEnabled, input.promptExpansionEnabled === undefined ? current.prompt_expansion_enabled : Boolean(input.promptExpansionEnabled), input.subscriptionCostMicros === undefined ? current.subscription_cost_micros : optionalMicros(input.subscriptionCostMicros), input.subscriptionDurationDays === undefined ? current.subscription_duration_days : (input.subscriptionDurationDays === null ? null : integer(input.subscriptionDurationDays, 30, 1, 3660)), input.actualCostPerSecondMicros === undefined ? current.actual_cost_per_second_micros : optionalMicros(input.actualCostPerSecondMicros)])
       // The general channel is an implementation detail of the video key. It
       // must follow the pool switch or the scheduler would filter every key.
@@ -419,7 +432,12 @@ export class VideoKeyService {
       else message = '连接测试通过（未发起视频生成）'
     } catch { /* never persist provider response bodies or credentials */ }
     await this.db.tx(async (client) => {
-      await client.query(`UPDATE video_provider_keys SET probe_status=$2,last_probe_at=now(),last_probe_error=$3,updated_at=now() WHERE id=$1`, [id, ok ? 'passed' : 'failed', ok ? null : message])
+      // A rotation can happen while the network probe is in flight. Match the
+      // encrypted credential captured above so a stale probe cannot re-enable
+      // or mark the replacement credential as passed.
+      const updated = await client.query(`UPDATE video_provider_keys vk SET probe_status=$2,last_probe_at=now(),last_probe_error=$3,updated_at=now()
+        FROM channels c WHERE vk.id=$1 AND c.id=vk.channel_id AND c.base_url=$4 AND c.encrypted_api_key=$5`, [id, ok ? 'passed' : 'failed', ok ? null : message, AGNES_VIDEO_BASE_URL, row.encrypted_api_key])
+      if (!updated.rowCount) throw Object.assign(new Error('Key 在测试期间已轮换，请重新测试'), { statusCode: 409 })
       await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'video_provider_key_probe',$2,NULL,$3)`, [actorId || null, id, JSON.stringify({ ok, status: ok ? 'passed' : 'failed' })])
     })
     return { ok, status: ok ? 'passed' : 'failed', message }
