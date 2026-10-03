@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { deriveVideoKeyCost, fixedVideoPriceMicros, maskProviderKey, rankVideoCandidates, usageDayForTimezone, VIDEO_UNIT_PRICE_MICROS, VideoKeyService } from '../src/services/video-keys.js'
 
 describe('Agnes video key pool helpers', () => {
@@ -58,5 +58,28 @@ describe('Agnes video key pool helpers', () => {
     }
     const db: any = { tx: async (fn: any) => fn({ query: clientQuery }) }
     await expect(new VideoKeyService(db, {} as any).resetUsage('key', '保留任务不能重置')).rejects.toThrow('不能重置')
+  })
+
+  test('requires the dedicated rotate operation for credential changes', async () => {
+    const db: any = { tx: vi.fn(), one: vi.fn() }
+    await expect(new VideoKeyService(db, {} as any).update('key', { apiKey: 'new-secret' })).rejects.toThrow('轮换')
+    expect(db.tx).not.toHaveBeenCalled()
+  })
+
+  test('does not lower an active day below used and reserved seconds', async () => {
+    const current = {
+      id: 'key', account_label: 'Agnes', daily_limit_seconds: 500, timezone: 'Asia/Shanghai',
+      max_concurrency: 1, priority: 100, enabled: false, video_generation_enabled: false,
+      probe_status: 'passed', prompt_expansion_enabled: false,
+    }
+    const db: any = {
+      tx: async (fn: any) => fn({ query: async (sql: string) => {
+        if (sql.startsWith('SELECT * FROM video_provider_keys')) return { rows: [current] }
+        if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ used_seconds: 300, reserved_seconds: 100 }] }
+        throw new Error(`unexpected query: ${sql}`)
+      } }),
+      one: vi.fn(),
+    }
+    await expect(new VideoKeyService(db, {} as any).update('key', { dailyLimitSeconds: 399 })).rejects.toThrow('每日上限')
   })
 })
