@@ -364,7 +364,8 @@ export class MediaService {
     const attempt=Math.max(1,Number(task.submit_attempts || 1))
     const delay=alternative ? 1000 : mediaRetryDelayMs(attempt)
     const next=new Date(Date.now()+delay)
-    await this.db.query(`UPDATE media_tasks SET status='queued',channel_id=COALESCE($2,channel_id),last_retry_code=$3,
+    await this.db.query(`UPDATE media_tasks SET status='queued',channel_id=COALESCE($2,channel_id),
+      video_provider_key_id=NULL,quota_day=NULL,quota_seconds_reserved=0,last_retry_code=$3,
       error_message=$4,lease_until=NULL,uncertain_since=NULL,next_attempt_at=$5,next_poll_at=$5
       WHERE id=$1 AND status='submitting' AND finished_at IS NULL`,[task.id,alternative?.id || null,alternative?'channel_switch':code,message,next])
   }

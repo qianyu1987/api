@@ -59,7 +59,7 @@ describe('media submission lifecycle',()=>{
   expect(fetchMock).toHaveBeenCalledTimes(1)
   if(status==='queued'){
    expect(finish).not.toHaveBeenCalled()
-   expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='queued'")&&params?.[0]==='task')).toBe(true)
+   expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='queued'")&&sql.includes('video_provider_key_id=NULL')&&sql.includes('quota_seconds_reserved=0')&&params?.[0]==='task')).toBe(true)
   }else{
    expect(finish).not.toHaveBeenCalled()
    expect(query.mock.calls.some(([sql,params])=>sql.includes("SET status='unknown'")&&params?.[0]==='task')).toBe(true)
