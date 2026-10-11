@@ -110,6 +110,25 @@ describe('billing invariants', () => {
     expect(guarded.guard).toMatchObject({ requestedDiscountBps: 2500, appliedDiscountBps: 500, protectionApplied: true, protectionReason: 'enabled_channel_cost_missing' })
   })
 
+  test.each([false, true])('honors audited campaign rates with missing costs (night=%s) and freezes the decision', (nightDiscountActive) => {
+    const guarded = guardTokenPrice({
+      price,
+      rules: { minimumMarginBps: 1500, paymentFeeRateBps: 0, affiliateRateBps: 1000, walletTopupMultiplierBps: 50000 },
+      personalDiscountBps: 0, globalDiscountBps: 1000, nightDiscountBps: 2000, nightDiscountActive,
+      campaignDiscountOverrideEnabled: true,
+      channelCosts: [], coverageComplete: false,
+    })
+    const applied = nightDiscountActive ? 2000 : 1000
+    expect(guarded.guard).toMatchObject({ appliedDiscountBps: applied, campaignDiscountOverrideEnabled: true,
+      protectionApplied: false, protectionReason: null, baselineSafe: false, coverageComplete: false })
+    expect(guarded.price.inputSellMicrosPerMillion).toBe(nightDiscountActive ? 800_000n : 900_000n)
+    expect(guarded.price.inputCostMicrosPerMillion).toBe(price.inputCostMicrosPerMillion)
+    const snapshot = serializePriceSnapshot(guarded.price, { input: 1n, output: 1n, cache: 0n, reportedTotal: 2n }, {
+      model: 'gpt-test', requestPath: '/v1/responses', requestMethod: 'POST',
+    })
+    expect(deserializePriceSnapshot(snapshot).price.cashGuard).toMatchObject({ appliedDiscountBps: applied, campaignDiscountOverrideEnabled: true })
+  })
+
   test('freezes the guarded selling rate without repricing historical snapshots', () => {
     const guarded = guardTokenPrice({
       price: { ...price, inputSellMicrosPerMillion: 10_000_000n, outputSellMicrosPerMillion: 20_000_000n, cacheSellMicrosPerMillion: 5_000_000n },
@@ -238,7 +257,7 @@ describe('billing invariants', () => {
 describe('night discount reservation guard', () => {
   afterEach(() => vi.useRealTimers())
 
-  test('keeps an existing personal discount and removes only unsafe night contribution', async () => {
+  test.each([false, true])('reserves and snapshots the configured campaign policy (override=%s)', async (override) => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-09-27T17:00:00.000Z'))
     let storedSnapshot: any = null
@@ -251,7 +270,8 @@ describe('night discount reservation guard', () => {
           { key: 'affiliate_enabled', value: 'true' }, { key: 'affiliate_rate_bps', value: '1000' },
           { key: 'global_token_discount_bps', value: '0' }, { key: 'night_token_discount_enabled', value: 'true' },
           { key: 'night_token_discount_bps', value: '2500' },
-        ], rowCount: 7 }
+          { key: 'campaign_token_discount_override_enabled', value: String(override) },
+        ], rowCount: 8 }
         if (sql.includes('MAX(topup_multiplier_bps)')) return { rows: [{ multiplier: 50000 }], rowCount: 1 }
         if (sql.includes('SELECT id,model_map FROM channels')) return { rows: [{ id: 'channel-1', model_map: { 'gpt-test': 'gpt-test' } }], rowCount: 1 }
         if (sql.includes('SELECT * FROM channel_model_costs')) return { rows: [{
@@ -276,10 +296,13 @@ describe('night discount reservation guard', () => {
       requestPath: '/v1/chat/completions', requestMethod: 'POST', price,
     })).resolves.toMatchObject({ requestId: 'request-1', status: 'reserved' })
     expect(storedSnapshot.cashGuard).toMatchObject({
-      nightDiscountActive: true, requestedDiscountBps: 2500, appliedDiscountBps: 500,
-      baselineSafe: false, protectionApplied: true, protectionReason: 'baseline_below_minimum_margin',
+      nightDiscountActive: true, requestedDiscountBps: 2500, appliedDiscountBps: override ? 2500 : 500,
+      campaignDiscountOverrideEnabled: override, baselineSafe: false,
+      protectionApplied: !override, protectionReason: override ? null : 'baseline_below_minimum_margin',
     })
-    expect(storedSnapshot.discountBps).toBe('500')
+    expect(storedSnapshot.discountBps).toBe(override ? '2500' : '500')
+    const settingsQuery = client.query.mock.calls.find(([sql]) => sql.includes('SELECT key,value FROM app_settings'))!
+    expect(settingsQuery[0]).toContain('campaign_token_discount_override_enabled')
   })
 })
 

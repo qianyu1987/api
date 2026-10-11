@@ -4,6 +4,7 @@ import {
   buildApp,
   buildModelPriceComparison,
   normalizeEnterpriseLeadInput,
+  nightDiscountView,
   shanghaiDayBounds,
   shanghaiNightDiscountWindow,
   shouldForwardRelayResponseHeader,
@@ -11,6 +12,20 @@ import {
 } from '../src/server.js'
 
 describe('enterprise price comparison', () => {
+  test('reports the same audited daytime and midnight campaign as billing', () => {
+    const settings = { globalDiscountBps: 1000, nightDiscountEnabled: true, nightDiscountBps: 2000,
+      campaignDiscountOverrideEnabled: true, maxDiscountBps: 0, minimumMarginBps: 1500 }
+    expect(nightDiscountView(settings, 0, undefined, new Date('2026-10-11T15:59:59.999Z'))).toMatchObject({
+      active: false, appliedDiscountBps: 0, effectiveTokenDiscountBps: 1000,
+    })
+    expect(nightDiscountView(settings, 0, undefined, new Date('2026-10-11T16:00:00.000Z'))).toMatchObject({
+      active: true, appliedDiscountBps: 2000, effectiveTokenDiscountBps: 2000, protectionApplied: false,
+    })
+    expect(nightDiscountView(settings, 2500, undefined, new Date('2026-10-11T19:59:59.999Z')).effectiveTokenDiscountBps).toBe(2500)
+    expect(nightDiscountView(settings, 0, undefined, new Date('2026-10-11T20:00:00.000Z'))).toMatchObject({
+      active: false, appliedDiscountBps: 0, effectiveTokenDiscountBps: 1000,
+    })
+  })
   test('preserves the relay billing request id instead of forwarding the upstream id', () => {
     expect(shouldForwardRelayResponseHeader('x-request-id')).toBe(false)
     expect(shouldForwardRelayResponseHeader('X-Request-ID')).toBe(false)
@@ -192,6 +207,15 @@ describe('enterprise API', () => {
     })
     expect(invalid.statusCode).toBe(400)
     expect(update).toHaveBeenCalledTimes(1)
+  })
+
+  test('rejects anonymous and non-admin campaign overrides before any profit update', async () => {
+    const update = vi.spyOn(services.profit, 'update')
+    const payload = { globalDiscountBps: 1000, campaignDiscountOverrideEnabled: true, overrideReason: '用户要求' }
+    expect((await services.app.inject({ method: 'PATCH', url: '/api/admin/settings/profit', payload })).statusCode).toBe(401)
+    role = 'user'
+    expect((await services.app.inject({ method: 'PATCH', url: '/api/admin/settings/profit', headers, payload })).statusCode).toBe(403)
+    expect(update).not.toHaveBeenCalled()
   })
 
   test('requires login, upserts the caller lead and isolates the admin list', async () => {

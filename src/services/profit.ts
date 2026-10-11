@@ -51,6 +51,7 @@ export type ProfitRules = {
   globalDiscountBps: number
   nightDiscountEnabled: boolean
   nightDiscountBps: number
+  campaignDiscountOverrideEnabled: boolean
   walletTopupMultiplierBps: number
 }
 
@@ -75,6 +76,7 @@ export function profitRules(settings: Record<string, string>, walletTopupMultipl
     globalDiscountBps: bps(settings.global_token_discount_bps, 0, 9900),
     nightDiscountEnabled: booleanSetting(settings.night_token_discount_enabled, false),
     nightDiscountBps: bps(settings.night_token_discount_bps, 0, 9900),
+    campaignDiscountOverrideEnabled: booleanSetting(settings.campaign_token_discount_override_enabled, false),
     walletTopupMultiplierBps: worstWalletTopupMultiplier(walletTopupMultiplierBps),
   }
 }
@@ -193,7 +195,9 @@ export class ProfitService {
     const window = shanghaiNightDiscountWindow(now)
     const enabledNightDiscount = rules.nightDiscountEnabled ? rules.nightDiscountBps : 0
     const requestedNightDiscount = rules.nightDiscountEnabled && window.active ? rules.nightDiscountBps : 0
-    const appliedNightDiscount = Math.min(requestedNightDiscount, guardrail.maxDiscountBps)
+    const appliedNightDiscount = rules.campaignDiscountOverrideEnabled
+      ? requestedNightDiscount
+      : Math.min(requestedNightDiscount, guardrail.maxDiscountBps)
     const maxPersonalDiscountBps = state.users.reduce((maximum, user) => Math.max(maximum, Number(user.token_discount_bps) || 0), 0)
     const campaignConfiguredDiscountBps = effectiveDiscountBps(0, rules.globalDiscountBps, enabledNightDiscount)
     const configuredMaximumDiscountBps = effectiveDiscountBps(maxPersonalDiscountBps, rules.globalDiscountBps, enabledNightDiscount)
@@ -219,6 +223,7 @@ export class ProfitService {
         maxSafeDiscountBps: guardrail.maxDiscountBps,
         minimumMarginBps: rules.minimumMarginBps,
         protectionApplied: appliedNightDiscount < requestedNightDiscount,
+        campaignDiscountOverrideEnabled: rules.campaignDiscountOverrideEnabled,
         timezone: window.timezone,
         startsAt: window.startsAt,
         endsAt: window.endsAt,
@@ -229,6 +234,7 @@ export class ProfitService {
   }
 
   private candidateRules(state: ProfitState, body: any): ProfitRules {
+    this.campaignOverrideReason(body)
     const current = this.rules(state)
     return {
       ...current,
@@ -238,8 +244,21 @@ export class ProfitService {
       globalDiscountBps: bps(body.globalDiscountBps, current.globalDiscountBps, 9900),
       nightDiscountEnabled: booleanSetting(body.nightDiscountEnabled, current.nightDiscountEnabled),
       nightDiscountBps: bps(body.nightDiscountBps, current.nightDiscountBps, 9900),
+      campaignDiscountOverrideEnabled: booleanSetting(body.campaignDiscountOverrideEnabled, current.campaignDiscountOverrideEnabled),
       walletTopupMultiplierBps: worstWalletTopupMultiplier(body.walletTopupMultiplierBps, current.walletTopupMultiplierBps),
     }
+  }
+
+  private campaignOverrideReason(body: any): string | undefined {
+    if (body.campaignDiscountOverrideEnabled === undefined) return undefined
+    if (typeof body.campaignDiscountOverrideEnabled !== 'boolean') {
+      throw Object.assign(new Error('管理员指定折扣开关必须为布尔值'), { statusCode: 400 })
+    }
+    const reason = typeof body.overrideReason === 'string' ? body.overrideReason.trim() : ''
+    if (!reason || reason.length > 500) {
+      throw Object.assign(new Error('变更管理员指定折扣模式需要填写 1-500 字的原因'), { statusCode: 400 })
+    }
+    return reason
   }
 
   private assertConfiguredSafety(overview: ReturnType<ProfitService['evaluate']>): void {
@@ -247,6 +266,9 @@ export class ProfitService {
     if (retainedCashBps <= 0) {
       throw Object.assign(new Error('最低毛利、支付费和返利比例合计必须低于 100%'), { statusCode: 400, guardrail: overview })
     }
+    // An explicit, audited admin campaign decision does not alter cost data or
+    // personal-discount validation. Keep the calculated risk visible.
+    if (overview.campaignDiscountOverrideEnabled) return
     if (overview.campaignConfiguredDiscountBps > 0 && overview.channelCostBlockers.length) {
       throw Object.assign(new Error('渠道成本不完整，无法安全启用折扣；请先补齐所有启用渠道映射的标准及 272K+ 成本'), { statusCode: 409, guardrail: overview })
     }
@@ -302,10 +324,13 @@ export class ProfitService {
         ['profit_min_margin_bps', 'profit.min_margin_bps', rules.minimumMarginBps],
         ['payment_fee_rate_bps', 'profit.payment_fee_rate_bps', rules.paymentFeeRateBps],
         ['global_token_discount_bps', 'profit.global_token_discount_bps', rules.globalDiscountBps],
+        ['night_token_discount_enabled', 'profit.night_token_discount_enabled', rules.nightDiscountEnabled],
+        ['night_token_discount_bps', 'profit.night_token_discount_bps', rules.nightDiscountBps],
+        ['campaign_token_discount_override_enabled', 'profit.campaign_token_discount_override_enabled', rules.campaignDiscountOverrideEnabled],
       ]) await client.query(`INSERT INTO app_settings(key,setting_key,value,value_json,updated_by_user_id) VALUES($1,$2,$3,to_jsonb($3::text),$4)
         ON CONFLICT(key) DO UPDATE SET value=excluded.value,value_json=excluded.value_json,updated_by_user_id=excluded.updated_by_user_id,updated_at=now()`, [key, settingKey, String(value), actorId])
       const after = await this.overview(client)
-      await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'profit_settings','global',$2,$3)`, [actorId, JSON.stringify(before), JSON.stringify(after)])
+      await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'profit_settings','global',$2,$3)`, [actorId, JSON.stringify(before), JSON.stringify({ ...after, overrideReason: this.campaignOverrideReason(body) ?? null })])
       return after
     })
   }

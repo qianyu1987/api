@@ -206,6 +206,7 @@
       effectiveTokenDiscountBps: discountBps(data.effectiveTokenDiscountBps),
       minimumMarginBps: discountBps(data.minimumMarginBps),
       protectionApplied: data.protectionApplied === true,
+      campaignDiscountOverrideEnabled: data.campaignDiscountOverrideEnabled === true,
       nextTransitionAt: transitionTime(data.nextTransitionAt || (data.active ? data.endsAt : data.startsAt)),
     }
   }
@@ -260,7 +261,9 @@
     }
     $('#night-discount-summary').textContent = summaries[status]
     const minimumMargin = current ? discountPercent(current.minimumMarginBps) : null
-    $('#night-discount-protection').textContent = current?.protectionApplied
+    $('#night-discount-protection').textContent = current?.campaignDiscountOverrideEnabled
+      ? '全站和深夜优惠取更优惠的一项，不叠加；仅限 Token 计费，图片和视频价格保持独立。'
+      : current?.protectionApplied
       ? '最低利润保护已介入：当前实际折扣低于配置值，以服务端结算结果为准。'
       : '最低利润保护' + (minimumMargin ? '线为 ' + minimumMargin : '') + '；实际折扣不会突破保护线，以服务端结算结果为准。'
     startNightDiscountTimer()
@@ -727,14 +730,17 @@
     }
     if (tab === 'settings') {
       const settings = Object.fromEntries(items.map((item) => [item.key, item.value])); const smtp = data.mail || {}; const profit = data.profit || {}; const night = data.nightDiscount || {}
+      const campaignModeNote = profit.campaignDiscountOverrideEnabled === true
+        ? '管理员指定折扣已启用：按设置执行全站与深夜折扣，成本和利润检查仅作风险提示。'
+        : '折扣、支付手续费和返利合计后必须达到最低毛利线。'
       const siteEditor = form('site-settings', [field('name', '站点名称', settings.site_name || 'GPT TOKEN', 'text', 'required'), field('title', '浏览器标题', settings.site_title || 'GPT TOKEN | OpenAI 兼容 API 控制台', 'text', 'required'), field('logoUrl', 'Logo 地址', settings.site_logo_url || '/assets/gpt-token-mark-192.png', 'text', 'required'), '<p class="admin-note wide">Logo 已本地托管。SMTP 密码、上游 Key 和用户 API Key 不会出现在本页面、数据库或日志。</p>'], '保存站点设置')
-      const profitEditor = form('profit-settings', [field('minimumMarginBps', '最低毛利率（基点，3000 = 30%）', String(profit.minimumMarginBps ?? settings.profit_min_margin_bps ?? 3000), 'number', 'min="0" max="9999" required'), field('paymentFeeRateBps', '支付手续费率（基点）', String(profit.paymentFeeRateBps ?? settings.payment_fee_rate_bps ?? 0), 'number', 'min="0" max="10000" required'), field('globalDiscountBps', '全局减免比例（基点，1000 = 10%）', String(profit.globalDiscountBps ?? settings.global_token_discount_bps ?? 0), 'number', 'min="0" max="9900" required'), '<div class="admin-note wide">当前安全上限：<strong>' + ((Number(profit.maxDiscountBps || 0)) / 100) + '%</strong>。折扣、支付手续费和返利合计后必须达到最低毛利线；用户售价不按上下文长度分层。</div>'], '保存利润设置')
+      const profitEditor = form('profit-settings', [field('minimumMarginBps', '最低毛利率（基点，1500 = 15%）', String(profit.minimumMarginBps ?? settings.profit_min_margin_bps ?? 3000), 'number', 'min="0" max="9999" required'), field('paymentFeeRateBps', '支付手续费率（基点）', String(profit.paymentFeeRateBps ?? settings.payment_fee_rate_bps ?? 0), 'number', 'min="0" max="10000" required'), field('globalDiscountBps', '全局减免比例（基点，1000 = 10%）', String(profit.globalDiscountBps ?? settings.global_token_discount_bps ?? 0), 'number', 'min="0" max="9900" required'), '<div class="admin-note wide">当前安全上限：<strong>' + ((Number(profit.maxDiscountBps || 0)) / 100) + '%</strong>。' + campaignModeNote + ' 用户售价不按上下文长度分层。</div>'], '保存利润设置')
       const configuredNightBps = discountBps(night.configuredDiscountBps ?? night.discountBps)
       const nightInputValue = configuredNightBps == null ? '' : (configuredNightBps / 100).toFixed(2).replace(/\.?0+$/, '')
       const nightEditor = form('night-discount-settings', [
         field('discountPercent', '深夜减免比例（%）', nightInputValue, 'number', 'min="0" max="99" step="0.01" placeholder="请明确填写折扣" required'),
         check('enabled', '启用每日 00:00-04:00 深夜折扣', night.enabled === true),
-        '<div class="admin-note wide night-discount-admin-note">当前配置：<strong>' + (configuredNightBps == null ? '未设置' : discountSummary(configuredNightBps)) + '</strong> · 当前实际：<strong>' + (night.active === true ? discountSummary(night.appliedDiscountBps) : '未生效') + '</strong> · 安全上限：<strong>' + (discountPercent(night.maxSafeDiscountBps) || '待服务端核算') + '</strong>。保存时服务端会再次执行最低利润保护；关闭后固定时段也不会生效。</div>',
+        '<div class="admin-note wide night-discount-admin-note">当前配置：<strong>' + (configuredNightBps == null ? '未设置' : discountSummary(configuredNightBps)) + '</strong> · 当前实际：<strong>' + (night.active === true ? discountSummary(night.appliedDiscountBps) : '未生效') + '</strong> · 安全上限：<strong>' + (discountPercent(night.maxSafeDiscountBps) || '待服务端核算') + '</strong>。' + campaignModeNote + ' 关闭后固定时段也不会生效。</div>',
       ], '保存深夜折扣')
       const blockers = (profit.blockers || []).slice(0, 6).map((item) => '<li>' + esc(item.model + ' · ' + item.tier + ' · ' + item.part + '：' + (item.reason || '低于安全上限')) + '</li>').join('')
       return '<div class="settings-status"><div><span class="label">邮件服务</span><strong>' + (smtp.configured ? '已配置' : '未配置') + '</strong></div><div><span class="label">SMTP 主机</span><strong>' + esc(smtp.host || '—') + '</strong></div><div><span class="label">发件地址</span><strong>' + esc(smtp.from || '—') + '</strong></div><div><span class="label">TLS</span><strong>' + (smtp.secure ? '已启用' : '未启用') + '</strong></div></div>' + profitEditor + nightEditor + (blockers ? '<div class="notice"><strong>风险配置</strong><ul>' + blockers + '</ul></div>' : '') + siteEditor

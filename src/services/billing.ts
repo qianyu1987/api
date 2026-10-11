@@ -14,6 +14,7 @@ export type CashGuardSnapshot = PricingRules & {
   globalDiscountBps: number
   nightDiscountBps: number
   nightDiscountActive: boolean
+  campaignDiscountOverrideEnabled?: boolean
   requestedDiscountBps: number
   appliedDiscountBps: number
   maxSafeDiscountBps: number
@@ -432,6 +433,7 @@ export function guardTokenPrice(input: {
   globalDiscountBps: number
   nightDiscountBps: number
   nightDiscountActive: boolean
+  campaignDiscountOverrideEnabled?: boolean
   channelCosts: ChannelCostSnapshot[]
   coverageComplete: boolean
 }): { price: PriceSnapshot; guard: CashGuardSnapshot } {
@@ -460,7 +462,9 @@ export function guardTokenPrice(input: {
   // Existing personal/global discounts predate this feature. The night offer
   // may never make those calls less safe, but it must not retroactively change
   // their established price semantics either.
-  const appliedDiscountBps = !nightAddsDiscount
+  const appliedDiscountBps = input.campaignDiscountOverrideEnabled === true
+    ? requestedDiscountBps
+    : !nightAddsDiscount
     ? requestedWithoutNight
     : canApplyNightDiscount
       ? Math.max(requestedWithoutNight, Math.min(requestedDiscountBps, maxSafeDiscountBps))
@@ -479,6 +483,7 @@ export function guardTokenPrice(input: {
     globalDiscountBps: input.globalDiscountBps,
     nightDiscountBps: input.nightDiscountBps,
     nightDiscountActive: input.nightDiscountActive,
+    campaignDiscountOverrideEnabled: input.campaignDiscountOverrideEnabled === true,
     requestedDiscountBps,
     appliedDiscountBps,
     maxSafeDiscountBps,
@@ -933,7 +938,8 @@ export class BillingService {
       }
       const settingsRows = await client.query(`SELECT key,value FROM app_settings WHERE key IN (
         'profit_min_margin_bps','payment_fee_rate_bps','affiliate_enabled','affiliate_rate_bps',
-        'global_token_discount_bps','night_token_discount_enabled','night_token_discount_bps'
+        'global_token_discount_bps','night_token_discount_enabled','night_token_discount_bps',
+        'campaign_token_discount_override_enabled'
       )`)
       const settings = Object.fromEntries(settingsRows.rows.map((row: any) => [String(row.key), String(row.value)]))
       const paidMultiplier = await one<any>(client, `SELECT COALESCE(MAX(topup_multiplier_bps),0) AS multiplier
@@ -980,6 +986,7 @@ export class BillingService {
           globalDiscountBps: globalDiscount,
           nightDiscountBps: rules.nightDiscountBps,
           nightDiscountActive,
+          campaignDiscountOverrideEnabled: rules.campaignDiscountOverrideEnabled,
           channelCosts: snapshots,
           coverageComplete,
         })

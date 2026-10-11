@@ -193,13 +193,14 @@ export function shanghaiDayBounds(now: Date = new Date()): { from: Date; to: Dat
 
 export { shanghaiNightDiscountWindow } from './services/profit.js'
 
-function nightDiscountView(profitOverview: any, personalDiscountBps = 0, globalDiscountOverride?: number, now: Date = new Date()) {
+export function nightDiscountView(profitOverview: any, personalDiscountBps = 0, globalDiscountOverride?: number, now: Date = new Date()) {
   const window = shanghaiNightDiscountWindow(now)
   const enabled = profitOverview.nightDiscountEnabled === true
   const configuredDiscountBps = Math.max(0, Math.min(9900, Number(profitOverview.nightDiscountBps || 0)))
   const maxSafeDiscountBps = Math.max(0, Math.min(9900, Number(profitOverview.maxDiscountBps || 0)))
   const active = enabled && window.active
-  const appliedDiscountBps = active ? Math.min(configuredDiscountBps, maxSafeDiscountBps) : 0
+  const campaignDiscountOverrideEnabled = profitOverview.campaignDiscountOverrideEnabled === true
+  const appliedDiscountBps = active ? (campaignDiscountOverrideEnabled ? configuredDiscountBps : Math.min(configuredDiscountBps, maxSafeDiscountBps)) : 0
   const globalDiscountBps = Math.max(0, Math.min(9900, Number(globalDiscountOverride ?? profitOverview.globalDiscountBps ?? 0)))
   return {
     timezone: 'Asia/Shanghai',
@@ -215,6 +216,7 @@ function nightDiscountView(profitOverview: any, personalDiscountBps = 0, globalD
     maxSafeDiscountBps,
     minimumMarginBps: Number(profitOverview.minimumMarginBps || 0),
     protectionApplied: active && appliedDiscountBps < configuredDiscountBps,
+    campaignDiscountOverrideEnabled,
     startsAt: window.startsAt,
     endsAt: window.endsAt,
     nextTransitionAt: window.nextTransitionAt,

@@ -145,6 +145,47 @@ function fakeProfitDatabase(costs: any[] = [], users: any[] = [{ token_discount_
 }
 
 describe('night discount settings update', () => {
+  test('atomically publishes an audited campaign override without inventing costs', async () => {
+    const { db, settings, client } = fakeProfitDatabase()
+    const service = new ProfitService(db as any)
+    const result = await service.update({
+      minimumMarginBps: 1500, globalDiscountBps: 1000,
+      nightDiscountEnabled: true, nightDiscountBps: 2000,
+      campaignDiscountOverrideEnabled: true, overrideReason: '站长要求全站9折、深夜8折，不按成本限制活动折扣',
+    }, 'actor')
+    expect(result).toMatchObject({ minimumMarginBps: 1500, globalDiscountBps: 1000,
+      nightDiscountEnabled: true, nightDiscountBps: 2000, campaignDiscountOverrideEnabled: true,
+      maxDiscountBps: 0, guardrailReady: false, configuredDiscountRiskCount: 1 })
+    expect(settings.get('campaign_token_discount_override_enabled')).toBe('true')
+    expect(settings.get('night_token_discount_bps')).toBe('2000')
+    const audit = client.query.mock.calls.find(([sql]) => String(sql).includes("'profit_settings','global'"))!
+    expect(JSON.parse(String(audit[1]?.[2]))).toMatchObject({ campaignDiscountOverrideEnabled: true,
+      overrideReason: '站长要求全站9折、深夜8折，不按成本限制活动折扣' })
+    const night = await service.overview(undefined, '2026-10-11T17:00:00.000Z')
+    expect(night.nightDiscount).toMatchObject({ appliedDiscountBps: 2000, protectionApplied: false })
+    const day = await service.overview(undefined, '2026-10-11T20:00:00.000Z')
+    expect(day).toMatchObject({ currentMaximumDiscountBps: 1000, nightDiscountActive: false })
+    expect(day.nightDiscount.appliedDiscountBps).toBe(0)
+    await expect(service.validateDiscount(3000)).rejects.toMatchObject({ statusCode: 409 })
+  })
+
+  test('rejects an override change without a reason or a boolean switch before writes', async () => {
+    for (const body of [{ campaignDiscountOverrideEnabled: true },
+      { campaignDiscountOverrideEnabled: 'true', overrideReason: '用户要求' },
+      { campaignDiscountOverrideEnabled: false, overrideReason: ' ' }]) {
+      const { db, client } = fakeProfitDatabase()
+      await expect(new ProfitService(db as any).update(body, 'actor')).rejects.toMatchObject({ statusCode: 400 })
+      expect(client.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO'))).toBe(false)
+    }
+  })
+
+  test('keeps the retained cash validation even when campaign override is enabled', async () => {
+    const { db } = fakeProfitDatabase()
+    await expect(new ProfitService(db as any).update({
+      minimumMarginBps: 9000, campaignDiscountOverrideEnabled: true, overrideReason: '用户要求',
+    }, 'actor')).rejects.toMatchObject({ statusCode: 400 })
+  })
+
   test('rejects profit, fee and rebate settings that leave no retained cash', async () => {
     const { db } = fakeProfitDatabase([{
       channel_id: 'missing', model_pattern: 'gpt-test',
