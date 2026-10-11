@@ -449,3 +449,10 @@
 - 应用提交 `bea2758` 已推送 `origin/main`，版本 v1.0.113；发布归档 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.113-discounts/relay-station-v1.0.113.tar.gz`，SHA-256 `baf20089601943f7b35f974c7b0e9d7b6d509cf2c9af8b1cd7e5354cbe1111a9`。生产备份 `/opt/relay-station-backups/pre-v1.0.113-discounts-20261011/` 包含 PostgreSQL dump（415595803字节、pg_restore列表370行）、生产配置和旧源码，配置/dump权限0600、目录0700，保留 `relay-station:rollback-pre-v1.0.113`。
 - Migration 成功；两个 API 副本均为 `relay-station:v1.0.113` / healthy，Gateway/PostgreSQL/Redis healthy，维护 timer active。www 健康接口200、首页加载 `app.js?v=1.0.113`。
 - 生产一次性管理更新 HTTP 200：`minimumMarginBps=1500`、`globalDiscountBps=1000`、`nightDiscountEnabled=true`、`nightDiscountBps=2000`、`campaignDiscountOverrideEnabled=true`。重新读取管理配置、用户总览、数据库及 `profit_settings/global` 审计均一致，原因记录用户指定折扣决策。当前时段用户看到10%减免，深夜已启用且配置20%减免；在线计费函数只读验证白天/夜间售价及快照均正确。后台与手机总览截图保存在发布归档目录；未创建订单、媒体任务或真实上游计费请求。
+
+## 总览 Token 折扣放大：v1.0.114（2026-10-11 CST）
+
+- 按用户浏览器标注，放大总览右侧 `#token-discount`，将原英文百分比长句改为 32–44px、800字重、品牌深色的中文“9 折”；下方保留“减免10% · 实际支付90%”。内容仍取服务端有效折扣，预览已验证深夜20%时显示“8 折”、无折扣时显示“原价”。仅调整前端显示，没有变更计费或折扣配置。
+- 8 项现有折扣 UI 测试、前端语法和 diff 检查通过；镜像 TypeScript 构建通过。设计检测为缺解析模块的降级扫描；桌面961px及手机390px浏览器预览和线上检查均无页面横向溢出、无JS错误，实际字号32px。生产管理配置只读复核仍为最低毛利15%、全站9折、深夜8折已启用及管理员指定模式。
+- 应用提交 `e50608e`、标签 v1.0.114 已推送；归档 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.114-discount-display/relay-station-v1.0.114.tar.gz`，SHA-256 `0d2ce14c3c1b26b9e3f0d4dad5f35b70abd75ce714d03670564260cd9afe9bcd`。生产备份 `/opt/relay-station-backups/pre-v1.0.114-discount-display-20261011/`：PostgreSQL dump415596332字节、pg_restore列表370行，配置/备份0600，保留 `relay-station:rollback-pre-v1.0.114`。
+- 两个 API 副本为 `relay-station:v1.0.114` / healthy，Gateway/PostgreSQL/Redis healthy、维护timer active、www健康200，首页实际加载 `styles.css?v=1.0.114` 和 `app.js?v=1.0.114`。无Schema修改或迁移；未创建支付、媒体任务或上游计费请求。发布目录含桌面/手机预览和线上截图。
