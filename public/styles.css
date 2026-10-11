@@ -137,3 +137,15 @@
   .night-discount-details div { border-right: 0; border-bottom: 1px solid rgba(203, 232, 226, .14); }
   .night-discount-details div:last-child { border-bottom: 0; }
 }
+
+/* Make the current Token offer easy to read beside the account balance. */
+.info-block .token-discount-summary { gap: 8px; }
+#token-discount {
+  color: var(--accent-dark);
+  font-size: clamp(32px, 3vw, 44px);
+  font-weight: 800;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.token-discount-detail { color: var(--muted); font-size: 13px; line-height: 1.5; }

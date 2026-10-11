@@ -414,7 +414,9 @@
       const historyCredit = $('#history-topup-credit'); if (historyCredit) historyCredit.textContent = money({ micros: history.totalTopupCreditMicros || '0' })
       const historyPaid = $('#history-paid'); if (historyPaid) historyPaid.textContent = money({ micros: history.totalPaidMicros || '0' })
       const discountPercent = data.effectiveTokenDiscountBps == null ? Number(data.tokenDiscountPercent || 0) : Number(data.effectiveTokenDiscountBps) / 100
-      $('#token-discount').textContent = discountPercent > 0 ? discountPercent + '% off（实际支付 ' + (100 - discountPercent) + '%）' : '无折扣（原价）'
+      const discountRate = ((100 - discountPercent) / 10).toFixed(3).replace(/\.?0+$/, '')
+      $('#token-discount').textContent = discountPercent > 0 ? discountRate + ' 折' : '原价'
+      $('#token-discount-detail').textContent = discountPercent > 0 ? '减免 ' + discountPercent + '% · 实际支付 ' + (100 - discountPercent) + '%' : '当前按原价计费'
       $('#plan-expiry').textContent = data.balance.planExpiresAt ? new Date(data.balance.planExpiresAt).toLocaleDateString('zh-CN') : '未开通'
       const resetNode = $('#plan-reset')
       if (resetNode) resetNode.textContent = data.balance.planNextResetAt ? new Date(data.balance.planNextResetAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'

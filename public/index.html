@@ -6,8 +6,8 @@
   <meta name="description" content="GPT TOKEN 提供 OpenAI 兼容 API 接入、统一 Key 与用量管理。查看接入指南和钱包充值优惠。">
   <meta name="theme-color" content="#12342f">
   <title>GPT TOKEN | OpenAI 兼容 API 控制台</title>
-  <link rel="stylesheet" href="/styles.css?v=1.0.113">
-  <link rel="stylesheet" href="/styles-extra.css?v=1.0.113">
+  <link rel="stylesheet" href="/styles.css?v=1.0.114">
+  <link rel="stylesheet" href="/styles-extra.css?v=1.0.114">
   <link rel="stylesheet" href="/styles-auth.css">
   <link rel="stylesheet" href="/styles-password.css">
   <link rel="stylesheet" href="/styles-landing.css?v=1.0.47">
@@ -101,7 +101,7 @@
       <section id="view-overview" class="view active-view">
         <div class="overview-grid">
           <div class="balance-block"><p class="label">可用额度</p><div class="balance-value" id="balance-total">--</div><p class="muted" id="balance-detail">钱包 -- · 套餐 --</p><div class="balance-history" aria-label="历史充值统计"><span>历史总充值额度 <strong id="history-topup-credit">--</strong></span><span>历史实付总额（含套餐） <strong id="history-paid">--</strong></span></div><div class="balance-actions"><button class="button primary" type="button" data-go="recharge">充值</button><button class="button secondary" type="button" data-go="keys">创建 API Key</button></div></div>
-          <div class="info-block"><div><span class="label">Token 折扣</span><strong id="token-discount">无折扣</strong></div><div><span class="label">套餐到期</span><strong id="plan-expiry">未开通</strong></div><div><span class="label">下次重置</span><strong id="plan-reset">—</strong></div><div><span class="label">API Base URL</span><div class="copy-line"><code id="api-base">--</code><button class="small-button" type="button" data-copy="api-base">复制</button></div></div><div><span class="label">账户状态</span><strong class="ok" id="account-state">有效</strong></div></div>
+          <div class="info-block"><div class="token-discount-summary"><span class="label">Token 折扣</span><strong id="token-discount">—</strong><span id="token-discount-detail" class="token-discount-detail">正在读取当前优惠…</span></div><div><span class="label">套餐到期</span><strong id="plan-expiry">未开通</strong></div><div><span class="label">下次重置</span><strong id="plan-reset">—</strong></div><div><span class="label">API Base URL</span><div class="copy-line"><code id="api-base">--</code><button class="small-button" type="button" data-copy="api-base">复制</button></div></div><div><span class="label">账户状态</span><strong class="ok" id="account-state">有效</strong></div></div>
         </div>
         <div id="overview-plan-progress"></div>
         <section id="night-discount-card" class="night-discount-card" data-night-discount-status="unavailable" aria-labelledby="night-discount-title" aria-describedby="night-discount-protection">
@@ -259,6 +259,6 @@
       </div>
     </form>
   </dialog>
-  <script src="/app.js?v=1.0.113" defer></script>
+  <script src="/app.js?v=1.0.114" defer></script>
 </body>
 </html>
