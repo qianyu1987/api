@@ -429,3 +429,23 @@
 
 - 用户截图明确显示视频每日已用449/500秒、89.8%，统计窗口2026-10-03 00:00:00至2026-10-04 00:00:00 UTC；据此截图时余量51秒，重置为北京时间2026-10-04 08:00。确认UTC显示与公开订阅页JS的usage字段一致，但未将截图值写成实时API结果或本站账本。
 - 更正查询结论：Agnes登录网页可以用账号会话令牌读取/api/user/subscription；模型cpk凭据对此返回401，不等于供应商无额度查询。内置浏览器只读访问订阅页跳转登录，未读取会话令牌或接入Cookie、账号密码。未修改生产配置、统计时区或用量数据，未发起媒体生成或付费请求。
+## 生产折扣设置复核：2026-10-09 CST
+
+- 按用户要求尝试提交全站 9 折（`globalDiscountBps=1000`）和北京时间每日 00:00-04:00 深夜 8 折（`nightDiscountBps=2000`）。两次管理 API 更新均被利润护栏拒绝，未绕过校验、未直接改库。
+- 生产只读复核：`global_token_discount_bps=0`、`night_token_discount_enabled=false`、`night_token_discount_bps=0`；因此当前 Token 价格仍为原价，深夜折扣未启用。折扣只作用 Token 计费模型，不改变图片/视频固定价。
+- 拒绝原因仍是启用渠道缺少有来源的标准/272K+成本，且部分旧售价在当前最坏充值倍率、返利和最低毛利要求下不满足安全线。生产健康检查和两个 API 副本均正常，本次没有账务、渠道或路由变更。
+
+## 最低毛利率调整为 15%：2026-10-11 CST
+
+- 按用户明确要求，通过 `https://www.hhtc.top/api/admin/settings/profit` 提交 `minimumMarginBps=1500`，HTTP 200。更新前为 3000，管理 API 重新读取与生产数据库均确认 `profit_min_margin_bps=1500`，审计 `profit_settings/global` 的前后值为 3000 → 1500。
+- 变更前受影响配置快照保存在 `/opt/relay-station-backups/pre-min-margin-15-20261011-nTUKgx/profit-settings-before.json`，JSON 可解析，文件权限 0600；不包含密钥或密码。
+- 全站 Token 折扣仍为 0、深夜折扣关闭、支付手续费为 0；未发布新模型售价、未修改渠道/账务或历史快照，未发起支付、媒体生成或上游计费请求。生产仍为 v1.0.112，两个 API 副本及 Gateway/PostgreSQL/Redis 均 healthy，www 健康接口 200。本次为在线配置更新，无代码部署或服务重启。
+
+## 全站 9 折、深夜 8 折启用：v1.0.113（2026-10-11 CST）
+
+- 最低毛利调整到 15% 后，两项原管理 API 仍返回 409（渠道成本缺失）。依据用户本会话明确要求“不要管成本”和再次要求启用，实现管理员指定活动折扣模式：只接受管理员、变更模式必填原因，配置在单事务内更新并保存审计；不伪造成本、不直接改库。默认模式仍保留原成本阻断，指定模式后台显示成本风险但按活动配置执行。
+- Token 预扣读取模式开关，价格快照保存覆盖决定；深夜概览与结算使用同一规则，按北京时间 `[00:00,04:00)` 切换，用户/全站/深夜折扣取最优惠的一项，不叠加。普通用户无法写入模式开关；个人折扣新增校验、媒体固定价保护和 GPT-6 Sol 价格/成本完整性校验保留，历史快照不回算。
+- 全量 28 个测试文件 / 341 项测试、TypeScript 检查/构建、前端语法、diff 检查通过。新增覆盖无成本时管理员发布、原因/开关验证、权限拒绝、预扣快照和午夜/04:00边界。设计扫描因缺 HTML 解析模块使用降级检测；真实桌面1440px及手机390px检查页面无整体横向溢出、无 JavaScript 异常。
+- 应用提交 `bea2758` 已推送 `origin/main`，版本 v1.0.113；发布归档 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.113-discounts/relay-station-v1.0.113.tar.gz`，SHA-256 `baf20089601943f7b35f974c7b0e9d7b6d509cf2c9af8b1cd7e5354cbe1111a9`。生产备份 `/opt/relay-station-backups/pre-v1.0.113-discounts-20261011/` 包含 PostgreSQL dump（415595803字节、pg_restore列表370行）、生产配置和旧源码，配置/dump权限0600、目录0700，保留 `relay-station:rollback-pre-v1.0.113`。
+- Migration 成功；两个 API 副本均为 `relay-station:v1.0.113` / healthy，Gateway/PostgreSQL/Redis healthy，维护 timer active。www 健康接口200、首页加载 `app.js?v=1.0.113`。
+- 生产一次性管理更新 HTTP 200：`minimumMarginBps=1500`、`globalDiscountBps=1000`、`nightDiscountEnabled=true`、`nightDiscountBps=2000`、`campaignDiscountOverrideEnabled=true`。重新读取管理配置、用户总览、数据库及 `profit_settings/global` 审计均一致，原因记录用户指定折扣决策。当前时段用户看到10%减免，深夜已启用且配置20%减免；在线计费函数只读验证白天/夜间售价及快照均正确。后台与手机总览截图保存在发布归档目录；未创建订单、媒体任务或真实上游计费请求。
