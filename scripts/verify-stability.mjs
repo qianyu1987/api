@@ -40,7 +40,7 @@ try {
  check(selected.filter(Boolean).length===50,'60 concurrent reservations admit exactly 500 seconds')
  let usage=await db.one('SELECT * FROM video_key_usage_daily WHERE key_id=$1',[first.k]);check(usage.reserved_seconds===500,'no oversell')
  const second=await key('second')
- const unassigned=ids.find((id,i)=>!selected[i]);const alternate=await keys.reserveForTask(unassigned,10);check(alternate.id===second.k,'insufficient quota switches key')
+ const unassigned=ids.find((id,i)=>!selected[i]);const alternate=await keys.reserveForTask(unassigned,10);check(alternate.id===second.k,'insufficient quota switches key');check((await db.one('SELECT channel_id FROM media_tasks WHERE id=$1',[unassigned])).channel_id===second.c,'selected credential channel persists for later polling')
  const accepted=ids.find((id,i)=>selected[i]);check(await keys.acceptTask(accepted,'mock-existing-id'),'accepted task')
  check(!await keys.acceptTask(accepted,'never-duplicate'),'cannot accept twice');check(!await keys.releaseTaskReservation(accepted),'cannot release accepted seconds')
  let row=await db.one('SELECT * FROM media_tasks WHERE id=$1',[accepted]);check(row.status==='processing'&&row.quota_seconds_used===10&&row.quota_seconds_reserved===0,'atomic accepted transition')

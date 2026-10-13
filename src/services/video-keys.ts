@@ -622,9 +622,9 @@ export class VideoKeyService {
       const successRate = successCount + failureCount > 0 ? successCount / (successCount + failureCount) : 0
       const latencyEwmaMs = row.latency_ewma_ms == null ? null : Number(row.latency_ewma_ms)
       const latencyP95Ms = row.latency_p95_ms == null ? null : Number(row.latency_p95_ms)
-      const assigned = await client.query<{ id: string }>(`UPDATE media_tasks SET video_provider_key_id=$2,quota_day=$3,quota_seconds_reserved=$4,selection_snapshot=$5
+      const assigned = await client.query<{ id: string }>(`UPDATE media_tasks SET channel_id=$6,video_provider_key_id=$2,quota_day=$3,quota_seconds_reserved=$4,selection_snapshot=$5
         WHERE id=$1 AND status IN ('queued','submitting') AND finished_at IS NULL AND upstream_id IS NULL AND quota_seconds_reserved=0
-        RETURNING id`, [taskId, row.id, day, amount, JSON.stringify({ accountLabel: row.account_label, priority: row.priority, latencyEwmaMs, latencyP95Ms, successRate, selectedAt: new Date().toISOString() })])
+        RETURNING id`, [taskId, row.id, day, amount, JSON.stringify({ accountLabel: row.account_label, priority: row.priority, latencyEwmaMs, latencyP95Ms, successRate, selectedAt: new Date().toISOString() }),row.channel_id])
       // Losing the task assignment must roll back the bucket reservation.
       // Never return a credential to a worker whose task was canceled,
       // accepted, or reserved by another worker during candidate selection.
