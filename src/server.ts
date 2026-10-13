@@ -42,6 +42,9 @@ import { ChatService } from './services/chat.js'
 import { ChannelCostService } from './services/channel-costs.js'
 import { LayaShadow } from './services/laya-shadow.js'
 import { VideoKeyService } from './services/video-keys.js'
+import { OperationsService, acceptedVideoSecondsSql } from './services/operations.js'
+import { ProductAnalytics } from './services/product-analytics.js'
+import { StreamDiagnostics, classifyStreamFailure } from './lib/stream-diagnostics.js'
 import { requiredWalletSell, type PricingRules } from './services/pricing.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -439,6 +442,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   const profit = new ProfitService(db, config.walletTopupMultiplierBps)
   const videoKeys = new VideoKeyService(db, config)
   const layaShadow = new LayaShadow(config.layaShadow)
+  const operations = new OperationsService(db)
+  const analytics = new ProductAnalytics(db, config.apiKeyPepper)
 
   await app.register(sensible)
   await app.register(cookie, { secret: config.cookieSecret })
@@ -502,6 +507,26 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     return user
   }
 
+  app.post('/api/me/events', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const user = await requireSession(request, reply); if (!user) return
+    const body = request.body as any
+    if (!body || !['visit','recharge_opened'].includes(body.event) || Object.keys(body).some(k => k !== 'event')) {
+      return reply.code(400).send({ error: { message: '事件格式无效' } })
+    }
+    if (user.role === 'user') await analytics.record(user.id, body.event)
+    return { ok: true }
+  })
+  app.get('/api/admin/operations', async (request, reply) => {
+    if (!await requireAdmin(request, reply)) return
+    const q = (request.query || {}) as any
+    const from = q.from ? dateFilter(q.from) : new Date(Date.now()-7*86400_000)
+    const to = q.to ? dateFilter(q.to,true) : new Date()
+    if (from >= to || to.getTime()-from.getTime()>93*86400_000) return reply.code(400).send({error:{message:'请选择不超过93天的有效日期范围'}})
+    const [report, health, product] = await Promise.all([operations.report(from,to), channels.health.list(), analytics.report()])
+    reply.header('Cache-Control','no-store')
+    return { ...report, health, product }
+  })
+
   const chat = new ChatService(db, config, billing)
   app.get('/chat', async (_request, reply) => reply.sendFile('index.html'))
   app.get('/api/me/chat/quota', async (request,reply) => { const u=await requireSession(request,reply);if(u)return chat.quota(u.id) })
@@ -528,7 +553,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const data=request.body as Buffer, type=mediaUploadType(data), token=randomBytes(32).toString('hex')
     await db.tx(async client=>{
       await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[user.id])
-      await client.query('DELETE FROM media_uploads WHERE expires_at<now()')
+      await client.query(`DELETE FROM media_uploads u WHERE expires_at<now() AND NOT EXISTS(SELECT 1 FROM media_tasks t WHERE t.status NOT IN ('completed','failed') AND t.request_payload::text LIKE '%'||u.token||'%')`)
       const size=await client.query('SELECT COALESCE(sum(octet_length(content)),0) AS bytes FROM media_uploads WHERE user_id=$1',[user.id])
       if(Number(size.rows[0].bytes)+data.length>100*1024*1024)throw Object.assign(new Error('临时素材已达 100 MB，请删除不需要的素材后重试'),{statusCode:413})
       await client.query('INSERT INTO media_uploads(token,user_id,content_type,content) VALUES($1,$2,$3,$4)',[token,user.id,type,data])
@@ -538,13 +563,13 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.get('/api/media/assets/:token',async(request,reply)=>{
     const token=String((request.params as any).token)
     if(!/^[a-f0-9]{64}$/.test(token))return reply.code(404).send()
-    const row=await db.one<any>('SELECT content_type,content FROM media_uploads WHERE token=$1 AND expires_at>now()',[token])
+    const row=await db.one<any>(`SELECT content_type,content FROM media_uploads u WHERE token=$1 AND (expires_at>now() OR EXISTS(SELECT 1 FROM media_tasks t WHERE t.status NOT IN ('completed','failed') AND t.request_payload::text LIKE '%'||u.token||'%'))`,[token])
     if(!row)return reply.code(404).send()
     return reply.header('X-Content-Type-Options','nosniff').header('Cache-Control','private, max-age=300').type(row.content_type).send(row.content)
   })
   app.delete('/api/me/media/uploads/:token',async(request,reply)=>{
     const user=await mediaUser(request,reply);if(!user)return
-    await db.query('DELETE FROM media_uploads WHERE token=$1 AND user_id=$2',[String((request.params as any).token),user.id]);return {ok:true}
+    await db.query(`DELETE FROM media_uploads u WHERE token=$1 AND user_id=$2 AND NOT EXISTS(SELECT 1 FROM media_tasks t WHERE t.status NOT IN ('completed','failed') AND t.request_payload::text LIKE '%'||u.token||'%')`,[String((request.params as any).token),user.id]);return {ok:true}
   })
   app.get('/api/me/media/catalog', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;const catalog=await media.catalog();const gift=await db.one('SELECT images_remaining,video_seconds_remaining FROM media_welcome_gifts WHERE user_id=$1',[user.id]);return {...catalog,gift}})
   app.post('/api/me/media/quote', async (request,reply)=>{const user=await mediaUser(request,reply);if(!user)return;const q=await media.quote(user.id,request.body);return {chargeMicros:q.chargeMicros,quoteToken:q.quoteToken,walletOnly:q.walletOnly,gift:q.gift}})
@@ -567,7 +592,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     if(!task?.result_url)return reply.code(404).send({error:{message:'作品不存在或尚未完成'}})
     if(task.result_url.startsWith('stored://')) {
       if(await sendStoredMedia(reply,id)) return
-      return reply.code(404).send({error:{message:'作品不存在或尚未完成'}})
+      return reply.code(410).send({error:{message:'作品文件已超过保留期限，生成记录与账单仍可查询'}})
     }
     const url=new URL(task.result_url)
     if(url.protocol!=='https:'||url.hostname!=='platform-outputs.agnes-ai.space'||url.port||url.username||url.password)return reply.code(502).send({error:{message:'作品地址暂不可读取，请联系管理员'}})
@@ -1165,11 +1190,11 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
   app.get('/api/admin/video/queue', async (request, reply) => {
     if (!await requireAdmin(request, reply)) return
     const rows = await db.query<any>(`SELECT mt.id,mt.user_id,u.username,mt.status,mt.request_payload->>'seconds' AS seconds,
-      mt.video_provider_key_id,vk.account_label,mt.queue_started_at,mt.submit_attempts,mt.last_retry_code,
+      mt.video_provider_key_id,vk.account_label,mt.queue_started_at,mt.submit_attempts,mt.last_retry_code,mt.diagnostic_stage,mt.last_query_status,mt.provider_quota_uncertain,mt.quota_seconds_reserved,
       (SELECT va.error_message FROM video_attempts va WHERE va.task_id=mt.id ORDER BY va.attempt_no DESC LIMIT 1) AS last_error
       FROM media_tasks mt JOIN users u ON u.id=mt.user_id LEFT JOIN video_provider_keys vk ON vk.id=mt.video_provider_key_id
-      WHERE mt.kind='video' AND mt.status NOT IN ('completed','failed') ORDER BY mt.queue_started_at,mt.id LIMIT 200`)
-    return { items: rows.map((row) => ({ id: row.id, userId: row.user_id, username: row.username, status: row.status, seconds: Number(row.seconds || 0), accountLabel: row.account_label || null, queuedAt: row.queue_started_at, submitAttempts: Number(row.submit_attempts || 0), lastRetryCode: row.last_retry_code || null, lastError: row.last_error || null })) }
+      WHERE mt.kind='video' AND (mt.status NOT IN ('completed','failed') OR mt.provider_quota_uncertain OR (mt.status='failed' AND mt.created_at>now()-interval '7 days')) ORDER BY mt.queue_started_at,mt.id LIMIT 200`)
+    return { items: rows.map((row) => ({ id: row.id, userId: row.user_id, username: row.username, status: row.status, seconds: Number(row.seconds || 0), accountLabel: row.account_label || null, queuedAt: row.queue_started_at, submitAttempts: Number(row.submit_attempts || 0), lastRetryCode: row.last_retry_code || null, lastError: row.last_error || null, diagnosticStage: row.diagnostic_stage || null, lastQueryStatus: row.last_query_status || null, quotaUncertain: Boolean(row.provider_quota_uncertain), heldSeconds: Number(row.quota_seconds_reserved || 0) })) }
   })
 
   app.get('/api/admin/overview', async (request, reply) => {
@@ -1198,7 +1223,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         COALESCE(sum(charge_micros) FILTER (WHERE status='completed'),0)::bigint AS revenue,
         COALESCE(sum(actual_cost_micros) FILTER (WHERE status IN ('completed','failed') AND (upstream_id IS NOT NULL OR quota_seconds_used > 0)),0)::bigint AS cost,
         COALESCE(sum(charge_micros) FILTER (WHERE status='failed'),0)::bigint AS refunds,
-        COALESCE(sum(quota_seconds_used),0)::bigint AS seconds_used,
+        COALESCE(sum(${acceptedVideoSecondsSql}),0)::bigint AS seconds_used,
         COALESCE(sum(quota_seconds_reserved),0)::bigint AS seconds_reserved
         FROM media_tasks WHERE kind='video' AND created_at >= $1 AND created_at < $2`, [from, to]),
     ])
@@ -1211,7 +1236,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         tasks: Number(video?.tasks || 0), completedTasks: Number(video?.completed_tasks || 0),
         revenue: publicMoney(video?.revenue), cost: publicMoney(video?.cost), refunds: publicMoney(video?.refunds),
         secondsUsed: Number(video?.seconds_used || 0), secondsReserved: Number(video?.seconds_reserved || 0),
-        profit: publicMoney(BigInt(String(video?.revenue || 0)) - BigInt(String(video?.cost || 0)) - BigInt(String(video?.refunds || 0))),
+        profit: publicMoney(BigInt(String(video?.revenue || 0)) - BigInt(String(video?.cost || 0))),
       },
     }, alerts: [...costAlerts, ...alerts], channels: channelsSummary }
   })
@@ -1228,11 +1253,11 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       COALESCE(sum(charge_micros) FILTER (WHERE status='completed'),0)::bigint AS revenue,
       COALESCE(sum(actual_cost_micros) FILTER (WHERE status IN ('completed','failed') AND (upstream_id IS NOT NULL OR quota_seconds_used > 0)),0)::bigint AS cost,
       COALESCE(sum(charge_micros) FILTER (WHERE status='failed'),0)::bigint AS refunds,
-      COALESCE(sum(quota_seconds_used),0)::bigint AS seconds_used
+      COALESCE(sum(${acceptedVideoSecondsSql}),0)::bigint AS seconds_used
       FROM media_tasks WHERE kind='video' AND created_at >= $1 AND created_at < $2`, [from, to])
     return { from: from.toISOString(), to: to.toISOString(), items: rows.map((r) => ({ ...r, revenue: publicMoney(r.revenue), cost: publicMoney(r.cost), profit: publicMoney(r.profit), marginBps: Number(r.revenue) ? Number((BigInt(String(r.profit)) * 10000n) / BigInt(String(r.revenue))) : 0 })), video: {
       completedTasks: Number(video?.completed_tasks || 0), revenue: publicMoney(video?.revenue), cost: publicMoney(video?.cost), refunds: publicMoney(video?.refunds), secondsUsed: Number(video?.seconds_used || 0),
-      profit: publicMoney(BigInt(String(video?.revenue || 0)) - BigInt(String(video?.cost || 0)) - BigInt(String(video?.refunds || 0))),
+      profit: publicMoney(BigInt(String(video?.revenue || 0)) - BigInt(String(video?.cost || 0))),
     } }
   })
   app.get('/api/admin/profit/subscriptions', async (request, reply) => {
@@ -1263,7 +1288,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const q = (request.query || {}) as any
     const from = q.from ? dateFilter(q.from) : new Date(Date.now() - 30 * 86400_000); const to = q.to ? dateFilter(q.to, true) : new Date()
     const rows = await db.query<any>(`SELECT started_at,requested_model,COALESCE(final_channel_name_snapshot,'') AS channel,charge_micros,cost_micros,profit_micros,status,${pendingFallbackCostSql} AS pending_cost FROM usage_logs WHERE started_at >= $1 AND started_at < $2 ORDER BY started_at DESC LIMIT 10000`, [from, to])
-    const csv = ['时间,模型,渠道,收入,成本,利润,状态,成本说明', ...rows.map((r) => [r.started_at, r.requested_model, r.channel, formatMicros(BigInt(String(r.charge_micros))), formatMicros(BigInt(String(r.cost_micros))), formatMicros(BigInt(String(r.profit_micros))), r.status, r.pending_cost ? '兜底成本待核实，利润为估算' : '按历史成本快照'].map((v) => `"${String(v ?? '').replaceAll('"', '""')}"`).join(','))].join('\n')
+    const csv = ['时间,模型,渠道,额度扣费,成本快照,估算差额,状态,成本说明', ...rows.map((r) => [r.started_at, r.requested_model, r.channel, formatMicros(BigInt(String(r.charge_micros))), formatMicros(BigInt(String(r.cost_micros))), formatMicros(BigInt(String(r.profit_micros))), r.status, r.pending_cost ? '兜底成本待核实，利润为估算' : '按历史成本快照'].map((v) => `"${String(v ?? '').replaceAll('"', '""')}"`).join(','))].join('\n')
     reply.header('Content-Type', 'text/csv; charset=utf-8').header('Content-Disposition', 'attachment; filename="relay-profit.csv"').send(`\uFEFF${csv}`)
   })
 
@@ -1839,7 +1864,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         ) catalog
         WHERE trim(model) <> ''
         ORDER BY model`)
-      const models = rows.map((row) => ({
+      const terraReady = !rows.some(row => row.model === 'gpt-5.6-terra') || await channels.nativeAvailable('gpt-5.6-terra')
+      const models = rows.filter(row => row.model !== 'gpt-5.6-terra' || terraReady).map((row) => ({
         id: String(row.model), object: 'model', created: 0, owned_by: 'relay-station',
       }))
       return { object: 'list', data: models }
@@ -1876,6 +1902,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     }
     const requestId = randomUUID()
     reply.header('X-Request-Id', requestId)
+    if (!isMetadata && model === 'gpt-5.6-terra' && !await channels.nativeAvailable(model)) {
+      return reply.code(503).header('Retry-After','60').send({error:{message:'当前模型正在维护，请选择其他可用模型或稍后重试',type:'model_maintenance',code:'model_maintenance',request_id:requestId}})
+    }
     if (!isMetadata) {
       try {
         await billing.reserve({
@@ -1936,8 +1965,12 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         ? new AgnesResponsesSse(model)
         : rewriteModel ? new PublicModelSse(model) : null
       let pending = ''
+      const streamDiagnostics = new StreamDiagnostics()
+      let firstByteAt: number | null = null
+      const streamStartedAt = Date.now()
       let usage = null as ReturnType<typeof parseSseUsage>
       const consumeUsage = (value: string) => {
+        streamDiagnostics.consume(value)
         pending += value
         const lines = pending.split(/\r?\n/)
         pending = lines.pop() || ''
@@ -1958,12 +1991,13 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
           const buffer = Buffer.from(chunk)
           consumeUsage(decoder.write(buffer))
           const outgoing = publicStream ? publicStream.write(buffer) : buffer
-          if (outgoing.length && !reply.raw.write(outgoing)) await waitForWritableDrain(reply.raw)
+          if (outgoing.length) { firstByteAt ??= Date.now(); if (!reply.raw.write(outgoing)) await waitForWritableDrain(reply.raw) }
         }
         if (clientDisconnected) throw new Error('客户端连接已关闭')
         consumeUsage(`${decoder.end()}\n`)
+        if (streamDiagnostics.failed || !streamDiagnostics.complete) throw new Error('上游流未完整结束')
         const tail = publicStream?.end()
-        if (tail && !reply.raw.write(tail)) await waitForWritableDrain(reply.raw)
+        if (tail) { firstByteAt ??= Date.now(); if (!reply.raw.write(tail)) await waitForWritableDrain(reply.raw) }
       } catch (error) {
         streamError = error
         try { (response.body as any).destroy?.(error) } catch { /* noop */ }
@@ -1973,15 +2007,19 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
       }
       if (!isMetadata) {
         const success = !streamError && !clientDisconnected && response.statusCode >= 200 && response.statusCode < 300
+        const streamFailure = streamError || clientDisconnected ? classifyStreamFailure(streamError,clientDisconnected) : null
+        const finalAttempt = relay.attempts.at(-1)
+        if (finalAttempt) finalAttempt.diagnostics = { firstByteWritten: firstByteAt !== null, firstByteMs: firstByteAt === null ? null : firstByteAt-started, completeUsage: streamDiagnostics.completeUsage, streamCompleted: streamDiagnostics.complete, streamDurationMs: Date.now()-streamStartedAt, finalChannelId: relay.channel.id }
+        await channels.complete(model,relay,success,Date.now()-started,streamFailure || undefined)
         let settled = false
         try {
           await billing.settle({
             requestId, userId: identity.user.id, model, usage, price: price as PriceSnapshot,
-            statusCode: streamError ? 499 : response.statusCode, success, latencyMs: Date.now() - started,
+            statusCode: streamFailure === 'client_disconnected' ? 499 : streamFailure === 'upstream_stream_timeout' ? 504 : streamFailure ? 502 : response.statusCode, success, latencyMs: Date.now() - started,
             estimatedUsage: !usage, upstreamModel: relay.upstreamModel, channelId: relay.channel.id, channelName: relay.channel.name,
             keyId: identity.key.id, keyName: identity.key.name, requestPath, requestMethod: request.method,
-            upstreamRequestId, errorCode: streamError ? 'stream_interrupted' : success ? null : 'upstream_http_error',
-            errorSummary: streamError ? '流式响应中断' : null, attemptCount: relay.attempts.length,
+            upstreamRequestId, errorCode: streamFailure || (success ? null : 'upstream_http_error'),
+            errorSummary: streamFailure === 'client_disconnected' ? '客户端已主动断开' : streamFailure === 'upstream_stream_timeout' ? '上游流式响应超时' : streamFailure ? '上游流式响应中断' : null, attemptCount: relay.attempts.length,
           })
           settled = true
         } catch (billingError) {
@@ -1999,6 +2037,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     let data: Buffer
     try { data = await decodeResponseBuffer(Buffer.from(await response.body.arrayBuffer()), contentEncoding) } catch (error) {
       if (!isMetadata) {
+        await channels.complete(model,relay,false,Date.now()-started,'upstream_body_error')
         await billing.settle({
           requestId, userId: identity.user.id, model, usage: null, price: price as PriceSnapshot,
           statusCode: 502, success: false, latencyMs: Date.now() - started, estimatedUsage: true,
@@ -2017,7 +2056,8 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     const parsedResponse = (() => { try { return JSON.parse(data.toString('utf8')) } catch { return null } })()
     if (!isMetadata) {
       const usage = usageFromPayload(parsedResponse)
-      const success = response.statusCode >= 200 && response.statusCode < 300
+      const success = response.statusCode >= 200 && response.statusCode < 300 && !parsedResponse?.error
+      await channels.complete(model,relay,success,Date.now()-started)
       const upstreamError = success ? null : upstreamErrorDetails(parsedResponse)
       try {
         await billing.settle({
@@ -2077,18 +2117,18 @@ async function recordAttempts(db: Database, requestId: string, attempts: any[], 
     const failed = attempt.outcome !== 'success'
     await db.query(`INSERT INTO relay_attempts(
       request_id,channel_id,channel_name_snapshot,attempt_no,attempt_number,upstream_model,status_code,outcome,
-      error_type,error_message,error_code,retryable,cost_micros,cost_estimated,latency_ms,duration_ms,is_final,finished_at)
-      VALUES($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,$13,$13,$14,now())
+      error_type,error_message,error_code,retryable,cost_micros,cost_estimated,latency_ms,duration_ms,is_final,finished_at,diagnostics)
+      VALUES($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,true,$13,$13,$14,now(),$15)
       ON CONFLICT(request_id,attempt_no) DO UPDATE SET
         channel_name_snapshot=excluded.channel_name_snapshot,upstream_model=excluded.upstream_model,
         status_code=excluded.status_code,outcome=excluded.outcome,error_type=excluded.error_type,
         error_message=excluded.error_message,retryable=excluded.retryable,cost_micros=excluded.cost_micros,
-        latency_ms=excluded.latency_ms,duration_ms=excluded.duration_ms,is_final=excluded.is_final,finished_at=excluded.finished_at`,
+        latency_ms=excluded.latency_ms,duration_ms=excluded.duration_ms,is_final=excluded.is_final,finished_at=excluded.finished_at,diagnostics=excluded.diagnostics`,
     [requestId, attempt.channelId, attempt.channelName || null, attempt.attemptNo, attempt.upstreamModel || null,
       attempt.statusCode ?? null, attempt.outcome || (attempt.statusCode && attempt.statusCode < 400 ? 'success' : 'client_error'),
       attempt.errorType || null, String(attempt.errorMessage || '').slice(0, 1000) || null,
       String(attempt.errorCode || '').slice(0, 120) || null, Boolean(attempt.retryable),
-      failed ? failedAttemptCostMicros.toString() : '0', Math.max(0, Number(attempt.latencyMs) || 0), index === attempts.length - 1])
+      failed ? failedAttemptCostMicros.toString() : '0', Math.max(0, Number(attempt.latencyMs) || 0), index === attempts.length - 1, JSON.stringify(attempt.diagnostics || {})])
   }
 }
 

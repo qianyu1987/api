@@ -15,6 +15,7 @@ function reconciliationFixture(input: {
   const timezone = input.timezone || 'Asia/Shanghai'
   const client = { query: async (sql: string, params: any[] = []) => {
     calls.push({ sql, params })
+    if (sql.includes('pg_advisory_xact_lock')) return { rows: [] }
     if (sql.startsWith('SELECT * FROM video_provider_keys')) {
       return { rows: [{ id: 'key', timezone, daily_limit_seconds: 500 }] }
     }
@@ -96,6 +97,7 @@ describe('Agnes video key pool helpers', () => {
 
   test('refuses to reset a key with reserved seconds', async () => {
     const clientQuery = async (sql: string) => {
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [] }
       if (sql.startsWith('SELECT * FROM video_provider_keys')) return { rows: [{ id: 'key', timezone: 'Asia/Shanghai', daily_limit_seconds: 500 }] }
       if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ reserved_seconds: 4, used_seconds: 0 }] }
       if (sql.includes('FROM media_tasks')) return { rows: [] }
@@ -109,6 +111,7 @@ describe('Agnes video key pool helpers', () => {
   test('refuses to erase accepted usage even after every task finishes', async () => {
     const statements: string[] = []
     const clientQuery = async (sql: string) => {
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [] }
       statements.push(sql)
       if (sql.startsWith('SELECT * FROM video_provider_keys')) return { rows: [{ id: 'key', timezone: 'Asia/Shanghai', daily_limit_seconds: 500 }] }
       if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ reserved_seconds: 0, used_seconds: 4, released_seconds: 12 }] }
@@ -124,6 +127,7 @@ describe('Agnes video key pool helpers', () => {
 
   test('refuses to reset while a task can still settle or release quota', async () => {
     const clientQuery = async (sql: string) => {
+      if (sql.includes('pg_advisory_xact_lock')) return { rows: [] }
       if (sql.startsWith('SELECT * FROM video_provider_keys')) return { rows: [{ id: 'key', timezone: 'Asia/Shanghai', daily_limit_seconds: 500 }] }
       if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ reserved_seconds: 0, used_seconds: 0, released_seconds: 0 }] }
       if (sql.includes('FROM media_tasks')) return { rows: [{ id: 'task', status: 'processing', quota_seconds_reserved: 0 }] }
@@ -223,6 +227,7 @@ describe('Agnes video key pool helpers', () => {
     }
     const db: any = {
       tx: async (fn: any) => fn({ query: async (sql: string) => {
+        if (sql.includes('pg_advisory_xact_lock')) return { rows: [] }
         if (sql.startsWith('SELECT * FROM video_provider_keys')) return { rows: [current] }
         if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ used_seconds: 300, reserved_seconds: 100 }] }
         throw new Error(`unexpected query: ${sql}`)
@@ -242,6 +247,7 @@ describe('Agnes video key pool helpers', () => {
     const statements: string[] = []
     const db: any = {
       tx: async (fn: any) => fn({ query: async (sql: string) => {
+        if (sql.includes('pg_advisory_xact_lock')) return { rows: [] }
         statements.push(sql)
         if (sql.startsWith('SELECT vk.*')) return { rows: [candidate] }
         if (sql.startsWith('SELECT * FROM video_key_usage_daily')) return { rows: [{ used_seconds: 0, reserved_seconds: 0, limit_seconds: 500 }] }

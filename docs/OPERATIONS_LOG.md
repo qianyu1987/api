@@ -456,3 +456,10 @@
 - 8 项现有折扣 UI 测试、前端语法和 diff 检查通过；镜像 TypeScript 构建通过。设计检测为缺解析模块的降级扫描；桌面961px及手机390px浏览器预览和线上检查均无页面横向溢出、无JS错误，实际字号32px。生产管理配置只读复核仍为最低毛利15%、全站9折、深夜8折已启用及管理员指定模式。
 - 应用提交 `e50608e`、标签 v1.0.114 已推送；归档 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.114-discount-display/relay-station-v1.0.114.tar.gz`，SHA-256 `0d2ce14c3c1b26b9e3f0d4dad5f35b70abd75ce714d03670564260cd9afe9bcd`。生产备份 `/opt/relay-station-backups/pre-v1.0.114-discount-display-20261011/`：PostgreSQL dump415596332字节、pg_restore列表370行，配置/备份0600，保留 `relay-station:rollback-pre-v1.0.114`。
 - 两个 API 副本为 `relay-station:v1.0.114` / healthy，Gateway/PostgreSQL/Redis healthy、维护timer active、www健康200，首页实际加载 `styles.css?v=1.0.114` 和 `app.js?v=1.0.114`。无Schema修改或迁移；未创建支付、媒体任务或上游计费请求。发布目录含桌面/手机预览和线上截图。
+
+## 稳定性迭代 v1.0.115 候选实现：2026-10-13 CST
+
+- 按获批方案实现渠道/流中断、视频闭环、存储安全与经营/转化观察。详见 OPERATIONS_STABILITY.md。
+- Node22 全量 29 文件 / 380 项、Python 4 项、隔离 PostgreSQL 29 项通过；类型检查、构建、前端语法、diff 检查通过；官方 npm audit 含开发依赖为 0 告警。两个连接池并发预留严格 500 秒；全部供应商响应均 mock，无真实支付或视频生成。
+- Chrome1440/390经营/视频后台检查通过，无整体溢出/JS异常。截图与验证归档在 /Volumes/brainos/CodexMedia/generated/relay-station-stability-20261013/。设计检测为解析器缺失的降级扫描。
+- 此记录先描述已完成代码和隔离验收；生产仍为 v1.0.114，后续发布成功需追加真实备份、镜像和健康证据。

@@ -1,4 +1,6 @@
 import { request, type Dispatcher } from 'undici'
+import { randomUUID } from 'node:crypto'
+import { ChannelHealthService, rankChannels, healthStatus } from './channel-health.js'
 import { decryptSecret } from '../lib/crypto.js'
 import { isSolFallback } from '../lib/public-model.js'
 import { isAgnesResponsesAdapter, responsesToChat } from '../lib/agnes-adapter.js'
@@ -27,6 +29,8 @@ export type RelayAttempt = {
   outcome?: 'success' | 'network_error' | 'timeout' | 'rate_limited' | 'server_error' | 'client_error' | 'canceled'
   retryable?: boolean
   errorCode?: string | null
+  observationId?: string
+  diagnostics?: Record<string, unknown>
 }
 
 export type RelayResult = {
@@ -206,6 +210,10 @@ function responseOutcome(status: number): RelayAttempt['outcome'] {
 }
 
 export function responseFailure(status: number): Pick<RelayAttempt, 'errorType' | 'errorMessage' | 'errorCode'> {
+  if (status === 413) return { errorType: 'payload_limit', errorCode: 'upstream_payload_too_large', errorMessage: '上游请求体超出限制' }
+  if (status === 429) return safeRelayError('rate_limited')
+  if (status === 408) return safeRelayError('timeout')
+  if (status >= 500) return safeRelayError('server_error')
   if (status === 401) return { errorType: 'provider_auth', errorCode: 'upstream_unauthorized', errorMessage: '上游认证失败或 Key 无效' }
   if (status === 403) return { errorType: 'provider_access', errorCode: 'upstream_forbidden', errorMessage: '上游拒绝访问，可能是权限或余额不足' }
   return { errorType: null, errorCode: null, errorMessage: null }
@@ -236,7 +244,52 @@ export function safeRelayError(kind: RelayAttempt['outcome']): Pick<RelayAttempt
 
 export class ChannelService {
   private readonly upstreamBalanceCache = new Map<string, { expiresAt: number; value: UpstreamBalance }>()
-  constructor(private readonly db: Database, private readonly config: AppConfig) {}
+  readonly health: ChannelHealthService
+  constructor(private readonly db: Database, private readonly config: AppConfig) { this.health = new ChannelHealthService(db) }
+
+  async nativeAvailable(model: string): Promise<boolean> {
+    const [candidates, stats] = await Promise.all([this.list(), this.health.list(model)])
+    return candidates.some(c => supportsRequestedModel(c, model) && !isSolFallback(model, c.modelMap[model] || c.modelMap['*'] || model)
+      && !['cooldown','unavailable'].includes(healthStatus(stats.find(h => h.channel_id === c.id))))
+  }
+
+  /** Non-billable directory checks. Failure to fetch a directory never changes
+   * prices, mappings or credentials, and is not a generation health sample. */
+  async refreshCompatibility(): Promise<void> {
+    const rows = await this.db.query<any>(`SELECT id,base_url,encrypted_api_key,model_map FROM channels c
+      WHERE c.enabled AND c.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM channel_model_health h
+        WHERE h.channel_id=c.id AND h.compatibility_checked_at>now()-interval '15 minutes') ORDER BY c.priority,c.id LIMIT 20`)
+    await Promise.allSettled(rows.map(async row => {
+      try {
+        const response = await fetch(String(row.base_url).replace(/\/$/,'')+'/models', {
+          headers: { authorization:'Bearer '+decryptSecret(row.encrypted_api_key,this.config.channelEncryptionKey) },
+          signal:AbortSignal.timeout(10000),redirect:'error',
+        })
+        if (!response.ok || !response.headers.get('content-type')?.includes('json')) return
+        const data:any = await response.json()
+        if (!Array.isArray(data?.data)) return
+        const supported = new Set(data.data.map((m:any)=>String(m?.id || '')).filter(Boolean))
+        if (!supported.size) return
+        const mappings=jsonMap(row.model_map)
+        for (const [model,upstream] of Object.entries(mappings)) {
+          if (model==='*' || /^(agnes-(?:image|video)|gpt-image-)/.test(model)) continue
+          await this.db.query(`INSERT INTO channel_model_health(channel_id,model,compatible,compatibility_checked_at)
+            SELECT id,$2,$3,now() FROM channels WHERE id=$1 AND encrypted_api_key=$4 AND model_map=$5::jsonb AND enabled AND deleted_at IS NULL
+            ON CONFLICT(channel_id,model) DO UPDATE SET compatible=EXCLUDED.compatible,compatibility_checked_at=now()`,
+          [row.id,model,supported.has(upstream),row.encrypted_api_key,JSON.stringify(mappings)])
+        }
+      } catch { /* Directory outage does not prove model incompatibility. */ }
+    }))
+  }
+
+  async complete(model: string, relay: RelayResult, success: boolean, durationMs: number, failure?: string): Promise<void> {
+    const attempt = relay.attempts.at(-1)
+    if (!attempt || attempt.statusCode === null || attempt.statusCode < 200 || attempt.statusCode >= 300) return
+    attempt.outcome = success ? 'success' : failure === 'client_disconnected' ? 'canceled' : failure === 'upstream_stream_timeout' ? 'timeout' : 'server_error'
+    if (!success) { attempt.errorCode = failure || 'upstream_body_error'; attempt.errorType = failure || 'upstream_body_error'; attempt.errorMessage = failure === 'client_disconnected' ? '客户端已断开' : '上游响应未完整结束' }
+    await this.health.observe({ id: attempt.observationId, channelId: relay.channel.id, model, outcome: attempt.outcome, latencyMs: attempt.latencyMs || 0, durationMs, statusCode: attempt.statusCode }).catch(() => undefined)
+    if (success) await this.markSuccess(relay.channel.id).catch(() => undefined)
+  }
 
   async list(): Promise<Channel[]> {
     const rows = await this.db.query<any>(`SELECT id, name, base_url, encrypted_api_key, priority, model_map, timeout_ms FROM channels WHERE deleted_at IS NULL AND enabled = true AND (circuit_open_until IS NULL OR circuit_open_until < now()) ORDER BY priority ASC, created_at ASC`)
@@ -346,12 +399,14 @@ export class ChannelService {
   async relay(path: string, method: string, headers: Record<string, string>, body: Buffer | undefined, requestedModel: string): Promise<RelayResult> {
     const fallback = (channel: Channel) => isSolFallback(requestedModel, channel.modelMap[requestedModel] || channel.modelMap['*'] || requestedModel)
     const simpleText = isSimpleTextRequest(body, path, method)
-    const channels = (await this.list()).filter((channel) => {
+    const [listed, health] = await Promise.all([this.list(), this.health.list(requestedModel)])
+    const compatible = listed.filter((channel) => {
       if (!supportsRequestedModel(channel, requestedModel)) return false
       // Agnes fallback is intentionally restricted to stateless text. Native
       // channels receive the original protocol payload without lossy rewrites.
       return !fallback(channel) || simpleText
-    }).sort((a, b) => Number(fallback(a)) - Number(fallback(b)))
+    })
+    const channels = rankChannels(compatible.filter(c=>!fallback(c)),health).concat(rankChannels(compatible.filter(fallback),health))
     if (!channels.length) {
       const error = new Error(simpleText ? (requestedModel ? '当前模型没有已启用上游渠道，请联系管理员配置模型映射' : '暂无可用上游渠道，请联系管理员') : '当前请求包含工具、图片、文件或多轮状态，暂无兼容的上游渠道')
       ;(error as any).code = simpleText ? 'upstream_unavailable' : 'no_compatible_upstream'
@@ -396,7 +451,7 @@ export class ChannelService {
         const invalidResponse = isInvalidApiResponse(response.statusCode, response.headers as Record<string, unknown>)
         const retryable = invalidResponse || shouldFailover(response.statusCode)
         const failure = responseFailure(response.statusCode)
-        const attempt: RelayAttempt = { channelId: channel.id, channelName: channel.name, attemptNo: index + 1, statusCode: response.statusCode, ...failure, latencyMs }
+        const attempt: RelayAttempt = { observationId: randomUUID(), channelId: channel.id, channelName: channel.name, attemptNo: index + 1, statusCode: response.statusCode, ...failure, latencyMs }
         attempt.upstreamModel = upstreamModel
         attempt.retryable = retryable
         attempt.outcome = invalidResponse ? 'server_error' : responseOutcome(response.statusCode)
@@ -410,12 +465,12 @@ export class ChannelService {
           // Metrics/circuit bookkeeping must never turn an already successful
           // upstream response into a retry. The response path remains usable
           // during a transient PostgreSQL outage.
-          await this.markSuccess(channel.id).catch(() => undefined)
+          // Success is recorded only after the body has completed.
           return { response, channel, attempts, upstreamModel, ...(agnesResponses ? { responseAdapter: 'agnes_responses' as const } : {}) }
         }
         // A 413 can depend on the size limit of this provider's gateway. Try
         // another channel, but don't open a circuit for a request-specific limit.
-        if (response.statusCode !== 413) await this.markFailure(channel.id).catch(() => undefined)
+        await this.health.observe({ id: attempt.observationId, channelId: channel.id, model: requestedModel, outcome: attempt.outcome || 'server_error', latencyMs, statusCode: response.statusCode }).catch(() => undefined)
         // A retryable response can only be returned when it is the final
         // channel attempt. Earlier bodies must be drained before failover; do
         // not retain one of those drained responses and accidentally return it
@@ -426,8 +481,9 @@ export class ChannelService {
         const latencyMs = Date.now() - started
         const kind = errorType(error)
         const safeError = safeRelayError(kind as RelayAttempt['outcome'])
-        attempts.push({ channelId: channel.id, channelName: channel.name, attemptNo: index + 1, statusCode: null, latencyMs, outcome: kind as RelayAttempt['outcome'], retryable: true, upstreamModel, ...safeError })
-        await this.markFailure(channel.id).catch(() => undefined)
+        const observationId = randomUUID()
+        attempts.push({ observationId, channelId: channel.id, channelName: channel.name, attemptNo: index + 1, statusCode: null, latencyMs, outcome: kind as RelayAttempt['outcome'], retryable: true, upstreamModel, ...safeError })
+        await this.health.observe({ id: observationId, channelId: channel.id, model: requestedModel, outcome: kind, latencyMs }).catch(() => undefined)
       }
     }
     const error = new Error('所有上游渠道均不可用')

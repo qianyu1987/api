@@ -6,6 +6,9 @@ import { MailService } from './services/mail.js'
 import { AffiliateService } from './services/affiliate.js'
 import { OrderService } from './services/orders.js'
 import { PaymentGateway } from './payment/gateway.js'
+import { maintainStorage, refreshOperationsAlerts } from './services/maintenance.js'
+import { ChannelService } from './services/channels.js'
+import { ProductAnalytics } from './services/product-analytics.js'
 
 /** Small, repeatable maintenance worker. Billing state lives in PostgreSQL; Redis is not used as a source of truth. */
 export async function runWorker(): Promise<void> {
@@ -18,6 +21,7 @@ export async function runWorker(): Promise<void> {
     await db.query(`UPDATE orders
       SET status = 'expired', closed_at = COALESCE(closed_at, now()), updated_at = now()
       WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= now()`)
+    await new ProductAnalytics(db,config.apiKeyPepper).sync().catch(() => console.warn('product analytics sync failed'))
     // User-facing cursors and filters use request start time. Retention uses
     // the same immutable event clock so a long-lived stream cannot extend an
     // otherwise expired audit record merely by settling late.
@@ -36,6 +40,9 @@ export async function runWorker(): Promise<void> {
     await new ChatService(db, config, billing).recover()
     await billing.releaseExpiredReservations()
     await mail.deliverQueued(20)
+    await new ChannelService(db,config).refreshCompatibility().catch(() => console.warn('channel compatibility refresh failed'))
+    await maintainStorage(db).catch(() => console.warn('storage maintenance failed'))
+    await refreshOperationsAlerts(db).catch(() => console.warn('operations alerts refresh failed'))
   } finally {
     await db.close()
   }

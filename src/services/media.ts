@@ -129,6 +129,15 @@ export function welcomeGift(input: {model:string;size:string;units:number}, bala
 }
 export class MediaService {
   constructor(private db: Database, private config: AppConfig, private videoKeys?: VideoKeyService) {}
+  private async event(task: any, stage: string, statusCode: number | null = null, durationMs: number | null = null) {
+    if (task.kind !== 'video') return
+    await this.db.query(`WITH recorded AS (
+      INSERT INTO media_task_events(task_id,key_id,stage,status_code,duration_ms) VALUES($1,$2,$3,$4,$5)
+      RETURNING task_id)
+      UPDATE media_tasks SET diagnostic_stage=$3,last_query_status=CASE WHEN $6 THEN $4 ELSE last_query_status END,
+        last_query_at=CASE WHEN $6 THEN now() ELSE last_query_at END WHERE id=$1 AND status NOT IN ('completed','failed')`,
+      [task.id,task.video_provider_key_id || null,stage,statusCode,durationMs,['polling','query_error','query_not_found'].includes(stage)]).catch(() => undefined)
+  }
   async catalog() {
     const rows = await this.db.query<any>(`SELECT p.model,p.size,p.enabled,p.normal_cost_micros,p.actual_cost_micros,p.fixed_unit_price_micros,p.channel_id,c.enabled AS channel_enabled,c.deleted_at,
       EXISTS (SELECT 1 FROM video_provider_keys vk JOIN channels vc ON vc.id=vk.channel_id AND vc.enabled AND vc.deleted_at IS NULL WHERE p.model='agnes-video-2.5-flash' AND vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed') AS video_pool_enabled
@@ -269,6 +278,7 @@ export class MediaService {
     } catch { return mediaError('提示词扩展失败，原文已保留，请稍后重试',502) }
   }
   private async finishInTransaction(client: any, id:string, success:boolean, url:string|null, message:string|null, content?:Buffer, contentType?:string, retryCode?:string) {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
     const task=await one<any>(client,'SELECT * FROM media_tasks WHERE id=$1 FOR UPDATE',[id]);if(!task||['completed','failed'].includes(task.status))return
     // Timeout refunds re-check the state after taking the row lock. A worker
     // may have claimed the task between the expiry scan and this transaction.
@@ -293,12 +303,19 @@ export class MediaService {
       const column=gift.kind==='image'?'images_remaining':'video_seconds_remaining'
       await client.query(`UPDATE media_welcome_gifts SET ${column}=${column}+$2 WHERE user_id=$1`,[task.user_id,gift.units])
     }
-    if (!success && task.kind === 'video' && task.video_provider_key_id && task.quota_day && Number(task.quota_seconds_reserved || 0) > 0) {
+    const holdUncertainQuota = !success && task.kind === 'video' && task.status === 'unknown' && !task.upstream_id && Number(task.quota_seconds_reserved || 0) > 0
+    if (holdUncertainQuota) await client.query('UPDATE media_tasks SET provider_quota_uncertain=true WHERE id=$1',[id])
+    if (!success && !holdUncertainQuota && task.kind === 'video' && task.video_provider_key_id && task.quota_day && Number(task.quota_seconds_reserved || 0) > 0) {
       const seconds = Number(task.quota_seconds_reserved)
       await client.query(`UPDATE video_key_usage_daily
         SET reserved_seconds=GREATEST(0,reserved_seconds-$3), released_seconds=released_seconds+$3, updated_at=now()
         WHERE key_id=$1 AND usage_day=$2`, [task.video_provider_key_id, task.quota_day, seconds])
       await client.query('UPDATE media_tasks SET quota_seconds_reserved=0 WHERE id=$1', [id])
+    }
+    if (task.kind === 'video') {
+      const stage = holdUncertainQuota ? 'quota_held' : retryCode === 'confirmation_timeout' ? 'confirmation_timeout' : success ? 'completed' : 'failed'
+      await client.query('INSERT INTO media_task_events(task_id,key_id,stage) VALUES($1,$2,$3)',[id,task.video_provider_key_id || null,stage])
+      await client.query('UPDATE media_tasks SET diagnostic_stage=$2 WHERE id=$1',[id,stage])
     }
     if(success&&content&&contentType)await client.query('INSERT INTO media_task_assets(task_id,content_type,content) VALUES($1,$2,$3) ON CONFLICT(task_id) DO NOTHING',[id,contentType,content])
     await client.query('UPDATE media_tasks SET status=$2,result_url=$3,error_message=$4,last_retry_code=COALESCE($5,last_retry_code),progress=100,finished_at=now(),lease_until=NULL,uncertain_since=NULL WHERE id=$1 AND status NOT IN (\'completed\',\'failed\')',[id,success?'completed':'failed',success&&content?'stored://media/'+id:url,message,retryCode || null])
@@ -310,6 +327,7 @@ export class MediaService {
 
   async cancel(userId:string,id:string) {
     return this.db.tx(async client=>{
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
       const task=await one<any>(client,'SELECT * FROM media_tasks WHERE id=$1 AND user_id=$2 FOR UPDATE',[id,userId])
       if(!task) mediaError('任务不存在',404)
       if(['completed','failed'].includes(task.status)) return this.publicTask(task)
@@ -398,9 +416,10 @@ export class MediaService {
   }
 
   private async processClaimedTask(task: any) {
-    const submitting=Boolean(task._wasQueued)
+    const submitting=Boolean(task._wasQueued) && !task.upstream_id
     let upstreamStatus: number | null = null
     let upstreamStartedAt = 0
+    let queryRecorded = false
     try {
       if(task.status==='unknown'&&!task.upstream_id){
         if(task.kind==='image'&&typeof task.result_url==='string'&&task.result_url.startsWith('https://')){
@@ -448,15 +467,21 @@ export class MediaService {
       const expectedProvider = task.model === 'gpt-image-2' ? 'https://cdn.yyapi.cloud' : task.model === 'gpt-image-2.5' ? 'https://ripp.best' : task.model === 'agnes-video-2.5-flash' ? 'https://apihub.agnes-ai.com' : null
       if (expectedProvider && origin.origin !== expectedProvider) { await this.finish(task.id,false,null,'媒体渠道与模型不匹配，冻结额度已释放',undefined,undefined,'channel_mismatch'); return }
       const url=submitting?origin.origin+'/v1/'+(task.kind==='image'?'images/generations':'videos'):origin.origin+'/agnesapi?video_id='+encodeURIComponent(task.upstream_id)+'&model_name='+encodeURIComponent(task.model)
+      await this.event(task,submitting?'submitting':'polling')
       upstreamStartedAt = Date.now()
       const response=await fetch(url,{method:submitting?'POST':'GET',headers:{authorization:'Bearer '+decryptSecret(channel.encrypted_api_key,this.config.channelEncryptionKey),'content-type':'application/json'},...(submitting?{body:JSON.stringify(task.request_payload)}:{}),signal:AbortSignal.timeout(submitting?360000:30000),redirect:'error'})
       upstreamStatus = response.status
+      if (!submitting && task.kind === 'video') {
+        if (!response.ok) { await this.event(task,response.status===404?'query_not_found':'query_error',response.status,Date.now()-upstreamStartedAt); queryRecorded=true }
+        if (response.status===404) throw new Error('video task not found')
+      }
       const responseText=await response.text()
       let data:any=null;try{data=JSON.parse(responseText)}catch{ /* handled below without persisting body */ }
       const queueRejected=task.kind==='video'&&submitting&&!hasUpstreamTaskId(data)&&(response.status===429||agnesVideoQueueFull(response.status,data))
-      if(queueRejected){if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined); if (this.videoKeys) await this.videoKeys.recordAttempt({ taskId: String(task.id), keyId: task.video_provider_key_id, attemptNo: Number(task.submit_attempts || 1), statusCode: response.status, durationMs: Date.now()-upstreamStartedAt, outcome: response.status === 429 ? 'rate_limited' : 'queue_full' }).catch(() => undefined); await this.requeueVideo(task,channel,response.status===429?'rate_limited':'queue_full');return}
+      if(queueRejected){await this.event(task,response.status===429?'rate_limited':'queue_full',response.status,Date.now()-upstreamStartedAt);if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined); if (this.videoKeys) await this.videoKeys.recordAttempt({ taskId: String(task.id), keyId: task.video_provider_key_id, attemptNo: Number(task.submit_attempts || 1), statusCode: response.status, durationMs: Date.now()-upstreamStartedAt, outcome: response.status === 429 ? 'rate_limited' : 'queue_full' }).catch(() => undefined); await this.requeueVideo(task,channel,response.status===429?'rate_limited':'queue_full');return}
       if(!response.ok){if(submitting&&task.kind==='video'&&response.status===503)throw new Error('uncertain response');if(submitting&&[400,401,403,404,422].includes(response.status)){if (this.videoKeys && task.video_provider_key_id) await this.videoKeys.recordAttempt({taskId:String(task.id),keyId:task.video_provider_key_id,attemptNo:Number(task.submit_attempts||1),statusCode:response.status,durationMs:Date.now()-upstreamStartedAt,outcome:'rejected',errorCode:'upstream_rejected',errorMessage:`HTTP ${response.status}`}).catch(() => undefined);if (this.videoKeys) await this.videoKeys.releaseTaskReservation(String(task.id)).catch(() => undefined);await this.finish(task.id,false,null,response.status===400||response.status===422?'提示词未通过上游审核，额度已全部退回':'暂时无法安排生成，额度已全部退回',undefined,undefined,'upstream_rejected');return}throw new Error('uncertain response')}
       if(data===null)throw new Error('invalid upstream response')
+      if (!submitting && task.kind==='video') { await this.event(task,'polling',response.status,Date.now()-upstreamStartedAt); queryRecorded=true }
       if(task.kind==='image'){
         const result=mediaResultUrl(data)
         if(result){
@@ -480,6 +505,7 @@ export class MediaService {
         if (this.videoKeys) {
           const acceptedByPool = await this.videoKeys.acceptTask(String(task.id), videoId)
           if (!acceptedByPool) return
+          await this.event(task,'accepted',response.status,Date.now()-upstreamStartedAt)
           await this.videoKeys.recordAttempt({ taskId: String(task.id), keyId: task.video_provider_key_id, attemptNo: Number(task.submit_attempts || 1), statusCode: response.status, durationMs: Date.now()-upstreamStartedAt, outcome: 'accepted', upstreamTaskId: videoId, accepted: true }).catch(() => undefined)
         }
         const accepted=await this.db.query<any>("UPDATE media_tasks SET upstream_id=COALESCE(upstream_id,$2),status='processing',accepted_at=COALESCE(accepted_at,now()),uncertain_since=NULL,error_message=NULL,lease_until=NULL,next_attempt_at=now(),next_poll_at=now()+interval '5 seconds' WHERE id=$1 AND status='submitting' AND finished_at IS NULL AND (lease_until IS NULL OR lease_until>now()) RETURNING id",[task.id,videoId])
@@ -492,7 +518,9 @@ export class MediaService {
       await this.db.query("UPDATE media_tasks SET status='processing',progress=$2,uncertain_since=NULL,error_message=NULL,lease_until=NULL,next_poll_at=now()+interval '5 seconds' WHERE id=$1 AND status IN ('processing','unknown') AND finished_at IS NULL AND (lease_until IS NULL OR lease_until>now())",[task.id,progress])
     }catch(error){
       const reason=error instanceof Error ? error.message : ''
-      const detail=error instanceof Error && ['TimeoutError','AbortError'].includes(error.name)?'等待上游结果超时':reason==='missing video id'?'上游接单结果暂未确认':reason==='invalid upstream response'?'上游响应格式暂未确认':reason==='uncertain response'?'上游服务暂时繁忙':'上游连接暂时异常'
+      if(task.kind==='video' && !submitting && !queryRecorded) await this.event(task,'query_error',upstreamStatus,upstreamStartedAt?Date.now()-upstreamStartedAt:null)
+      if(task.kind==='video' && submitting) await this.event(task,'uncertain',upstreamStatus,upstreamStartedAt?Date.now()-upstreamStartedAt:null)
+      const detail=reason==='video task not found'?'上游已接单但任务暂不可查询':error instanceof Error && ['TimeoutError','AbortError'].includes(error.name)?'等待上游结果超时':reason==='missing video id'?'上游接单结果暂未确认':reason==='invalid upstream response'?'上游响应格式暂未确认':reason==='uncertain response'?'上游服务暂时繁忙':'上游连接暂时异常'
       const windowMessage=task.kind==='video'?'，系统会继续确认；超过等待时间才会自动退回额度':'，正在自动确认结果；超过 1 分钟将自动退回额度'
       if (task.kind === 'video' && submitting && this.videoKeys && task.video_provider_key_id) {
         const timeout = error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)

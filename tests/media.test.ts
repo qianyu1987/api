@@ -228,8 +228,8 @@ describe('media cancellation',()=>{
   expect(svc.publicTask(task).canCancel).toBe(false)
   await expect(svc.cancel('user','task')).rejects.toMatchObject({statusCode:409})
   // Refusal happens under the task lock, before any wallet or quota mutation.
-  expect(query.mock.calls).toHaveLength(1)
-  expect(query.mock.calls[0]?.[0]).toContain('WHERE id=$1 AND user_id=$2 FOR UPDATE')
+  expect(query.mock.calls.filter(([sql])=>!sql.includes('pg_advisory_xact_lock'))).toHaveLength(1)
+  expect(query.mock.calls.find(([sql])=>sql.includes('FROM media_tasks'))?.[0]).toContain('WHERE id=$1 AND user_id=$2 FOR UPDATE')
   expect(task.quota_seconds_reserved).toBe(4)
   expect(task.status).toBe(status)
  })
@@ -239,7 +239,7 @@ describe('media cancellation',()=>{
   const svc=new MediaService({tx:async(fn:any)=>fn({query})} as any,{} as any)
   expect(await svc.cancel('user','task')).toMatchObject({id:'task',status,canCancel:false})
   expect(await svc.cancel('user','task')).toMatchObject({id:'task',status,canCancel:false})
-  expect(query.mock.calls).toHaveLength(2)
+  expect(query.mock.calls.filter(([sql])=>!sql.includes('pg_advisory_xact_lock'))).toHaveLength(2)
   expect(query.mock.calls.every(([sql])=>sql.startsWith('SELECT'))).toBe(true)
  })
  test('queued video cancellation releases wallet and reserved seconds exactly once',async()=>{
@@ -271,7 +271,7 @@ describe('media cancellation',()=>{
   const svc=new MediaService({tx:async(fn:any)=>fn({query})} as any,{} as any)
   expect(svc.publicTask(task).canCancel).toBe(false)
   await expect(svc.cancel('user','task')).rejects.toMatchObject({statusCode:409})
-  expect(query.mock.calls).toHaveLength(1)
+  expect(query.mock.calls.filter(([sql])=>!sql.includes('pg_advisory_xact_lock'))).toHaveLength(1)
  })
 })
 

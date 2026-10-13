@@ -24,6 +24,7 @@ function routing() {
     { id: 'fallback', name: '低价plus', priority: 1000, model_map: { [model]: upstream, 'gpt-6-astra': 'gpt-6-astra' } },
   ].map(row => ({ ...row, base_url: `http://${row.id}.test/v1`, encrypted_api_key: encryptSecret('test-provider-key', key), timeout_ms: 1000, enabled: true, circuit_open_until: null as Date | null }))
   const db = { query: vi.fn(async (sql: string, params: any[] = []) => {
+    if (sql.includes('FROM channel_model_health')) return []
     if (sql.startsWith('SELECT')) {
       expect(sql).toContain('circuit_open_until < now()')
       expect(sql).toContain('ORDER BY priority ASC')
@@ -181,6 +182,8 @@ describe('relay HTTP integration and billing boundary', () => {
     vi.spyOn(services.billing, 'settle').mockResolvedValue({} as any)
     vi.spyOn(services.billing, 'release').mockResolvedValue(undefined)
     vi.spyOn(services.db, 'query').mockResolvedValue([])
+    vi.spyOn(services.channels, 'nativeAvailable').mockResolvedValue(true)
+    vi.spyOn(services.channels.health, 'observe').mockResolvedValue(undefined)
     await services.app.ready()
   })
   afterEach(async () => { if (services) { await services.app.close(); await services.db.close() } })

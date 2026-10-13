@@ -1413,3 +1413,46 @@ WHERE requested_model = 'gpt-5.6-luna' AND enabled;
 UPDATE model_prices
 SET active = false, updated_at = now()
 WHERE model_pattern = 'gpt-5.6-luna' AND active;
+
+-- Completed-response health, isolated by public model. No request content.
+CREATE TABLE IF NOT EXISTS channel_model_health (
+ channel_id UUID NOT NULL REFERENCES channels(id), model TEXT NOT NULL,
+ consecutive_failures INTEGER NOT NULL DEFAULT 0,
+ circuit_open_until TIMESTAMPTZ, last_success_at TIMESTAMPTZ, last_failure_at TIMESTAMPTZ,
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY(channel_id,model)
+);
+CREATE TABLE IF NOT EXISTS channel_health_observations (
+ id UUID PRIMARY KEY, channel_id UUID NOT NULL REFERENCES channels(id), model TEXT NOT NULL,
+ outcome TEXT NOT NULL, latency_ms INTEGER NOT NULL, duration_ms INTEGER NOT NULL,
+ status_code INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS channel_health_recent_idx ON channel_health_observations(channel_id,model,created_at DESC);
+ALTER TABLE relay_attempts ADD COLUMN IF NOT EXISTS diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb;
+CREATE TABLE IF NOT EXISTS media_task_events (
+ id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ task_id UUID NOT NULL REFERENCES media_tasks(id), key_id UUID REFERENCES video_provider_keys(id),
+ stage TEXT NOT NULL CHECK(stage IN ('submitting','accepted','polling','completed','failed','queue_full','rate_limited','query_not_found','query_error','uncertain','confirmation_timeout','quota_held')),
+ status_code INTEGER, duration_ms INTEGER, created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS media_task_events_task_idx ON media_task_events(task_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS media_task_events_key_idx ON media_task_events(key_id,created_at DESC);
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS diagnostic_stage TEXT;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS last_query_status INTEGER;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS last_query_at TIMESTAMPTZ;
+ALTER TABLE media_tasks ADD COLUMN IF NOT EXISTS provider_quota_uncertain BOOLEAN NOT NULL DEFAULT false;
+
+-- Pseudonymous first-party product events; no IP, user agent, URL or payload.
+CREATE TABLE IF NOT EXISTS product_events (
+ id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ subject_hash TEXT NOT NULL, event TEXT NOT NULL CHECK(event IN ('registration_completed','first_api_success','first_media_task','recharge_opened','payment_succeeded','visit')),
+ event_day DATE NOT NULL DEFAULT (now() AT TIME ZONE 'Asia/Shanghai')::date,
+ dedupe_key TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ UNIQUE(subject_hash,event,dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS product_events_day_idx ON product_events(event_day,event);
+CREATE TABLE IF NOT EXISTS operations_snapshots (
+ id TEXT PRIMARY KEY DEFAULT 'host', metrics JSONB NOT NULL, checked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE channel_model_health ADD COLUMN IF NOT EXISTS compatible BOOLEAN;
+ALTER TABLE channel_model_health ADD COLUMN IF NOT EXISTS compatibility_checked_at TIMESTAMPTZ;

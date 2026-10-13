@@ -9,7 +9,7 @@ x-app-environment: &app-environment
   REDIS_URL: redis://redis:6379
 
 x-app-service: &app-service
-  image: relay-station:${RELAY_IMAGE_TAG:-v1.0.114}
+  image: relay-station:${RELAY_IMAGE_TAG:-v1.0.115}
   build:
     context: .
     target: runtime
@@ -155,6 +155,7 @@ services:
         condition: service_healthy
     restart: "no"
     networks:
+      - edge
       - backend
 
 volumes:

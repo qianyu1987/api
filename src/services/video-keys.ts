@@ -307,7 +307,7 @@ export class VideoKeyService {
     return this.db.query<VideoKeyRow>(`SELECT vk.*, c.base_url, c.encrypted_api_key, c.enabled AS channel_enabled, c.deleted_at AS channel_deleted_at,
       u.usage_day, u.reserved_seconds, u.used_seconds, u.released_seconds, u.limit_seconds,
       (SELECT count(*)::int FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id
-        AND mt.status IN ('queued','submitting','processing','unknown')) AS active_count,
+        AND (mt.status IN ('queued','submitting','processing','unknown') OR mt.provider_quota_uncertain)) AS active_count,
       (SELECT count(*)::int FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id
         AND mt.status='queued') AS queued_count
       FROM video_provider_keys vk
@@ -321,8 +321,9 @@ export class VideoKeyService {
     return (await this.adminRows()).map((row) => publicRow(row, this.config))
   }
 
-  async overview(): Promise<VideoQuotaMetadata & { keys: VideoKeyAdmin[]; availableKeys: number; remainingSeconds: number; queueCount: number; fastestKey: VideoKeyAdmin | null; pricing: Record<string, unknown> }> {
+  async overview(): Promise<VideoQuotaMetadata & { keys: VideoKeyAdmin[]; availableKeys: number; remainingSeconds: number; queueCount: number; fastestKey: VideoKeyAdmin | null; pricing: Record<string, unknown>; diagnostics: any[] }> {
     const keys = await this.list()
+    const diagnostics = await this.diagnostics()
     const available = keys.filter((key) => key.status === 'ready' || key.status === 'near_limit')
     const queueRows = await this.db.query<{ count: string }>(`SELECT count(*)::text AS count FROM media_tasks WHERE kind='video' AND status IN ('queued','submitting')`)
     const fastest = [...available].sort((a, b) => (a.latencyP95Ms ?? Number.POSITIVE_INFINITY) - (b.latencyP95Ms ?? Number.POSITIVE_INFINITY) || a.priority - b.priority || a.id.localeCompare(b.id))[0] || null
@@ -344,7 +345,7 @@ export class VideoKeyService {
     const marginOk = actual > 0n && unit >= minimumUnit
     return {
       ...quotaMetadata(),
-      keys, availableKeys: available.length,
+      keys, diagnostics, availableKeys: available.length,
       remainingSeconds: available.reduce((sum, key) => sum + key.remainingSeconds, 0),
       queueCount: Number(queueRows[0]?.count || 0), fastestKey: fastest,
       pricing: {
@@ -358,6 +359,20 @@ export class VideoKeyService {
         marginPercent: unit > 0 ? ((unit - Number(actual)) / unit) * 100 : 0,
       },
     }
+  }
+
+  async diagnostics(): Promise<any[]> {
+    return this.db.query(`SELECT vk.id AS key_id,vk.account_label,
+      (SELECT count(*)::int FROM video_attempts a WHERE a.key_id=vk.id AND a.created_at>now()-interval '30 days' AND a.outcome<>'submitted') AS submissions,
+      (SELECT count(*)::int FROM video_attempts a WHERE a.key_id=vk.id AND a.created_at>now()-interval '30 days' AND a.accepted) AS accepted,
+      (SELECT count(*)::int FROM media_task_events e WHERE e.key_id=vk.id AND e.created_at>now()-interval '30 days' AND e.stage IN ('polling','query_error','query_not_found') AND (e.status_code IS NOT NULL OR e.stage='query_error')) AS queries,
+      (SELECT count(*)::int FROM media_task_events e WHERE e.key_id=vk.id AND e.created_at>now()-interval '30 days' AND e.stage='polling' AND e.status_code BETWEEN 200 AND 299) AS successful_queries,
+      (SELECT count(*)::int FROM media_task_events e WHERE e.key_id=vk.id AND e.created_at>now()-interval '30 days' AND e.stage='query_not_found') AS not_found,
+      (SELECT count(*)::int FROM media_tasks m WHERE m.video_provider_key_id=vk.id AND m.created_at>now()-interval '30 days' AND m.last_retry_code='confirmation_timeout') AS confirmation_timeouts,
+      (SELECT count(*)::int FROM media_tasks m WHERE m.video_provider_key_id=vk.id AND m.created_at>now()-interval '30 days') AS tasks,
+      (SELECT count(*)::int FROM media_tasks m WHERE m.video_provider_key_id=vk.id AND m.created_at>now()-interval '30 days' AND m.status='completed') AS completed,
+      (SELECT COALESCE(sum(quota_seconds_reserved),0)::int FROM media_tasks m WHERE m.video_provider_key_id=vk.id AND m.provider_quota_uncertain) AS held_seconds,
+      vk.latency_p50_ms,vk.latency_p95_ms FROM video_provider_keys vk ORDER BY vk.priority,vk.id`)
   }
 
   async add(input: VideoKeyInput, actorId?: string): Promise<VideoKeyAdmin> {
@@ -374,6 +389,7 @@ export class VideoKeyService {
     const encrypted = input.apiKey?.trim() ? encryptSecret(input.apiKey.trim(), this.config.channelEncryptionKey) : null
     if (!input.channelId && !encrypted) throw new Error('新增 Agnes Key 必须填写 Key')
     const row = await this.db.tx(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
       let channel: any
       if (input.channelId) {
         channel = await one<any>(client, 'SELECT id,base_url,encrypted_api_key FROM channels WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [input.channelId])
@@ -401,6 +417,7 @@ export class VideoKeyService {
       throw new Error('请使用“轮换”操作修改 Agnes Key')
     }
     const row = await this.db.tx(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
       const current = await one<any>(client, 'SELECT * FROM video_provider_keys WHERE id=$1 FOR UPDATE', [id])
       if (!current) throw Object.assign(new Error('视频 Key 不存在'), { statusCode: 404 })
       const accountLabel = String(input.accountLabel ?? current.account_label).trim()
@@ -439,8 +456,11 @@ export class VideoKeyService {
     if (!String(apiKey || '').trim()) throw new Error('请填写新的 Agnes Key')
     const encrypted = encryptSecret(String(apiKey).trim(), this.config.channelEncryptionKey)
     await this.db.tx(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
       const current = await one<any>(client, 'SELECT vk.id,c.id AS channel_id FROM video_provider_keys vk JOIN channels c ON c.id=vk.channel_id WHERE vk.id=$1 FOR UPDATE', [id])
       if (!current) throw Object.assign(new Error('视频 Key 不存在'), { statusCode: 404 })
+      const active = await one<any>(client,`SELECT count(*)::int AS count FROM media_tasks WHERE video_provider_key_id=$1 AND (status IN ('queued','submitting','processing','unknown') OR provider_quota_uncertain)`,[id])
+      if (Number(active?.count || 0)>0) throw Object.assign(new Error('仍有生成或结果未确认的任务，请保留原 Key，待确认后再轮换'),{statusCode:409})
       await client.query('UPDATE channels SET encrypted_api_key=$2,enabled=false,updated_at=now() WHERE id=$1', [current.channel_id, encrypted])
       await client.query(`UPDATE video_provider_keys SET enabled=false,video_generation_enabled=false,probe_status='pending',last_probe_error=NULL,last_probe_at=NULL,updated_at=now() WHERE id=$1`, [id])
       await client.query(`INSERT INTO config_audit_logs(actor_user_id,resource_type,resource_id,before_value,after_value) VALUES($1,'video_provider_key',$2,NULL,$3)`, [actorId || null, id, JSON.stringify({ action: 'rotate', enabled: false, probeStatus: 'pending' })])
@@ -463,6 +483,7 @@ export class VideoKeyService {
       else message = '连接测试通过（未发起视频生成）'
     } catch { /* never persist provider response bodies or credentials */ }
     await this.db.tx(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
       // A rotation can happen while the network probe is in flight. Match the
       // encrypted credential captured above so a stale probe cannot re-enable
       // or mark the replacement credential as passed.
@@ -477,9 +498,9 @@ export class VideoKeyService {
   /** Restore missing local accepted usage without changing provider quota or billing. */
   async reconcileUsage(id: string, actorId?: string): Promise<VideoUsageReconciliation> {
     return this.db.tx(async (client) => {
-      // Acceptance locks task -> usage -> key. Do not lock the key or task
-      // here: the usage lock serializes this repair with reservations and
-      // settlements, and a nondecreasing repair cannot erase either.
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
+      // The common advisory lock precedes all quota/key/task row locks.
+      // Keep this repair nondecreasing so it cannot erase accepted usage.
       const row = await one<VideoKeyRow>(client, 'SELECT * FROM video_provider_keys WHERE id=$1', [id])
       if (!row) throw Object.assign(new Error('视频 Key 不存在'), { statusCode: 404 })
       const day = usageDayForTimezone(row.timezone)
@@ -517,6 +538,7 @@ export class VideoKeyService {
   async resetUsage(id: string, reason: string, actorId?: string): Promise<void> {
     if (String(reason || '').trim().length < 4) throw new Error('请填写至少 4 个字符的重置原因')
     await this.db.tx(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
       const row = await one<VideoKeyRow>(client, 'SELECT * FROM video_provider_keys WHERE id=$1', [id])
       if (!row) throw Object.assign(new Error('视频 Key 不存在'), { statusCode: 404 })
       const day = usageDayForTimezone(row.timezone)
@@ -554,13 +576,14 @@ export class VideoKeyService {
   }
 
   private async reserveInTransaction(client: DbClient, taskId: string, amount: number): Promise<VideoKeySelection | null> {
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
     const rows = await query<VideoKeyRow>(client, `SELECT vk.*,c.base_url,c.encrypted_api_key,
-      (SELECT count(*)::int FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id AND mt.status IN ('queued','submitting','processing','unknown')) AS active_count
+      (SELECT count(*)::int FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id AND (mt.status IN ('queued','submitting','processing','unknown') OR mt.provider_quota_uncertain)) AS active_count
       FROM video_provider_keys vk JOIN channels c ON c.id=vk.channel_id
       WHERE c.base_url=$1 AND c.enabled AND c.deleted_at IS NULL AND c.encrypted_api_key IS NOT NULL
         AND vk.enabled AND vk.video_generation_enabled AND vk.probe_status='passed'
         AND (vk.cooldown_until IS NULL OR vk.cooldown_until<=now())
-      ORDER BY COALESCE((SELECT count(*) FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id AND mt.status IN ('queued','submitting','processing','unknown')),0), vk.latency_ewma_ms NULLS LAST, vk.latency_p95_ms NULLS LAST, vk.priority, vk.id
+      ORDER BY COALESCE((SELECT count(*) FROM media_tasks mt WHERE mt.video_provider_key_id=vk.id AND (mt.status IN ('queued','submitting','processing','unknown') OR mt.provider_quota_uncertain)),0), vk.latency_ewma_ms NULLS LAST, vk.latency_p95_ms NULLS LAST, vk.priority, vk.id
       FOR UPDATE OF vk SKIP LOCKED`, [AGNES_VIDEO_BASE_URL])
     type RankedVideoRow = VideoKeyRow & {
       activeCount?: number | string | null
@@ -589,7 +612,7 @@ export class VideoKeyService {
       // the lock so max_concurrency is enforced against committed work.
       const activeRow = await one<{ count: number | string }>(client,
         `SELECT count(*)::int AS count FROM media_tasks
-         WHERE video_provider_key_id=$1 AND status IN ('queued','submitting','processing','unknown')`, [row.id])
+         WHERE video_provider_key_id=$1 AND (status IN ('queued','submitting','processing','unknown') OR provider_quota_uncertain)`, [row.id])
       const active = Number(activeRow?.count || 0)
       if (active >= Number(row.max_concurrency) || Number(usage.used_seconds) + Number(usage.reserved_seconds) + amount > Number(usage.limit_seconds)) continue
       const updated = await one<any>(client, `UPDATE video_key_usage_daily SET reserved_seconds=reserved_seconds+$3,updated_at=now() WHERE key_id=$1 AND usage_day=$2 AND used_seconds+reserved_seconds+$3<=limit_seconds RETURNING reserved_seconds`, [row.id, day, amount])
@@ -614,11 +637,12 @@ export class VideoKeyService {
   async acceptTask(taskId: string, upstreamTaskId: string): Promise<boolean> {
     if (!String(upstreamTaskId || '').trim() || String(upstreamTaskId).length > 256) return false
     return this.db.tx(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
       const task = await one<any>(client, 'SELECT * FROM media_tasks WHERE id=$1 FOR UPDATE', [taskId])
-      if (!task || !task.video_provider_key_id || !task.quota_day || Number(task.quota_seconds_reserved || 0) <= 0) return false
+      if (!task || task.upstream_id || !['submitting','unknown'].includes(task.status) || !task.video_provider_key_id || !task.quota_day || Number(task.quota_seconds_reserved || 0) <= 0) return false
       const amount = Number(task.quota_seconds_reserved)
       await client.query(`UPDATE video_key_usage_daily SET reserved_seconds=GREATEST(0,reserved_seconds-$3),used_seconds=used_seconds+$3,updated_at=now() WHERE key_id=$1 AND usage_day=$2`, [task.video_provider_key_id, task.quota_day, amount])
-      await client.query(`UPDATE media_tasks SET quota_seconds_used=quota_seconds_used+$2,quota_seconds_reserved=0,upstream_id=COALESCE(upstream_id,$3) WHERE id=$1 AND upstream_id IS NULL`, [taskId, amount, upstreamTaskId])
+      await client.query(`UPDATE media_tasks SET quota_seconds_used=quota_seconds_used+$2,quota_seconds_reserved=0,upstream_id=COALESCE(upstream_id,$3),status='processing',accepted_at=COALESCE(accepted_at,now()),uncertain_since=NULL,error_message=NULL,lease_until=NULL,next_poll_at=now()+interval '5 seconds' WHERE id=$1 AND upstream_id IS NULL`, [taskId, amount, upstreamTaskId])
       await client.query(`UPDATE video_provider_keys SET success_count=success_count+1,last_success_at=now(),failure_count=0,cooldown_until=NULL,updated_at=now() WHERE id=$1`, [task.video_provider_key_id])
       await client.query(`UPDATE video_attempts SET outcome='accepted',accepted=true,upstream_task_id=$2
         WHERE task_id=$1 AND attempt_no=(SELECT max(attempt_no) FROM video_attempts WHERE task_id=$1)`, [taskId, upstreamTaskId])
@@ -628,8 +652,9 @@ export class VideoKeyService {
 
   async releaseTaskReservation(taskId: string): Promise<boolean> {
     return this.db.tx(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('video-quota-ledger'))")
       const task = await one<any>(client, 'SELECT * FROM media_tasks WHERE id=$1 FOR UPDATE', [taskId])
-      if (!task || !task.video_provider_key_id || !task.quota_day || Number(task.quota_seconds_reserved || 0) <= 0) return false
+      if (!task || task.upstream_id || task.provider_quota_uncertain || !task.video_provider_key_id || !task.quota_day || Number(task.quota_seconds_reserved || 0) <= 0) return false
       const amount = Number(task.quota_seconds_reserved)
       await client.query(`UPDATE video_key_usage_daily SET reserved_seconds=GREATEST(0,reserved_seconds-$3),released_seconds=released_seconds+$3,updated_at=now() WHERE key_id=$1 AND usage_day=$2`, [task.video_provider_key_id, task.quota_day, amount])
       await client.query('UPDATE media_tasks SET quota_seconds_reserved=0 WHERE id=$1', [taskId])
@@ -638,7 +663,7 @@ export class VideoKeyService {
   }
 
   async recordAttempt(input: { taskId: string; keyId?: string | null; attemptNo: number; statusCode?: number | null; outcome: string; durationMs?: number | null; errorCode?: string | null; errorMessage?: string | null; upstreamTaskId?: string | null; accepted?: boolean }): Promise<void> {
-    await this.db.query(`INSERT INTO video_attempts(task_id,key_id,attempt_no,status_code,outcome,duration_ms,error_code,error_message,upstream_task_id,accepted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(task_id,attempt_no) DO UPDATE SET status_code=EXCLUDED.status_code,outcome=EXCLUDED.outcome,duration_ms=EXCLUDED.duration_ms,error_code=EXCLUDED.error_code,error_message=EXCLUDED.error_message,upstream_task_id=EXCLUDED.upstream_task_id,accepted=EXCLUDED.accepted`, [input.taskId, input.keyId || null, integer(input.attemptNo, 1, 1, 1_000_000), input.statusCode ?? null, input.outcome, input.durationMs ?? null, input.errorCode || null, input.errorMessage ? String(input.errorMessage).slice(0, 500) : null, input.upstreamTaskId || null, Boolean(input.accepted)])
+    await this.db.query(`INSERT INTO video_attempts(task_id,key_id,attempt_no,status_code,outcome,duration_ms,error_code,error_message,upstream_task_id,accepted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(task_id,attempt_no) DO UPDATE SET status_code=EXCLUDED.status_code,outcome=EXCLUDED.outcome,duration_ms=EXCLUDED.duration_ms,error_code=EXCLUDED.error_code,error_message=EXCLUDED.error_message,upstream_task_id=EXCLUDED.upstream_task_id,accepted=EXCLUDED.accepted WHERE NOT video_attempts.accepted OR EXCLUDED.accepted`, [input.taskId, input.keyId || null, integer(input.attemptNo, 1, 1, 1_000_000), input.statusCode ?? null, input.outcome, input.durationMs ?? null, input.errorCode || null, input.errorMessage ? String(input.errorMessage).slice(0, 500) : null, input.upstreamTaskId || null, Boolean(input.accepted)])
     if (!input.keyId) return
     if (input.durationMs != null && Number.isFinite(Number(input.durationMs))) {
       await this.db.query(`UPDATE video_provider_keys SET

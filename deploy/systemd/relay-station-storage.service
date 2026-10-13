@@ -1,0 +1,12 @@
+[Unit]
+Description=Relay Station scoped storage and backup verification
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/relay-station
+ExecStart=/usr/bin/python3 /opt/relay-station/scripts/host-maintenance.py --verify-backup --apply
+TimeoutStartSec=30min
+Nice=15
+IOSchedulingClass=idle

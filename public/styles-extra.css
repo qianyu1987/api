@@ -647,3 +647,9 @@ td.admin-action-cell { display: table-cell; vertical-align: middle; }
   #view-chat .chat-tools { grid-column: 1 / -1; }
   #view-chat .chat-tools button { flex: 1; }
 }
+
+.operations-toolbar label { display: flex; align-items: center; gap: 10px; color: var(--ink); font-size: 13px; }
+.operations-toolbar select { width: auto; min-width: 126px; }
+#admin-content { min-width: 0; }
+#admin-content .summary-strip strong { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .operations-toolbar { align-items: stretch; flex-direction: column; } .operations-toolbar label { justify-content: space-between; } }

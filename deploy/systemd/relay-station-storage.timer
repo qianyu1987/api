@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Relay Station storage maintenance
+
+[Timer]
+OnCalendar=*-*-* 05:30:00 Asia/Shanghai
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target
