@@ -44,7 +44,7 @@
 | 本站 Docker 镜像 | 至少保留最近 3 个、运行/停止容器引用及 rollback 标签；仅删除 relay-station 仓库 14 天前版本 |
 | 构建缓存 | 仅已存在的 relay-station-cache 独立 builder 清理 7 天前缓存；共享缓存只监测，禁止全局 prune |
 
-scripts/host-maintenance.py 默认 dry run；--verify-backup 会创建每日备份并在独立临时库完整 pg_restore，结束删除临时库和容器内副本。--apply 必须同时有本次完整恢复成功才能清理。恢复失败持久化告警并禁止清理。systemd storage timer 为北京时间每日 05:30，随机延迟最多 10 分钟。
+scripts/host-maintenance.py 默认 dry run；--verify-backup 会创建每日备份并在独立临时库完整 pg_restore，结束删除临时库和容器内副本。--apply 必须同时有本次完整恢复成功才能清理。恢复失败持久化告警并禁止清理。systemd storage timer 为北京时间每日 05:30，定时精度 10 分钟；安装前确认宿主机为 Asia/Shanghai（兼容 systemd 219）。
 
 告警：磁盘 80% / 90%；备份目录 20 GiB；本站镜像 30 个；共享构建缓存 8 / 16 GiB；单表 1 GiB；主机采样超 24 小时；支付成功超 1 分钟未到账；备份未验证/恢复失败。告警只在现有后台展示，不发送外部消息。
 
