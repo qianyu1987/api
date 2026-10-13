@@ -463,3 +463,14 @@
 - Node22 全量 29 文件 / 380 项、Python 4 项、隔离 PostgreSQL 29 项通过；类型检查、构建、前端语法、diff 检查通过；官方 npm audit 含开发依赖为 0 告警。两个连接池并发预留严格 500 秒；全部供应商响应均 mock，无真实支付或视频生成。
 - Chrome1440/390经营/视频后台检查通过，无整体溢出/JS异常。截图与验证归档在 /Volumes/brainos/CodexMedia/generated/relay-station-stability-20261013/。设计检测为解析器缺失的降级扫描。
 - 此记录先描述已完成代码和隔离验收；生产仍为 v1.0.114，后续发布成功需追加真实备份、镜像和健康证据。
+
+## v1.0.115 生产发布完成：2026-10-13 22:52 CST
+
+- 应用提交 `9519c9f`，systemd219兼容修正 `03d81f7`，多视频Key分配后查询渠道持久化修正 `116d253`。最终发布归档 SHA-256 `5d7ea6e7280f4418684c72a768bf77c8ecba7180c34a52bed86395baee29d29f`；目录 `/Volumes/brainos/CodexMedia/generated/relay-station-stability-20261013/`。
+- 发布前备份 `/opt/relay-station-backups/pre-v1.0.115-stability-20261013/` 包含 custom dump（787490825字节、0600、pg_restore列表验证）、生产.env/Compose/旧源码；保留 `relay-station:rollback-pre-v1.0.115`。每日备份脚本另建立 `/opt/relay-station-backups/pre-storage-20261013/database.dump`，完整恢复到隔离临时库并验证users后删除临时库，`backupVerified=true`。
+- 最终镜像 `sha256:abe57ab2d5f5259fbf5df2931c7e5cbdcdae8fec6a138c237f8793df07fa20fe`。先验证canary、将新流量切入后等待旧副本连接归零，再替换两个正式副本。Nginx因旧bind-mount inode仍引用旧文件，已重新绑定运行时配置并reload；当前实际上游 `api:3000`，宿主配置相同。最终两个API均为v1.0.115/healthy；Gateway、Redis、PostgreSQLhealthy。
+- 两副本均只读验证 `/healthz`、首页、管理员operations及视频overview/keys/queue/settings为200，首页静态资源v1.0.115，普通未登录operations401；www/api健康200。最终镜像也跑过隔离数据库29项，最后渠道持久化修复补充为30项隔离检查；局部120项通过，此前完整380项与Python4项全部通过。
+- 生产真实Chrome桌面1440和手机390的经营/视频后台检查通过，无整体横向溢出、无JS异常，静态版本一致。截图与JSON证据在发布目录。未发起新的支付、视频或模型计费请求；canary/正式副本仅沿用已有队列维护行为。
+- 维护worker运行完成，目录非计费复核建立模型兼容数据；当前Terra4个、gpt-6.1-sol7个健康目录映射均compatible=true。未改渠道映射、售价、AgnesKey或历史账务。管理设置再次确认最低毛利1500bps、全站1000bps、深夜启用2000bps、指定折扣模式true。
+- 完整恢复dry-run采集磁盘使用72.88%、空闲29098618880字节、项目备份20112861838字节、本站镜像130个、共享构建缓存9394000000字节。计划仅清理96个本站旧镜像，未执行本次删除；共享缓存跳过。`relay-station-storage.timer` 已通过systemd219验证并active，下一次北京时间2026-10-14 05:30；worker.timer active。风险告警由worker写入后台。
+- 普通用户当前滚动7日快照2419次/2302成功（约95.16%），未到账0；新健康指标从上线开始积累，不能称已达到97%。Agnes历史任务失效及上游真实余量仍需供应商确认；本次没有新真实生成来证明成功率。
