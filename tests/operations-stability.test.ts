@@ -121,7 +121,7 @@ describe('HTTP stability and accounting boundary',()=>{
  test('static pages still serve with the upgraded Fastify plugins',async()=>{
   const s=await fixture();try{
    const page=await s.app.inject({url:'/'})
-   expect(page.statusCode).toBe(200);expect(page.headers['content-type']).toContain('text/html');expect(page.body).toContain('app.js?v=1.0.115')
+   expect(page.statusCode).toBe(200);expect(page.headers['content-type']).toContain('text/html');expect(page.body).toContain('app.js?v=1.0.116')
    expect((await s.app.inject({url:'/src/db/schema.sql'})).statusCode).toBe(404)
    const cookie='relay_session='+s.app.jwt.sign({sub:'user',exp:Math.floor(Date.now()/1000)-60})
    expect((await s.app.inject({url:'/api/admin/operations',headers:{cookie}})).statusCode).toBe(401)

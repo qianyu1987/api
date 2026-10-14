@@ -1351,6 +1351,9 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
     try {
       const b = (request.body || {}) as any
       const pattern = cleanText(b.modelPattern || '*', '模型匹配', 256)
+      if (b.priceSource != null && typeof b.priceSource !== 'string') throw Object.assign(new Error('价格来源必须是文字，最多 512 字'), { statusCode: 400 })
+      const priceSource = String(b.priceSource ?? '').trim() || '管理员手动定价'
+      if (priceSource.length > 512) throw Object.assign(new Error('价格来源最多 512 字，请缩短后保存'), { statusCode: 400 })
       const value = (yuanName: string, microsName: string, label: string) => (
         b[yuanName] !== undefined ? yuanInput(b[yuanName], label) : moneyInput(b[microsName] ?? 0, label)
       )
@@ -1363,7 +1366,7 @@ export async function buildApp(inputConfig = loadConfig()): Promise<RelayApp> {
         value('outputSellYuanPerMillion', 'outputSellMicrosPerMillion', '输出售价'),
         value('cacheSellYuanPerMillion', 'cacheSellMicrosPerMillion', '缓存售价'),
         moneyInput(b.fixedCostMicros ?? 0, '固定成本'), moneyInput(b.fixedSellMicros ?? 0, '固定售价'), b.active !== false,
-        cleanText(b.priceSource, '价格来源', 512), b.priceEffectiveAt ? new Date(String(b.priceEffectiveAt)) : new Date(), b.fxRateMicros ? moneyInput(b.fxRateMicros, '汇率') : null,
+        priceSource, b.priceEffectiveAt ? new Date(String(b.priceEffectiveAt)) : new Date(), b.fxRateMicros ? moneyInput(b.fxRateMicros, '汇率') : null,
       ]
       const rules = await profit.overview()
       for (const [label, cost, sell] of [['输入', values[1], values[4]], ['输出', values[2], values[5]], ['缓存', values[3], values[6]]] as const) {

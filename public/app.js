@@ -716,7 +716,7 @@
     }
     if (tab === 'prices') {
       const inputs = ['input', 'output', 'cache'].flatMap((name) => [field(name + 'CostYuanPerMillion', (name === 'input' ? '输入' : name === 'output' ? '输出' : '缓存') + '成本（元/百万 Token）', '0', 'text', 'data-price-cost="' + name + '"'), field(name + 'SellYuanPerMillion', (name === 'input' ? '输入' : name === 'output' ? '输出' : '缓存') + '售价（元/百万 Token）', '0')])
-      const editor = form('price', [field('modelPattern', '模型匹配', '*', 'text', 'required'), field('marginBps', '目标毛利率（基点）', '8000', 'number', 'min="0" max="9999" data-margin'), ...inputs, check('active', '启用'), '<p class="admin-note wide">所有上下文长度统一使用标准用户售价；上游超过 272K 的成本倍率只在“渠道成本”中维护，不改变用户售价。售价按目标毛利率自动计算；数据库仍以微元/百万 Token 保存。</p>'], '保存模型价格')
+      const editor = form('price', [field('modelPattern', '模型匹配', '*', 'text', 'required'), field('marginBps', '目标毛利率（基点）', '8000', 'number', 'min="0" max="9999" data-margin'), ...inputs, field('priceSource', '价格来源（可选）', '管理员手动定价', 'text', 'maxlength="512"'), check('active', '启用'), '<p class="admin-note wide">所有上下文长度统一使用标准用户售价；上游超过 272K 的成本倍率只在“渠道成本”中维护，不改变用户售价。售价按目标毛利率自动计算；数据库仍以微元/百万 Token 保存。</p><p id="model-price-error" class="form-error wide" role="alert"></p>'], '保存模型价格')
       const rows = items.map((item) => '<tr><td><strong>' + esc(item.model_pattern) + '</strong><small class="subline">' + esc(item.price_source || '手工设置') + '</small></td><td>' + money({ micros: rate(item, 'input_sell') }) + '<small class="subline">成本 ' + money({ micros: rate(item, 'input_cost') }) + ' · ' + margin(rate(item, 'input_cost'), rate(item, 'input_sell')) + '</small></td><td>' + money({ micros: rate(item, 'output_sell') }) + '<small class="subline">成本 ' + money({ micros: rate(item, 'output_cost') }) + ' · ' + margin(rate(item, 'output_cost'), rate(item, 'output_sell')) + '</small></td><td>' + money({ micros: rate(item, 'cache_sell') }) + '</td><td><span class="state ' + (item.active ? 'good' : 'bad') + '">' + (item.active ? '启用' : '停用') + '</span></td><td class="admin-action-cell"><button class="small-button admin-edit" type="button" data-kind="price" data-item="' + esc(JSON.stringify(item)) + '">编辑</button><button class="small-button danger-button admin-delete" type="button" data-kind="price" data-id="' + esc(item.id) + '">停用</button></td></tr>')
       return '<div class="admin-toolbar"><p>只会初始化已启用渠道实际映射的模型；上游页面标注为美元的数值按人民币 1:1 结算，不再乘以 7.2。用户售价不按 272K 分层。</p><button class="button secondary" type="button" data-bootstrap="openai-prices">按上游 1:1 价格初始化</button></div>' + editor + table(['模型 / 来源', '输入标准售价', '输出标准售价', '缓存标准售价', '状态', '操作'], rows, '尚未配置模型价格')
     }
@@ -840,6 +840,7 @@
     }
     if (kind === 'price') {
       setFormValue(editor, 'modelPattern', item.model_pattern)
+      setFormValue(editor, 'priceSource', item.price_source || '管理员手动定价')
       for (const part of ['input', 'output', 'cache']) { setFormValue(editor, part + 'CostYuanPerMillion', microsToYuan(rate(item, part + '_cost'))); setFormValue(editor, part + 'SellYuanPerMillion', microsToYuan(rate(item, part + '_sell'))) }
       setFormValue(editor, 'active', item.active)
     }
@@ -929,9 +930,10 @@
       if (!confirm('确认保存该渠道的实际人民币成本？新请求立即使用，历史账单不变。')) return
     }
     const button = editor.querySelector('[type="submit"]'); if (button.disabled) return
+    if (kind === 'price') $('#model-price-error').textContent = ''
     const cancel = editor.querySelector('[data-cancel-channel-edit]'); if (cancel) cancel.disabled = true
     pending(button, true, '保存中…')
-    try { await api(endpoint, { method, body: JSON.stringify(payload) }); toast(kind === 'channel' ? (payload.id ? '渠道修改已保存' : '渠道已新增') : kind === 'video-key' ? (payload.id ? '视频 Key 修改已保存' : '视频 Key 已添加') : '已保存'); if (kind === 'site-settings') await loadSite(); await loadAdmin(kind === 'affiliate-settings' ? 'affiliate-admin' : state.adminTab) } catch (error) { if (kind === 'channel-cost') $('#channel-cost-error').textContent = error.message; throw error } finally { pending(button, false); if (cancel) cancel.disabled = false }
+    try { await api(endpoint, { method, body: JSON.stringify(payload) }); toast(kind === 'channel' ? (payload.id ? '渠道修改已保存' : '渠道已新增') : kind === 'video-key' ? (payload.id ? '视频 Key 修改已保存' : '视频 Key 已添加') : '已保存'); if (kind === 'site-settings') await loadSite(); await loadAdmin(kind === 'affiliate-settings' ? 'affiliate-admin' : state.adminTab) } catch (error) { if (kind === 'channel-cost') $('#channel-cost-error').textContent = error.message; if (kind === 'price') $('#model-price-error').textContent = error.message; throw error } finally { pending(button, false); if (cancel) cancel.disabled = false }
   }
   async function deleteAdmin(kind, id, button) {
     const endpoint = { channel: '/api/admin/channels/' + encodeURIComponent(id), price: '/api/admin/prices/' + encodeURIComponent(id), 'fixed-price': '/api/admin/fixed-prices/' + encodeURIComponent(id), plan: '/api/admin/plans/' + encodeURIComponent(id) }[kind]
