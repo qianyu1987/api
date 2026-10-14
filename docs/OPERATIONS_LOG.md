@@ -474,3 +474,10 @@
 - 维护worker运行完成，目录非计费复核建立模型兼容数据；当前Terra4个、gpt-6.1-sol7个健康目录映射均compatible=true。未改渠道映射、售价、AgnesKey或历史账务。管理设置再次确认最低毛利1500bps、全站1000bps、深夜启用2000bps、指定折扣模式true。
 - 完整恢复dry-run采集磁盘使用72.88%、空闲29098618880字节、项目备份20112861838字节、本站镜像130个、共享构建缓存9394000000字节。计划仅清理96个本站旧镜像，未执行本次删除；共享缓存跳过。`relay-station-storage.timer` 已通过systemd219验证并active，下一次北京时间2026-10-14 05:30；worker.timer active。风险告警由worker写入后台。
 - 普通用户当前滚动7日快照2419次/2302成功（约95.16%），未到账0；新健康指标从上线开始积累，不能称已达到97%。Agnes历史任务失效及上游真实余量仍需供应商确认；本次没有新真实生成来证明成功率。
+
+## v1.0.116 模型价格来源兼容修复：2026-10-14
+
+- 根因：模型价格表单没有发送 `priceSource`，而管理接口仍以必填字段校验，因此正常保存价格返回“价格来源无效”。后端现在将缺失、空白和旧表单来源记录为 `管理员手动定价`；显式非文字或超过512字仍拒绝。前端增加可选来源输入、编辑回填和表单内错误提示，未改变金额、最低现金毛利、缓存写入、审计或权限规则。
+- 提交 `89bed88`，版本 v1.0.116；30 个测试文件 / 390 项通过，TypeScript、构建、前端语法、`git diff --check` 和 Impeccable 降级扫描通过。Playwright 本地桌面1440px/手机390px覆盖默认来源、编辑来源、利润错误保留输入和重试成功；无横向溢出或 JS 错误。测试截图与结果在 `/Volumes/brainos/CodexMedia/generated/relay-station-v1.0.116-price-source/`，归档 SHA-256 `85c512caa241cb55cb9341a1b769fcd8cc89a876da1f08732a5b9cb8b6eb202e`。
+- 部署前备份 `/opt/relay-station-backups/pre-v1.0.116-price-source-20261014/`，PostgreSQL custom dump 714850304 字节且 `pg_restore --list` 可读，配置/源码和 `relay-station:rollback-pre-v1.0.116` 保留。灰度生产检查 `/healthz`、首页、静态脚本、管理价格和设置均200；空来源请求进入最低现金毛利校验且未写入数据库，未授权请求401。两个 API 副本、Gateway、PostgreSQL、Redis 均 healthy，www 实际首页 `app.js?v=1.0.116`；线上桌面1440px/手机390px只读检查无溢出或 JS 错误。
+- 本次没有保存用户截图中的价格，没有执行支付、视频或模型生成请求，也没有修改生产价格、成本、折扣、Key 或历史账务。
